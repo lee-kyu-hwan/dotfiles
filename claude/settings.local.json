@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tmux ls:*)",
+      "Bash(tmux list-windows:*)",
+      "Bash(tmux kill-session:*)",
+      "Bash(macism:*)",
+      "Bash(cp /Users/igyuhwan/.tmux.conf /Users/igyuhwan/dotfiles/tmux/.tmux.conf)",
+      "Bash(cp /Users/igyuhwan/.claude/settings.json /Users/igyuhwan/dotfiles/claude/settings.json)",
+      "Bash(cp /Users/igyuhwan/.claude/settings.local.json /Users/igyuhwan/dotfiles/claude/settings.local.json)",
+      "Bash(cp \"/Users/igyuhwan/Library/Preferences/com.googlecode.iterm2.plist\" /Users/igyuhwan/dotfiles/iterm2/com.googlecode.iterm2.plist)"
+    ]
+  }
+}
