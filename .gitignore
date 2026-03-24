@@ -1,9 +1,14 @@
 # Secrets
 .env
+.env.*
 *.key
 *.pem
+*.p12
+*.pfx
 *credentials*
 *secret*
+id_rsa*
+id_ed25519*
 
 # macOS
 .DS_Store
