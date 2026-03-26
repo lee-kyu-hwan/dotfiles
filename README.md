@@ -38,15 +38,40 @@ brew install tmux
 ```bash
 git clone https://github.com/lee-kyu-hwan/dotfiles.git ~/dotfiles
 cd ~/dotfiles
+```
+
+### 전체 설치
+
+```bash
 ./install.sh
 ```
 
-`install.sh`는 다음을 수행한다:
+### 개별 설치
 
-- `macism` 설치 여부 확인 및 설치
-- `.tmux.conf` 심볼릭 링크 생성
-- Claude Code `settings.json`, `settings.local.json` 심볼릭 링크 생성
-- iTerm2 plist 복사
+원하는 구성 요소만 선택하여 설치할 수 있다.
+
+```bash
+./install.sh tmux         # tmux만 설치
+./install.sh claude       # Claude Code만 설치
+./install.sh iterm2       # iTerm2만 설치
+./install.sh tmux claude  # tmux + Claude Code 설치
+```
+
+### 사용법 확인
+
+```bash
+./install.sh --help
+```
+
+## 주의 사항
+
+- **기존 설정이 덮어씌워진다.** 설치 시 기존 로컬 설정 파일이 백업 없이 대체된다. 기존 설정을 보존하려면 설치 전에 직접 백업해야 한다.
+  - tmux: `cp ~/.tmux.conf ~/.tmux.conf.bak`
+  - Claude Code: `cp ~/.claude/settings.json ~/.claude/settings.json.bak`
+  - iTerm2: `cp ~/Library/Preferences/com.googlecode.iterm2.plist ~/Library/Preferences/com.googlecode.iterm2.plist.bak`
+- **tmux, Claude Code 설정은 심볼릭 링크로 연결된다.** 로컬에서 설정을 수정하면 레포의 원본 파일이 함께 변경된다.
+- **iTerm2 설정은 복사본이다.** macOS defaults 시스템과의 호환을 위해 심볼릭 링크가 아닌 복사로 처리된다. iTerm2 설정을 변경해도 레포에 자동 반영되지 않는다.
+- **macism이 필요하다.** tmux 한글 입력 호환 기능은 macism에 의존한다. `./install.sh tmux` 실행 시 자동으로 설치된다.
 
 ## 구성 파일
 
@@ -55,7 +80,6 @@ dotfiles/
 ├── install.sh
 ├── tmux/.tmux.conf
 ├── claude/settings.json
-├── claude/settings.local.json
 └── iterm2/com.googlecode.iterm2.plist
 ```
 
@@ -104,4 +128,3 @@ dotfiles/
 ### Claude Code
 
 - `settings.json`: 플러그인, 권한, 언어 설정
-- `settings.local.json`: 로컬 전용 권한 설정
