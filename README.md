@@ -22,6 +22,7 @@ cd ~/code/dotfiles
 | `git-personal` | Git 개인 환경 | `~/.gitconfig-personal` |
 | `ghostty` | Ghostty 터미널 설정 | `~/.config/ghostty/config` |
 | `claude` | Claude Code 설정 | `~/.claude/settings.json` |
+| `starship` | Starship 프롬프트 설정 | `~/.config/starship.toml` |
 | `brew` | Homebrew 패키지 목록 | `~/.Brewfile` |
 
 ## 사용법
