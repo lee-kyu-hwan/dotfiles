@@ -11,7 +11,7 @@ id_rsa*
 id_ed25519*
 
 # Local settings
-claude/settings.local.json
+claude/.claude/settings.local.json
 
 # macOS
 .DS_Store
