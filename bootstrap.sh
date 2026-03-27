@@ -26,7 +26,13 @@ echo ""
 
 # 1단계: Xcode CLI Tools
 echo "[1/7] Xcode CLI Tools..."
-xcode-select --install 2>/dev/null || echo "  already installed"
+if ! xcode-select -p &>/dev/null; then
+    xcode-select --install
+    echo "  ⏳ 설치 완료 후 이 스크립트를 다시 실행하세요."
+    exit 0
+else
+    echo "  already installed"
+fi
 
 # 2단계: Homebrew
 echo "[2/7] Homebrew..."
@@ -39,12 +45,16 @@ fi
 
 # 3단계: Stow
 echo "[3/7] GNU Stow..."
-brew install stow 2>/dev/null || echo "  already installed"
+if ! command -v stow &>/dev/null; then
+    brew install stow
+else
+    echo "  already installed"
+fi
 
 # 4단계: 공통 Stow 패키지 적용
 echo "[4/7] Stow packages..."
 cd "$DOTFILES_DIR"
-COMMON_PACKAGES=(tmux zsh git ghostty claude brew)
+COMMON_PACKAGES=(tmux zsh git ghostty claude brew starship)
 for pkg in "${COMMON_PACKAGES[@]}"; do
     if [ -d "$pkg" ]; then
         echo "  stow $pkg"
@@ -54,7 +64,11 @@ done
 
 # 5단계: Brewfile로 패키지 일괄 설치
 echo "[5/7] Brew bundle..."
-brew bundle --global --no-lock
+if [ -f "$HOME/.Brewfile" ]; then
+    brew bundle --global --no-lock
+else
+    echo "  ⚠️ ~/.Brewfile not found, skipping"
+fi
 
 # 6단계: 환경별 패키지
 echo "[6/7] Profile packages..."
@@ -72,6 +86,7 @@ if [ -z "$PROFILE" ]; then
 fi
 
 if [ -n "$PROFILE" ]; then
+    shopt -s nullglob
     for pkg_dir in "$DOTFILES_DIR"/*-"$PROFILE"; do
         if [ -d "$pkg_dir" ]; then
             pkg_name=$(basename "$pkg_dir")
@@ -79,6 +94,7 @@ if [ -n "$PROFILE" ]; then
             stow --verbose=0 --target="$HOME" --restow "$pkg_name"
         fi
     done
+    shopt -u nullglob
     echo "  profile: $PROFILE"
 else
     echo "  skipped"
@@ -86,7 +102,29 @@ fi
 
 # 7단계: 후처리
 echo "[7/7] Post-install..."
-tmux source-file ~/.tmux.conf 2>/dev/null && echo "  tmux config reloaded" || true
+if command -v tmux &>/dev/null && tmux list-sessions &>/dev/null; then
+    tmux source-file ~/.tmux.conf && echo "  tmux config reloaded"
+else
+    echo "  tmux: no active session (skipped)"
+fi
 
+# 검증
 echo ""
-echo "✅ dotfiles 설치 완료!"
+echo "=== 설치 검증 ==="
+errors=0
+for file in .tmux.conf .zshrc .gitconfig .Brewfile .claude/settings.json .config/starship.toml; do
+    if [ -L "$HOME/$file" ]; then
+        echo "  ✅ ~/$file"
+    else
+        echo "  ❌ ~/$file (symlink 없음)"
+        ((errors++)) || true
+    fi
+done
+
+if [ $errors -eq 0 ]; then
+    echo ""
+    echo "✅ dotfiles 설치 완료!"
+else
+    echo ""
+    echo "⚠️ $errors개 항목에 문제가 있습니다. 기존 파일 충돌을 확인하세요."
+fi
