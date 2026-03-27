@@ -1,28 +1,39 @@
+# Taps
 tap "laishulu/homebrew"
+
+# CLI Tools
 brew "awscli"
-brew "cocoapods"
-brew "node"
-brew "gemini-cli"
 brew "gh"
 brew "git"
 brew "git-lfs"
-brew "mysql@8.0"
-brew "openjdk@17"
-brew "pipx"
+brew "node"
 brew "pnpm"
-brew "poppler"
+brew "pipx"
 brew "python@3.12"
-brew "redis", restart_service: :changed
 brew "ripgrep"
 brew "starship"
 brew "stow"
 brew "tmux"
 brew "tree"
 brew "laishulu/homebrew/macism"
+
+# Languages & Runtimes
+brew "cocoapods"
+brew "gemini-cli"
+brew "openjdk@17"
+
+# Data
+brew "mysql@8.0"
+brew "poppler"
+brew "redis", restart_service: :changed
+
+# Casks
 cask "copilot-cli"
 cask "font-meslo-lg-nerd-font"
-cask "iterm2"
+cask "ghostty"
 cask "reactotron"
+
+# VS Code Extensions
 vscode "afmicc.getterandsettergenerator"
 vscode "albert.tabout"
 vscode "amodio.tsl-problem-matcher"
@@ -52,22 +63,12 @@ vscode "kisstkondoros.vscode-gutter-preview"
 vscode "mhutchie.git-graph"
 vscode "mikestead.dotenv"
 vscode "mongodb.mongodb-vscode"
-vscode "ms-azuretools.vscode-containers"
 vscode "ms-azuretools.vscode-docker"
 vscode "ms-ceintl.vscode-language-pack-ko"
-vscode "ms-vscode-remote.remote-containers"
-vscode "ms-vscode-remote.remote-ssh"
-vscode "ms-vscode-remote.remote-ssh-edit"
-vscode "ms-vscode-remote.remote-wsl"
 vscode "ms-vscode-remote.vscode-remote-extensionpack"
-vscode "ms-vscode.azure-repos"
-vscode "ms-vscode.remote-explorer"
-vscode "ms-vscode.remote-repositories"
-vscode "ms-vscode.remote-server"
 vscode "ms-vscode.vscode-typescript-next"
 vscode "msjsdiag.vscode-react-native"
 vscode "openai.chatgpt"
-vscode "pablodelucca.pixel-agents"
 vscode "pkief.material-icon-theme"
 vscode "postman.postman-for-vscode"
 vscode "redhat.fabric8-analytics"
