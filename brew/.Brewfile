@@ -24,12 +24,10 @@ brew "openjdk@17"
 
 # Data
 brew "mysql@8.0"
-brew "poppler"
 brew "redis", restart_service: :changed
 
 # Casks
 cask "claude-code"
 cask "copilot-cli"
-cask "font-meslo-lg-nerd-font"
 cask "ghostty"
 cask "reactotron"
