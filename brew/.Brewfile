@@ -23,7 +23,6 @@ brew "gemini-cli"
 brew "openjdk@17"
 
 # Data
-brew "mysql@8.0"
 brew "redis", restart_service: :changed
 
 # Casks
