@@ -1,0 +1,14 @@
+[user]
+name = 이규환
+
+[filter "lfs"]
+clean = git-lfs clean -- %f
+smudge = git-lfs smudge -- %f
+process = git-lfs filter-process
+required = true
+
+[includeIf "gitdir:~/code/work/"]
+path = ~/.gitconfig-work
+
+[includeIf "gitdir:~/code/personal/"]
+path = ~/.gitconfig-personal
