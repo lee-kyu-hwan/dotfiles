@@ -28,7 +28,7 @@ brew "poppler"
 brew "redis", restart_service: :changed
 
 # Casks
-cask "claude"
+cask "claude-code"
 cask "copilot-cli"
 cask "font-meslo-lg-nerd-font"
 cask "ghostty"
