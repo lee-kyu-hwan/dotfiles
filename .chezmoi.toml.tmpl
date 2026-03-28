@@ -1,4 +1,6 @@
-{{- $machine_type := promptChoiceOnce "machine_type" "Machine type (work-mac: ALA 회사맥북, personal: 개인맥북, server: Linux 개발서버)" (list "work-mac" "personal" "server") }}
+{{- $machine_type := promptChoiceOnce . "machine_type" "Machine type (work-mac: ALA 회사맥북, personal: 개인맥북, server: Linux 개발서버)" (list "work-mac" "personal" "server") }}
+
+sourceDir = "{{ .chezmoi.sourceDir }}"
 
 [data]
   machine_type = "{{ $machine_type }}"
