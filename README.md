@@ -54,9 +54,84 @@ chezmoi diff
 chezmoi edit ~/.zshrc
 ```
 
+`chezmoi edit`으로 수정하면 저장 시 자동으로 apply + commit + push됩니다.
+
 ## Git 환경별 설정
 
 `includeIf`로 디렉토리 기반 자동 분기:
 
 - `~/code/work/` 하위 → `.gitconfig-work` (회사 이메일)
 - `~/code/personal/` 하위 → `.gitconfig-personal` (개인 이메일)
+
+## 주의사항
+
+### 설정 수정은 반드시 `chezmoi edit`으로
+
+```bash
+# O — source repo에 반영되고 자동 commit + push
+chezmoi edit ~/.zshrc
+
+# X — $HOME 파일만 바뀌고 repo에는 반영 안 됨
+vim ~/.zshrc
+```
+
+직접 `~/.zshrc`를 수정하면 다음 `chezmoi apply` 시 **덮어써집니다.**
+
+### source 파일을 직접 수정한 경우
+
+```bash
+# 1. 변경사항 확인
+chezmoi diff
+
+# 2. $HOME에 적용
+chezmoi apply
+
+# 3. git commit + push는 수동으로
+git add -A && git commit -m "설명" && git push
+```
+
+`chezmoi edit`이 아닌 직접 source 수정 시에는 auto commit/push가 동작하지 않습니다.
+
+### 새 머신에 설치할 때
+
+```bash
+git clone https://github.com/lee-kyu-hwan/dotfiles.git ~/code/dotfiles
+cd ~/code/dotfiles
+./bootstrap.sh
+```
+
+`bootstrap.sh`가 chezmoi 설치 → diff 미리보기 → 확인 후 apply까지 처리합니다. 기존 파일이 있으면 `.bak`으로 백업 후 교체합니다.
+
+### 이직 시
+
+`dot_gitconfig-work`의 email만 변경하면 됩니다:
+
+```bash
+chezmoi edit ~/.gitconfig-work
+```
+
+### 파일 추가하기
+
+```bash
+# 1. 기존 설정 파일을 chezmoi에 등록
+chezmoi add ~/.config/새앱/config
+
+# 2. 자동으로 source repo에 dot_config/새앱/config 생성
+
+# 3. server에서 제외하려면 .chezmoiignore에 추가
+chezmoi edit-config-template  # 또는 직접 .chezmoiignore 수정
+```
+
+### OS 분기가 필요한 파일
+
+`.tmpl` 확장자를 붙이고 Go 템플릿 문법 사용:
+
+```
+{{ if eq .chezmoi.os "darwin" }}
+macOS 전용 설정
+{{ else }}
+Linux 전용 설정
+{{ end }}
+```
+
+현재 OS 분기 파일: `.tmux.conf`, `.zshrc`
