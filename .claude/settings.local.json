@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(find /Users/leekyuhwan/code/dotfiles -not -path */.git/* -type f)",
+      "Bash(sw_vers)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(chezmoi apply:*)"
+    ]
+  }
+}

@@ -3,18 +3,6 @@ docs/**
 bootstrap.sh
 LICENSE
 
-# stow 잔재 (마이그레이션 기간 동안 chezmoi가 무시)
-tmux/**
-zsh/**
-git/**
-git-work/**
-git-personal/**
-ghostty/**
-claude/**
-brew/**
-starship/**
-.stow-local-ignore
-
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
 .Brewfile
