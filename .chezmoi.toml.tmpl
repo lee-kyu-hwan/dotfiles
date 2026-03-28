@@ -4,3 +4,10 @@ sourceDir = "{{ .chezmoi.sourceDir }}"
 
 [data]
   machine_type = "{{ $machine_type }}"
+
+[edit]
+  apply = true
+
+[git]
+  autoCommit = true
+  autoPush = true
