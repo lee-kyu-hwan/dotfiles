@@ -12,6 +12,12 @@ return {
     },
     config = function()
       require("neo-tree").setup({
+        window = {
+          mappings = {
+            ["z"] = "close_all_nodes",
+            ["Z"] = "expand_all_nodes",
+          },
+        },
         filesystem = {
           follow_current_file = { enabled = true },
           filtered_items = {
