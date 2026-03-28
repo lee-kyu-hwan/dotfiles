@@ -1,0 +1,57 @@
+set -g mouse on
+
+{{ if eq .chezmoi.os "darwin" -}}
+# ============================================================
+# 한글 입력 호환 설정 (macOS only)
+# ============================================================
+
+# --- 1. Ctrl+B 누르는 순간 영문 전환 (핵심) ---
+set -g prefix M-F12
+bind -n C-b {
+    run-shell "macism com.apple.keylayout.ABC"
+    switch-client -T prefix
+}
+bind C-b send-keys C-b
+
+# --- 1-1. 자음 바인딩 (안전망) ---
+bind ㅈ choose-tree -Zw         # w
+bind ㅊ new-window              # c
+bind ㄷ detach-client            # d
+bind ㅜ next-window              # n
+bind ㅍ previous-window          # p
+bind ㅌ confirm-before -p "kill-pane #P? (y/n)" kill-pane  # x
+bind ㅋ resize-pane -Z           # z
+bind ㄴ choose-tree -Zs          # s
+bind ㅐ select-pane -t :.+       # o
+bind ㅣ select-layout next       # l
+bind ㅂ display-panes            # q
+bind ㅅ clock-mode               # t
+
+# --- 2. macism 훅 (상태 초기화) ---
+set-hook -g after-select-pane   'run-shell "macism com.apple.keylayout.ABC"'
+set-hook -g after-select-window 'run-shell "macism com.apple.keylayout.ABC"'
+set-hook -g pane-focus-in       'run-shell "macism com.apple.keylayout.ABC"'
+
+# --- 3. 명령어 모드 강제 전환 ---
+bind : run-shell "macism com.apple.keylayout.ABC" \; command-prompt
+
+{{ else -}}
+# ============================================================
+# Linux: 표준 prefix
+# ============================================================
+set -g prefix C-b
+bind C-b send-prefix
+
+{{ end -}}
+# ============================================================
+# Pane 구분: 비활성 pane 어둡게 처리
+# ============================================================
+set -g window-style 'bg=colour235'
+set -g window-active-style 'bg=colour0'
+set -g pane-border-style fg=colour238
+set -g pane-active-border-style fg=colour51
+
+# ============================================================
+# Pane 레이아웃 정렬
+# ============================================================
+bind = select-layout even-horizontal
