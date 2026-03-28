@@ -1,0 +1,10 @@
+gui:
+  showIcons: true
+  nerdFontsVersion: "3"
+  theme:
+    lightTheme: false
+git:
+  paging:
+    pager: "delta --dark --paging=never"
+os:
+  editPreset: "nvim"
