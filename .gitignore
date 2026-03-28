@@ -10,8 +10,9 @@
 id_rsa*
 id_ed25519*
 
-# Local settings (chezmoi source 방어)
+# Local settings
 dot_claude/settings.local.json
+.claude/settings.local.json
 
 # macOS
 .DS_Store
