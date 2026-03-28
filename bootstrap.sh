@@ -97,7 +97,7 @@ echo "[5/6] chezmoi apply..."
 # 6. Brew bundle (macOS only)
 if [[ "$(uname)" == "Darwin" ]] && [ -f "$HOME/.Brewfile" ]; then
     echo "[6/6] Brew bundle..."
-    brew bundle --global --no-lock
+    brew bundle --global
 else
     echo "[6/6] Brew bundle... skipped (not macOS)"
 fi
