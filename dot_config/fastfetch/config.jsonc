@@ -3,10 +3,7 @@
   "logo": {
     "source": "~/.config/fastfetch/macgraw.txt",
     "type": "file",
-    "padding": {
-      "top": 1,
-      "right": 2
-    }
+    "position": "top"
   },
   "display": {
     "separator": " → "
@@ -21,7 +18,6 @@
     "terminal",
     "cpu",
     "memory",
-    "disk",
     "packages",
     "uptime"
   ]
