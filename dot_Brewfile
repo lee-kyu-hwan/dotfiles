@@ -5,10 +5,15 @@ tap "laishulu/homebrew"
 
 # CLI Tools
 brew "awscli"
+brew "bat"
+brew "delta"
+brew "eza"
 brew "fd"
+brew "fzf"
 brew "gh"
 brew "git"
 brew "git-lfs"
+brew "jq"
 brew "lazygit"
 brew "neovim"
 brew "node"
@@ -19,6 +24,7 @@ brew "ripgrep"
 brew "starship"
 brew "tmux"
 brew "tree"
+brew "zoxide"
 brew "laishulu/homebrew/macism"
 
 # Languages & Runtimes
@@ -31,6 +37,7 @@ brew "openjdk@17"
 brew "redis", restart_service: :changed
 
 # Casks
+cask "android-studio"
 cask "claude-code"
 cask "copilot-cli"
 cask "ghostty"
