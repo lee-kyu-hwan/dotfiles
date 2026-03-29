@@ -1,0 +1,28 @@
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "source": "~/.config/fastfetch/macgraw.txt",
+    "type": "file",
+    "padding": {
+      "top": 1,
+      "right": 2
+    }
+  },
+  "display": {
+    "separator": " → "
+  },
+  "modules": [
+    "title",
+    "separator",
+    "os",
+    "host",
+    "kernel",
+    "shell",
+    "terminal",
+    "cpu",
+    "memory",
+    "disk",
+    "packages",
+    "uptime"
+  ]
+}

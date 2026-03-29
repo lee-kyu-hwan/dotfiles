@@ -1,0 +1,41 @@
+return {
+  {
+    "goolord/alpha-nvim",
+    event = "VimEnter",
+    dependencies = { "nvim-tree/nvim-web-devicons" },
+    config = function()
+      local alpha = require("alpha")
+      local dashboard = require("alpha.themes.dashboard")
+
+      dashboard.section.header.val = {
+        "▓▓▓▓▓▓▓▓▓▓▓▓▓     ▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓        ▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓▓▓     ▓▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓▓       ▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓▓  ▄▄▄  ▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓▓  ▓▓▓  ▓▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓▓▓         ▓▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓▓   ▓▓       ▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓   ▓▓░░░░      ▓▓▓▓▓▓",
+        "▓▓▓     ▓░░░░░░░░      ▓▓▓▓",
+        "▓▓     ▓░░░░░░░░░       ▓▓▓",
+        "▓▓   ▓  ░░░░░▓▓          ▓▓",
+        "▓▓▓  ▓▓              ▓▓  ▓▓",
+        "▓▓▓▓▓▓▓▓▓   ▓▓▓▓    ▓▓▓▓▓▓▓",
+        "▓▓▓▓▓▓▓     ▓▓▓▓      ▓▓▓▓▓",
+      }
+
+      dashboard.section.buttons.val = {
+        dashboard.button("f", "  파일 검색", "<cmd>Telescope find_files<cr>"),
+        dashboard.button("r", "  최근 파일", "<cmd>Telescope oldfiles<cr>"),
+        dashboard.button("g", "  텍스트 검색", "<cmd>Telescope live_grep<cr>"),
+        dashboard.button("e", "  파일 탐색기", "<cmd>Neotree toggle<cr>"),
+        dashboard.button("q", "  종료", "<cmd>qa<cr>"),
+      }
+
+      dashboard.section.footer.val = "MacGraw 🐧"
+
+      alpha.setup(dashboard.config)
+    end,
+  },
+}
