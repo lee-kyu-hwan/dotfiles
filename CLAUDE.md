@@ -17,6 +17,21 @@ chezmoi add ~/.config/앱/config  # 새 파일 등록
 
 설정 파일을 직접 수정하면 안 됨. 반드시 `chezmoi edit` 사용. 직접 source 파일을 수정하면 `chezmoi apply` + 수동 commit/push 필요.
 
+### 설정 파일 변경 흐름
+
+```bash
+chezmoi edit ~/.zshrc      # 편집 → 자동 apply + commit + push
+```
+
+### Brew 패키지 추가 흐름
+
+```bash
+chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push
+brew bundle --global        # 실제 설치 (chezmoi는 파일 배치만 담당)
+```
+
+chezmoi는 **설정 파일 배치**만 담당하고, **패키지 설치**는 별도로 실행해야 한다.
+
 ## 아키텍처
 
 ### 파일 네이밍 규칙
