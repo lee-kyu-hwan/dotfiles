@@ -23,6 +23,7 @@ brew "laishulu/homebrew/macism"
 
 # Languages & Runtimes
 brew "cocoapods"
+brew "flutter"
 brew "gemini-cli"
 brew "openjdk@17"
 
