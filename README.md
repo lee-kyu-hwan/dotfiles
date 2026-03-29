@@ -71,6 +71,18 @@ CLI 도구, 앱, 런타임은 Brewfile로 관리합니다. 상세 목록:
 - [CLI 도구 목록 & 사용법](docs/cli-tools.md) — bat, eza, zoxide, fzf, delta, jq 등 22개
 - [앱 & 런타임 목록](docs/apps.md) — Android Studio, Ghostty, Flutter, Redis 등 11개
 
+#### 패키지 추가
+
+```bash
+chezmoi edit ~/.Brewfile
+```
+
+에디터에서 패키지를 추가하고 저장하면 자동으로 설치부터 git push까지 완료됩니다:
+
+1. `chezmoi apply` → `~/.Brewfile` 반영
+2. `brew bundle --global` → 패키지 설치
+3. `git commit` + `git push` → dotfiles 저장소에 반영
+
 ## 사용법
 
 ### 설정 변경 후 적용
