@@ -4,6 +4,14 @@ Leader 키: `<Space>`
 
 `★` = 커스텀 키맵 (chezmoi로 관리, `dot_config/nvim/` 하위 파일에 정의)
 
+## 첫 실행 안내
+
+1. `nvim` 실행 → lazy.nvim이 플러그인 자동 다운로드 (네트워크 필요)
+2. mason-lspconfig이 LSP 서버 자동 설치 (ts_ls, tailwindcss, eslint, lua_ls, jsonls)
+3. 설치 상태 확인: `:Mason` → 목록에서 installed 확인
+4. treesitter 파서 자동 설치: `:TSInstallInfo`로 확인
+5. 문제 발생 시: `:checkhealth`로 진단
+
 ## 커스텀 키맵
 
 ### 파일 탐색기 (neo-tree)
