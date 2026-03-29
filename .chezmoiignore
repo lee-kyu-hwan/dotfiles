@@ -9,4 +9,5 @@ LICENSE
 .Brewfile
 .config/ghostty/config
 run_once_configure-keycastr.sh
+run_onchange_brew-bundle.sh
 {{ end }}

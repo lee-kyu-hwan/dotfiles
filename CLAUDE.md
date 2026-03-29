@@ -26,11 +26,10 @@ chezmoi edit ~/.zshrc      # 편집 → 자동 apply + commit + push
 ### Brew 패키지 추가 흐름
 
 ```bash
-chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push
-brew bundle --global        # 실제 설치 (chezmoi는 파일 배치만 담당)
+chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push + brew bundle
 ```
 
-chezmoi는 **설정 파일 배치**만 담당하고, **패키지 설치**는 별도로 실행해야 한다.
+`run_onchange_brew-bundle.sh.tmpl`이 Brewfile 변경을 감지하여 `brew bundle --global`을 자동 실행한다.
 
 ## 아키텍처
 
@@ -61,9 +60,10 @@ chezmoi는 **설정 파일 배치**만 담당하고, **패키지 설치**는 별
 - `config/` — options, keymaps, lazy.nvim 부트스트랩
 - `plugins/` — 플러그인별 파일 분리 (lsp, cmp, telescope, neo-tree, git, conform, editor, theme, treesitter)
 
-### run_once_ 스크립트
+### 자동 실행 스크립트
 
-`run_once_configure-keycastr.sh.tmpl` — macOS에서만 실행, KeyCastr 설정을 `defaults write`로 적용. chezmoi가 최초 1회 자동 실행.
+- `run_onchange_brew-bundle.sh.tmpl` — Brewfile 변경 시 `brew bundle --global` 자동 실행 (macOS only)
+- `run_once_configure-keycastr.sh.tmpl` — 최초 1회 KeyCastr 설정 적용 (macOS only)
 
 ## 언어
 

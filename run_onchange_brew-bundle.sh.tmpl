@@ -1,0 +1,6 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+# Brewfile이 변경될 때마다 자동 실행
+# dot_Brewfile hash: {{ include "dot_Brewfile" | sha256sum }}
+brew bundle --global
+{{ end -}}
