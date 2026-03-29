@@ -27,8 +27,13 @@
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "printf '\\e]9;Claude Code 작업 완료\\a'"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf '\\e]9;Claude Code 작업 완료\\a'"
+          }
+        ]
       }
     ]
   },
