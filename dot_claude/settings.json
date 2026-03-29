@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "printf '\\e]9;Claude Code 작업 완료\\a'"
+            "command": "osascript -e 'display notification \"Claude Code 작업 완료\" with title \"Claude Code\"'"
           }
         ]
       }
