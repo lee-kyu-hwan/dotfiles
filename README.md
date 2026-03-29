@@ -27,7 +27,7 @@ cd ~/code/dotfiles
 | tmux | tmux 설정 (macOS: 한글 IME 호환) | O | O | O |
 | zsh | Zsh 설정 (Oh My Zsh + Starship) | O | O | O |
 | git | Git 설정 (includeIf 분기) | O | O | O |
-| neovim | Neovim (lazy.nvim, LSP, telescope) | O | O | O |
+| neovim | Neovim (lazy.nvim, LSP, telescope) ([키맵 & 치트시트](docs/neovim.md)) | O | O | O |
 | lazygit | lazygit 터미널 Git UI | O | O | O |
 | starship | Starship 프롬프트 | O | O | O |
 | claude | Claude Code 전역 설정 | O | O | O |
