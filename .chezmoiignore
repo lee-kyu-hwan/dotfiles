@@ -3,6 +3,7 @@ CLAUDE.md
 docs/**
 install.sh
 setup.sh
+.pre-commit-config.yaml
 
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}

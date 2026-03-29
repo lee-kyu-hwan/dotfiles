@@ -5,6 +5,6 @@ gui:
     lightTheme: false
 git:
   paging:
-    pager: "delta --dark --paging=never"
+    pager: "/opt/homebrew/bin/delta --dark --paging=never --line-numbers"
 os:
   editPreset: "nvim"

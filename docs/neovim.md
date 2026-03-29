@@ -75,6 +75,24 @@ Leader 키: `<Space>`
 | `<Space>hs` | hunk stage | ★ |
 | `<Space>hr` | hunk reset | ★ |
 
+#### LazyGit에서 diff 보기
+
+`<Space>gg`로 LazyGit을 연 뒤 사용할 수 있는 diff 관련 키:
+
+| 키 | 기능 |
+|----|------|
+| 파일 선택 | 오른쪽 패널에 diff 자동 표시 |
+| `Enter` | 파일의 staged/unstaged 변경사항 줄 단위 확인 |
+| `Shift+W` | diff 모드 시작 (커밋/브랜치 비교) |
+| `Escape` | diff 모드 해제 |
+| `w` | diff 옵션 메뉴 (whitespace 무시 등) |
+| `{` / `}` | diff 컨텍스트 줄 수 조절 (더 많이/적게) |
+| `Ctrl+e` | diff를 외부 에디터(nvim)에서 열기 |
+
+**커밋 간 비교**: Commits 패널에서 기준 커밋 → `Shift+W` → 대상 커밋으로 이동
+
+**브랜치 간 비교**: Branches 패널에서도 동일하게 `Shift+W`로 비교 가능
+
 ### 포매팅
 
 > 설정 파일: `dot_config/nvim/lua/plugins/conform.lua`
