@@ -16,6 +16,24 @@ return {
           mappings = {
             ["z"] = "close_all_nodes",
             ["Z"] = "expand_all_nodes",
+            ["y"] = function(state)
+              local node = state.tree:get_node()
+              local name = node.name
+              vim.fn.setreg("+", name)
+              vim.notify("Copied: " .. name)
+            end,
+            ["Y"] = function(state)
+              local node = state.tree:get_node()
+              local path = vim.fn.fnamemodify(node:get_id(), ":.")
+              vim.fn.setreg("+", path)
+              vim.notify("Copied: " .. path)
+            end,
+            ["gy"] = function(state)
+              local node = state.tree:get_node()
+              local path = node:get_id()
+              vim.fn.setreg("+", path)
+              vim.notify("Copied: " .. path)
+            end,
           },
         },
         filesystem = {
