@@ -32,6 +32,7 @@ return {
         map("<leader>rn", vim.lsp.buf.rename, "이름 변경")
       end
 
+      -- lua_ls는 별도 설정 필요 (diagnostics.globals = vim)
       local servers = { "ts_ls", "tailwindcss", "eslint", "jsonls" }
       for _, server in ipairs(servers) do
         lspconfig[server].setup({

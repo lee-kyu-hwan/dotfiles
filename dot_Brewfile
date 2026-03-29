@@ -1,3 +1,5 @@
+# Brewfile - macOS only (Linux 서버에서는 .chezmoiignore로 제외됨)
+
 # Taps
 tap "laishulu/homebrew"
 

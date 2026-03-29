@@ -35,16 +35,23 @@ if [[ "$(uname)" != "Darwin" ]]; then
 
     if ! command -v starship &>/dev/null; then
         echo "  starship 설치..."
-        curl -sS https://starship.rs/install.sh | sh -s -- -y
+        if ! curl -sS https://starship.rs/install.sh | sh -s -- -y; then
+            echo "  ⚠️ starship 설치 실패 (계속 진행)"
+        fi
     fi
 
     if ! command -v lazygit &>/dev/null; then
         echo "  lazygit 설치..."
-        LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
-        curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
-        tar xf /tmp/lazygit.tar.gz -C /tmp lazygit
-        sudo install /tmp/lazygit /usr/local/bin
-        rm -f /tmp/lazygit /tmp/lazygit.tar.gz
+        LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*' || echo "")
+        if [ -z "$LAZYGIT_VERSION" ]; then
+            echo "  ⚠️ lazygit 버전 확인 실패 (계속 진행)"
+        else
+            curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz" \
+                && tar xf /tmp/lazygit.tar.gz -C /tmp lazygit \
+                && sudo install /tmp/lazygit /usr/local/bin \
+                || echo "  ⚠️ lazygit 설치 실패 (계속 진행)"
+            rm -f /tmp/lazygit /tmp/lazygit.tar.gz
+        fi
     fi
 else
     echo "[1/7] Linux 개발 도구... skipped (macOS)"
@@ -53,7 +60,10 @@ fi
 # 2. Oh My Zsh
 echo "[2/7] Oh My Zsh..."
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+    RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" || {
+        echo "  ⚠️ Oh My Zsh 설치 실패"
+        exit 1
+    }
 else
     echo "  already installed"
 fi
@@ -69,10 +79,16 @@ fi
 # 4. chezmoi 설치 + init
 echo "[4/7] chezmoi..."
 if ! command -v chezmoi &>/dev/null; then
-    sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin"
+    sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin" || {
+        echo "  ❌ chezmoi 설치 실패"
+        exit 1
+    }
     export PATH="$HOME/.local/bin:$PATH"
 fi
-CHEZMOI="$(command -v chezmoi)"
+CHEZMOI="$(command -v chezmoi)" || {
+    echo "  ❌ chezmoi를 찾을 수 없습니다"
+    exit 1
+}
 
 echo "  chezmoi init..."
 "$CHEZMOI" init --source "$DOTFILES_DIR"
