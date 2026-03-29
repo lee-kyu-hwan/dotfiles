@@ -1,0 +1,15 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+# KeyCastr 설정 (macOS only)
+# 비주얼라이저: Svelte, Modifier 키만 표시, 상단 중앙, 1초 후 페이드
+
+defaults write io.github.keycastr selectedVisualizer -string "Svelte"
+defaults write io.github.keycastr "default.commandKeysOnly" -int 0
+defaults write io.github.keycastr "default.showModifiersOnly" -int 1
+defaults write io.github.keycastr "default.fadeDelay" -float 1.0
+defaults write io.github.keycastr "default.fadeDuration" -float 0.3
+defaults write io.github.keycastr "default.fontSize" -float 18
+defaults write io.github.keycastr "default.bezelOpacity" -float 0.7
+defaults write io.github.keycastr "mouse.displayOption" -int 1
+defaults write io.github.keycastr displayIcon -int 1
+{{ end -}}

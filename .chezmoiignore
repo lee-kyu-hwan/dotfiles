@@ -7,4 +7,5 @@ LICENSE
 {{ if eq .machine_type "server" }}
 .Brewfile
 .config/ghostty/config
+run_once_configure-keycastr.sh
 {{ end }}

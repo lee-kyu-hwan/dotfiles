@@ -33,6 +33,7 @@ cd ~/code/dotfiles
 | claude | Claude Code 전역 설정 | O | O | O |
 | ghostty | Ghostty 터미널 설정 | O | O | X |
 | brew | Homebrew 패키지 목록 | O | O | X |
+| keycastr | 키 입력 시각화 ([설정 문서](docs/keycastr.md)) | O | O | X |
 
 ## 사용법
 
