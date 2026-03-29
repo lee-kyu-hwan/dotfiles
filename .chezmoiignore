@@ -1,6 +1,7 @@
 README.md
 docs/**
-bootstrap.sh
+install.sh
+setup.sh
 LICENSE
 
 # server: macOS 전용 항목만 제외
