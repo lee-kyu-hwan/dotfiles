@@ -57,13 +57,45 @@ set -g pane-active-border-style fg=colour51
 bind = select-layout even-horizontal
 
 # ============================================================
-# OSC 시퀀스 패스스루 (Ghostty 알림에 필요)
+# OSC 시퀀스 패스스루
 # ============================================================
 set -g allow-passthrough on
 
 # ============================================================
-# Activity 모니터링 (에이전트 작업 완료 감지)
+# 상태바
 # ============================================================
+
+# 스타일
+set -g status-style "bg=colour236,fg=colour248"
+set -g status-left-length 30
+set -g status-right-length 60
+
+# 왼쪽: 세션 이름
+set -g status-left "#[fg=colour16,bg=colour75,bold] #S #[fg=colour75,bg=colour236] "
+
+# 오른쪽: 날짜/시간
+set -g status-right "#[fg=colour248] %m/%d %H:%M "
+
+# 윈도우 탭: 비활성 (상태별 색상 분기)
+#   activity (출력 중)    = 초록 ● (진행 중)
+#   silence (10초 무출력) = 빨강 ⏸ (작업 완료/대기 — 확인 필요)
+#   일반                  = 회색 (idle)
+set -g window-status-format "#{?window_silence_flag,#[fg=colour196 bold] #I #W ⏸ ,#{?window_activity_flag,#[fg=colour46 bold] #I #W ● , #I #W }}"
+
+# 윈도우 탭: 현재 활성
+set -g window-status-current-format "#[fg=colour16,bg=colour39,bold] #I #W "
+
+# Activity + Silence 모니터링
 set -g monitor-activity on
+set -g monitor-silence 10
 set -g visual-activity off
-set -g window-status-activity-style "fg=colour226,bold"
+set -g visual-silence off
+
+# 구분선
+set -g window-status-separator ""
+
+# 상태바 위치
+set -g status-position bottom
+
+# 상태바 갱신 주기 (초)
+set -g status-interval 5
