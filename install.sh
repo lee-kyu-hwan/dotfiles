@@ -35,17 +35,37 @@ if [[ "$(uname)" == "Darwin" ]]; then
         eval "$(/usr/local/bin/brew shellenv)"
     fi
 else
-    echo "[2/3] Linux 기본 패키지..."
+    echo "[2/4] Linux 기본 패키지..."
     if command -v apt-get &>/dev/null; then
         sudo apt-get update
         sudo apt-get install -y git curl
     elif command -v dnf &>/dev/null; then
         sudo dnf install -y git curl
     fi
+
+    # 3. Node.js (Linux — Claude Code CLI에 필요)
+    echo "[3/4] Node.js..."
+    if ! command -v node &>/dev/null; then
+        if command -v apt-get &>/dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+        elif command -v dnf &>/dev/null; then
+            curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
+            sudo dnf install -y nodejs
+        fi
+    else
+        echo "  already installed ($(node --version))"
+    fi
 fi
 
-# 3. Claude Code CLI
-echo "[3/3] Claude Code CLI..."
+# macOS: 3/3, Linux: 4/4
+if [[ "$(uname)" == "Darwin" ]]; then
+    STEP="[3/3]"
+else
+    STEP="[4/4]"
+fi
+
+echo "$STEP Claude Code CLI..."
 if [[ "$(uname)" == "Darwin" ]]; then
     if ! command -v claude &>/dev/null; then
         brew install --cask claude-code
@@ -54,12 +74,7 @@ if [[ "$(uname)" == "Darwin" ]]; then
     fi
 else
     if ! command -v claude &>/dev/null; then
-        npm install -g @anthropic-ai/claude-code 2>/dev/null || {
-            echo "  npm이 없습니다. Node.js를 먼저 설치하세요."
-            echo "  curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -"
-            echo "  sudo apt-get install -y nodejs"
-            exit 1
-        }
+        npm install -g @anthropic-ai/claude-code
     else
         echo "  already installed"
     fi
