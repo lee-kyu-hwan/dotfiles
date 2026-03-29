@@ -64,43 +64,11 @@ chezmoi edit ~/.zshrc
 - `~/code/work/` 하위 → `.gitconfig-work` (회사 이메일)
 - `~/code/personal/` 하위 → `.gitconfig-personal` (개인 이메일)
 
-## Neovim 키맵
+## Neovim
 
-| 키 | 기능 |
-|----|------|
-| `<Space>e` | 파일 탐색기 (neo-tree) 토글 |
-| `<Space>ff` | 파일 검색 (telescope) |
-| `<Space>fg` | 텍스트 검색 (telescope) |
-| `<Space>fb` | 버퍼 목록 |
-| `<Space>fr` | 최근 파일 |
-| `<Space>gg` | LazyGit (git UI) |
-| `<Space>cf` | 코드 포맷 |
-| `<Space>ca` | 코드 액션 |
-| `<Space>rn` | 이름 변경 |
-| `gd` | 정의로 이동 |
-| `gr` | 참조 목록 |
-| `K` | 호버 정보 |
-| `]h` / `[h` | 다음/이전 git hunk |
-| `<Space>hp` | hunk 미리보기 |
-| `<Space>hs` | hunk stage |
-| `<C-h/j/k/l>` | 창 이동 |
-| `<S-h>` / `<S-l>` | 이전/다음 버퍼 |
+Leader 키는 `<Space>`. 주요 키맵: `<Space>e` (파일 탐색기), `<Space>ff` (파일 검색), `<Space>gg` (LazyGit).
 
-### neo-tree 내부
-
-| 키 | 기능 |
-|----|------|
-| `<Enter>` | 파일 열기 / 디렉토리 펼치기 |
-| `<Backspace>` | 상위 디렉토리로 이동 |
-| `.` | 현재 디렉토리를 cwd로 설정 |
-
-### 파일 경로 복사
-
-```vim
-:let @+ = expand('%:p')   " 절대 경로
-:let @+ = expand('%:.')   " 상대 경로
-:let @+ = expand('%:t')   " 파일명만
-```
+전체 커스텀 키맵과 Vim 치트시트는 [docs/neovim.md](docs/neovim.md) 참고.
 
 ## 주의사항
 
