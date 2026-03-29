@@ -29,7 +29,6 @@ brew "laishulu/homebrew/macism"
 
 # Languages & Runtimes
 brew "cocoapods"
-brew "flutter"
 brew "gemini-cli"
 brew "openjdk@17"
 
@@ -39,6 +38,7 @@ brew "redis", restart_service: :changed
 # Casks
 cask "android-studio"
 cask "claude-code"
+cask "flutter"
 cask "copilot-cli"
 cask "ghostty"
 cask "keycastr"
