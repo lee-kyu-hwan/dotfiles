@@ -24,6 +24,14 @@
     "context7@claude-plugins-official": true,
     "figma@claude-plugins-official": true
   },
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "printf '\\e]9;Claude Code 작업 완료\\a'"
+      }
+    ]
+  },
   "language": "Korean",
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
