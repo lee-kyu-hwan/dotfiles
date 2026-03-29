@@ -1,8 +1,8 @@
 README.md
+CLAUDE.md
 docs/**
 install.sh
 setup.sh
-LICENSE
 
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
