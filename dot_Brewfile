@@ -31,4 +31,5 @@ brew "redis", restart_service: :changed
 cask "claude-code"
 cask "copilot-cli"
 cask "ghostty"
+cask "keycastr"
 cask "reactotron"
