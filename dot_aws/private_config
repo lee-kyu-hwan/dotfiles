@@ -1,0 +1,13 @@
+[default]
+region = ap-northeast-2
+output = json
+[profile work]
+sso_session = ALA
+sso_account_id = 443370693250
+sso_role_name = AdministratorAccess
+region = ap-northeast-2
+output = json
+[sso-session ALA]
+sso_start_url = https://d-9b6752d5e8.awsapps.com/start/
+sso_region = ap-northeast-2
+sso_registration_scopes = sso:account:access
