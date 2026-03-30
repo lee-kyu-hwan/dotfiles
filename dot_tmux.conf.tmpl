@@ -104,5 +104,11 @@ set -g status-interval 5
 # TPM (Tmux Plugin Manager)
 # ============================================================
 set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+
+# continuum: 15분마다 자동 저장 + tmux 시작 시 자동 복원
+set -g @continuum-restore 'on'
+set -g @continuum-save-interval '15'
 
 run '~/.tmux/plugins/tpm/tpm'
