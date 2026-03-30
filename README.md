@@ -61,6 +61,7 @@ Linux:                                 ┌────────────�
 | lazygit | lazygit 터미널 Git UI | O | O | O |
 | starship | Starship 프롬프트 | O | O | O |
 | claude | Claude Code 전역 설정 | O | O | O |
+| aws | AWS CLI SSO 설정 ([설정 문서](docs/aws-cli.md)) | O | O | X |
 | ghostty | Ghostty 터미널 설정 | O | O | X |
 | keycastr | 키 입력 시각화 ([설정 문서](docs/keycastr.md)) | O | O | X |
 
