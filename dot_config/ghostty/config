@@ -13,3 +13,10 @@ copy-on-select = clipboard
 
 # 알림
 desktop-notifications = true
+
+# Quick Terminal
+keybind = global:ctrl+grave_accent=toggle_quick_terminal
+quick-terminal-position = center
+quick-terminal-screen-coverage = 1
+quick-terminal-animation-duration = 0.15
+quick-terminal-autohide = true
