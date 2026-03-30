@@ -24,11 +24,9 @@ return {
           local map = function(keys, func, desc)
             vim.keymap.set("n", keys, func, { buffer = args.buf, desc = desc })
           end
-          map("gd", vim.lsp.buf.definition, "정의로 이동")
-          map("gr", vim.lsp.buf.references, "참조 목록")
-          map("K", vim.lsp.buf.hover, "호버 정보")
-          map("<leader>ca", vim.lsp.buf.code_action, "코드 액션")
-          map("<leader>rn", vim.lsp.buf.rename, "이름 변경")
+          -- gd만 Telescope로 오버라이드 (import문이 아닌 실제 소스 파일로 이동)
+          -- 나머지는 Neovim 0.11 빌트인 사용: grr, gri, grt, gra, grn, gO, K, gD
+          map("gd", "<cmd>Telescope lsp_definitions<cr>", "정의로 이동")
         end,
       })
 
