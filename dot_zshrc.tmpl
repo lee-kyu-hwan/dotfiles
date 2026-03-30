@@ -60,6 +60,13 @@ alias ll='ls -lah'
 alias dotfiles='cd ~/code/dotfiles'
 
 # ============================================================
+# Ghostty Quick Terminal: quick tmux 세션 자동 연결
+# ============================================================
+if [[ -n "$GHOSTTY_QUICK_TERMINAL" ]] && [[ -z "$TMUX" ]]; then
+    exec tmux attach-session -t quick 2>/dev/null || exec tmux new-session -s quick
+fi
+
+# ============================================================
 # fastfetch (터미널 시작 시 시스템 정보 표시)
 # ============================================================
 if command -v fastfetch &>/dev/null && [[ $- == *i* ]]; then
