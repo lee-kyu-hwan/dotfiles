@@ -37,6 +37,9 @@ brew "openjdk@17"
 # Data
 brew "redis", restart_service: :changed
 
+# Fonts
+cask "font-meslo-lg-nerd-font"
+
 # Casks
 cask "android-studio"
 cask "claude-code"
@@ -45,4 +48,3 @@ cask "copilot-cli"
 cask "ghostty"
 cask "keycastr"
 cask "reactotron"
-cask "font-meslo-lg-nerd-font"

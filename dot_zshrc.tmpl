@@ -56,8 +56,20 @@ export PATH="$PATH:$HOME/.maestro/bin"
 # ============================================================
 # Aliases
 # ============================================================
-alias ll='ls -lah'
 alias dotfiles='cd ~/code/dotfiles'
+
+# eza (ls 대체)
+if command -v eza &>/dev/null; then
+    alias ls='eza --icons'
+    alias ll='eza -lah --icons --git'
+else
+    alias ll='ls -lah'
+fi
+
+# bat (cat 대체)
+if command -v bat &>/dev/null; then
+    alias cat='bat --style=auto'
+fi
 
 # ============================================================
 # Ghostty Quick Terminal: quick tmux 세션 자동 연결
@@ -71,6 +83,13 @@ fi
 # ============================================================
 if command -v fastfetch &>/dev/null && [[ $- == *i* ]]; then
     fastfetch
+fi
+
+# ============================================================
+# zoxide (cd 대체)
+# ============================================================
+if command -v zoxide &>/dev/null; then
+    eval "$(zoxide init zsh)"
 fi
 
 # ============================================================

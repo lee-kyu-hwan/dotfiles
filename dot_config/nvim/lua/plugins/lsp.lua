@@ -42,7 +42,7 @@ return {
         },
       })
 
-      vim.lsp.enable({ "ts_ls", "tailwindcss", "eslint", "lua_ls", "jsonls" })
+      vim.lsp.enable({ "ts_ls", "tailwindcss", "eslint", "lua_ls", "jsonls", "dartls" })
     end,
   },
 }
