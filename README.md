@@ -148,6 +148,22 @@ git add -A && git commit -m "설명" && git push
 
 `chezmoi edit`이 아닌 직접 source 수정 시에는 auto commit/push가 동작하지 않습니다.
 
+### Neovim 업그레이드 후 캐시 오류
+
+`brew upgrade` 후 Neovim 버전이 올라가면 lua 바이트코드 캐시가 구버전 경로를 가리켜 오류가 발생할 수 있습니다.
+
+```
+module 'vim.filetype.detect' not found
+```
+
+캐시를 삭제하면 해결됩니다:
+
+```bash
+rm -rf ~/.cache/nvim && rm -rf ~/.local/share/nvim/lazy
+```
+
+이후 nvim을 열면 lazy.nvim이 플러그인을 재설치합니다.
+
 ### 이직 시
 
 `dot_gitconfig-work`의 email만 변경하면 됩니다:

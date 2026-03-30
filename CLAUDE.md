@@ -61,6 +61,16 @@ chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push 
 - `plugins/` — 플러그인별 파일 분리 (lsp, cmp, telescope, neo-tree, git, conform, editor, theme, treesitter)
 - lsp.lua는 `vim.lsp.config()` + `vim.lsp.enable()` 네이티브 API 사용 (Neovim 0.11+ 필요)
 
+### Neovim 캐시 문제
+
+`brew upgrade` 후 Neovim 버전이 올라가면 lua 바이트코드 캐시가 구버전 경로를 가리켜 오류가 발생할 수 있다. 해결:
+
+```bash
+rm -rf ~/.cache/nvim && rm -rf ~/.local/share/nvim/lazy
+```
+
+커뮤니티 표준 해결법이며, 자동화는 권장되지 않는다 (Brewfile 변경마다 플러그인 전체 재설치가 발생하기 때문).
+
 ### 자동 실행 스크립트
 
 - `run_onchange_brew-bundle.sh.tmpl` — Brewfile 변경 시 `brew bundle --global` 자동 실행 (macOS only)
