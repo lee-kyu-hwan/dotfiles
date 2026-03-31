@@ -38,6 +38,8 @@ return {
         dashboard.button("f", "  파일 검색", "<cmd>Telescope find_files<cr>"),
         dashboard.button("r", "  최근 파일", "<cmd>Telescope oldfiles<cr>"),
         dashboard.button("g", "  텍스트 검색", "<cmd>Telescope live_grep<cr>"),
+        dashboard.button("p", "  프로젝트 파일 검색", "<leader>fp"),
+        dashboard.button("P", "  프로젝트 텍스트 검색", "<leader>fP"),
         dashboard.button("e", "  파일 탐색기", "<cmd>Neotree toggle<cr>"),
         dashboard.button("q", "  종료", "<cmd>qa<cr>"),
       }
