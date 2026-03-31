@@ -1,15 +1,15 @@
 return {
   -- Mason: LSP 서버 자동 설치
   {
-    "mason-org/mason.nvim",
+    "williamboman/mason.nvim",
     opts = {},
   },
 
   -- Mason-lspconfig: 설치된 서버 자동 활성화 (automatic_enable)
   {
-    "mason-org/mason-lspconfig.nvim",
+    "williamboman/mason-lspconfig.nvim",
     dependencies = {
-      "mason-org/mason.nvim",
+      "williamboman/mason.nvim",
       "saghen/blink.cmp",
     },
     opts = {
