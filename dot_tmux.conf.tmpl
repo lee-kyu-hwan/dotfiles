@@ -1,5 +1,8 @@
 set -g mouse on
 
+# "0"번 세션 이름을 "main"으로 자동 변경
+set-hook -g session-created 'if -F "#{==:#{session_name},0}" "rename-session main"'
+
 {{ if eq .chezmoi.os "darwin" -}}
 # ============================================================
 # 한글 입력 호환 설정 (macOS only)

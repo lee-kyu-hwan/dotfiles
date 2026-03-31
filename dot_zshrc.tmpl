@@ -75,7 +75,7 @@ fi
 # Ghostty Quick Terminal: quick tmux 세션 자동 연결
 # ============================================================
 if [[ -n "$GHOSTTY_QUICK_TERMINAL" ]] && [[ -z "$TMUX" ]]; then
-    exec tmux attach-session -t quick 2>/dev/null || exec tmux new-session -s quick
+    exec tmux attach-session -t quick 2>/dev/null || exec tmux new-session -s quick -c ~/code
 fi
 
 # ============================================================
