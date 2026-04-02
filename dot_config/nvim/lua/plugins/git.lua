@@ -4,6 +4,8 @@ return {
     event = { "BufReadPre", "BufNewFile" },
     config = function()
       require("gitsigns").setup({
+        current_line_blame = true,
+        current_line_blame_opts = { delay = 300 },
         signs = {
           add = { text = "│" },
           change = { text = "│" },
@@ -21,6 +23,7 @@ return {
           map("n", "<leader>hs", gs.stage_hunk, "hunk stage")
           map("n", "<leader>hr", gs.reset_hunk, "hunk reset")
           map("n", "<leader>hp", gs.preview_hunk, "hunk 미리보기")
+          map("n", "<leader>hb", gs.toggle_current_line_blame, "blame 토글")
         end,
       })
     end,
