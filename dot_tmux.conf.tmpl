@@ -1,5 +1,21 @@
 set -g mouse on
 
+# ============================================================
+# 클립보드 및 복사 설정 (OSC 52 지원)
+# ============================================================
+# tmux가 터미널(Ghostty)에 클립보드 내용을 전달하도록 허용
+set -s set-clipboard on
+
+# 복사 모드 (VI 스타일) 활성화
+set-window-option -g mode-keys vi
+
+# 선택 및 복사 단축키 (Vim 스타일)
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+# 마우스 드래그 종료 시 즉시 시스템 클립보드로 복사 (OSC 52 활용)
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
+
 # "0"번 세션 이름을 "main"으로 자동 변경
 set-hook -g session-created 'if -F "#{==:#{session_name},0}" "rename-session main"'
 
