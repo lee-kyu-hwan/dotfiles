@@ -26,10 +26,7 @@ set-hook -g session-created 'if -F "#{==:#{session_name},0}" "rename-session mai
 
 # --- 1. Ctrl+B 누르는 순간 영문 전환 (핵심) ---
 set -g prefix M-F12
-bind -n C-b {
-    run-shell "macism com.apple.keylayout.ABC"
-    switch-client -T prefix
-}
+bind -n C-b switch-client -T prefix \; run-shell -b "macism com.apple.keylayout.ABC"
 bind C-b send-keys C-b
 
 # --- 1-1. 자음 바인딩 (안전망) ---
@@ -47,9 +44,9 @@ bind ㅂ display-panes            # q
 bind ㅅ clock-mode               # t
 
 # --- 2. macism 훅 (상태 초기화) ---
-set-hook -g after-select-pane   'run-shell "macism com.apple.keylayout.ABC"'
-set-hook -g after-select-window 'run-shell "macism com.apple.keylayout.ABC"'
-set-hook -g pane-focus-in       'run-shell "macism com.apple.keylayout.ABC"'
+set-hook -g after-select-pane   'run-shell -b "macism com.apple.keylayout.ABC"'
+set-hook -g after-select-window 'run-shell -b "macism com.apple.keylayout.ABC"'
+set-hook -g pane-focus-in       'run-shell -b "macism com.apple.keylayout.ABC"'
 
 # --- 3. 명령어 모드 강제 전환 ---
 bind : run-shell "macism com.apple.keylayout.ABC" \; command-prompt
