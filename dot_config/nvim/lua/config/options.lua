@@ -17,7 +17,7 @@ opt.splitbelow = true
 opt.splitright = true
 opt.undofile = true
 opt.updatetime = 250
-opt.timeoutlen = 300
+opt.timeoutlen = 500
 
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
