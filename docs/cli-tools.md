@@ -28,6 +28,8 @@ Brewfile에서 관리하는 CLI 도구 목록과 사용법 정리.
 | [python@3.12](#python312) | - | Python 런타임 |
 | [tree](#tree) | - | 디렉토리 트리 출력 |
 | [macism](#macism) | - | macOS IME 전환 (tmux 한글 호환) |
+| [zsh-autosuggestions](#zsh-autosuggestions) | - | 이전 명령어 기반 자동 완성 제안 |
+| [zsh-syntax-highlighting](#zsh-syntax-highlighting) | - | 명령어 구문 강조 (유효=녹색, 오류=빨간색) |
 
 ---
 
@@ -178,10 +180,12 @@ git lfs pull
 
 ### delta
 
-git diff에 syntax highlighting을 적용하는 pager. lazygit에서도 사용된다. `.gitconfig`에서 core.pager로 설정해 자동 적용한다.
+git diff에 syntax highlighting을 적용하는 pager. `.gitconfig`에서 `core.pager = delta`로 설정되어 `git diff`, `git log -p`, `git show` 등에서 자동 적용된다. lazygit에서도 사용.
+
+현재 설정: side-by-side diff + line numbers + navigate 모드 (`n`/`N`으로 파일 간 이동).
 
 ```sh
-# git diff에서 자동으로 사용됨 (.gitconfig 설정 시)
+# git diff에서 자동으로 사용됨
 git diff
 
 # git log에서도 사용
@@ -209,6 +213,11 @@ lazygit -p ~/code/myproject
 - `P`: push
 - `p`: pull
 - `R`: rebase
+
+커스텀 단축키 (`dot_config/lazygit/config.yml`):
+- `y` (Files): 파일 경로를 클립보드에 복사
+- `b` (Files): `gh browse`로 GitHub에서 열기
+- `b` (Commits): `gh browse <sha>`로 해당 커밋을 GitHub에서 열기
 
 ### gh
 
@@ -292,6 +301,32 @@ nvim .
 # 특정 줄로 이동해서 열기
 nvim +42 src/index.ts
 ```
+
+---
+
+## Shell 플러그인
+
+### zsh-autosuggestions
+
+이전에 입력했던 명령어를 기반으로 자동 완성을 제안한다. 회색으로 표시되며 `→` 키로 수락.
+
+```sh
+# 예: 이전에 git commit -m "feat: 기능 추가"를 입력한 적이 있다면
+# git 까지 입력하면 나머지가 회색으로 제안됨
+git commit -m "feat: 기능 추가"   # → 키로 수락
+
+# 부분 수락: Ctrl+→ (단어 단위로 수락)
+```
+
+### zsh-syntax-highlighting
+
+명령어를 입력하는 동안 실시간으로 구문 강조를 적용한다.
+
+- 유효한 명령어: **녹색**
+- 잘못된 명령어: **빨간색**
+- 파일 경로: **밑줄**
+
+별도 설정 없이 설치만 하면 동작한다.
 
 ---
 
