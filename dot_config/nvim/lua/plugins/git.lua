@@ -23,6 +23,8 @@ return {
           map("n", "<leader>hs", gs.stage_hunk, "hunk stage")
           map("n", "<leader>hr", gs.reset_hunk, "hunk reset")
           map("n", "<leader>hp", gs.preview_hunk, "hunk 미리보기")
+          map("n", "<leader>hS", gs.stage_buffer, "버퍼 전체 stage")
+          map("n", "<leader>hR", gs.reset_buffer, "버퍼 전체 reset")
           map("n", "<leader>hb", gs.toggle_current_line_blame, "blame 토글")
         end,
       })

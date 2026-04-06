@@ -10,6 +10,7 @@ return {
     keys = {
       { "<leader>ff", "<cmd>Telescope find_files<cr>", desc = "파일 검색" },
       { "<leader>fg", "<cmd>Telescope live_grep<cr>", desc = "텍스트 검색" },
+      { "<leader>fc", "<cmd>Telescope grep_string<cr>", desc = "커서 단어 검색" },
       { "<leader>fb", "<cmd>Telescope buffers<cr>", desc = "버퍼 목록" },
       { "<leader>fh", "<cmd>Telescope help_tags<cr>", desc = "도움말 검색" },
       { "<leader>fr", "<cmd>Telescope oldfiles<cr>", desc = "최근 파일" },
