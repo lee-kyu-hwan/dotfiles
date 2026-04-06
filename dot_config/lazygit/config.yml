@@ -8,3 +8,16 @@ git:
     pager: "delta --dark --paging=never --line-numbers"
 os:
   editPreset: "nvim"
+customCommands:
+  - key: 'y'
+    command: 'echo -n {{.SelectedFile.Name}} | pbcopy'
+    context: 'files'
+    description: 'copy file path to clipboard'
+  - key: 'b'
+    command: 'gh browse'
+    context: 'files'
+    description: 'GitHub에서 열기'
+  - key: 'b'
+    command: 'gh browse "{{.SelectedLocalCommit.Sha}}"'
+    context: 'commits'
+    description: 'GitHub에서 커밋 열기'
