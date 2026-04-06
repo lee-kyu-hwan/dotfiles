@@ -27,6 +27,8 @@ brew "starship"
 brew "tmux"
 brew "tree"
 brew "zoxide"
+brew "zsh-autosuggestions"
+brew "zsh-syntax-highlighting"
 brew "laishulu/homebrew/macism"
 
 # Languages & Runtimes

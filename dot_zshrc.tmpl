@@ -11,6 +11,25 @@ plugins=(git)
 
 source $ZSH/oh-my-zsh.sh
 
+# ============================================================
+# zsh-autosuggestions + zsh-syntax-highlighting
+# ============================================================
+{{ if eq .chezmoi.os "darwin" -}}
+# Homebrew로 설치된 플러그인 로드
+if [ -f "$(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ]; then
+    source "$(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+fi
+if [ -f "$(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]; then
+    source "$(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+fi
+{{ else -}}
+# Linux: Oh My Zsh 플러그인 디렉토리에서 로드
+[ -f "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" ] && \
+    source "$ZSH/custom/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh"
+[ -f "$ZSH/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ] && \
+    source "$ZSH/custom/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
+{{ end -}}
+
 {{ if eq .chezmoi.os "darwin" -}}
 # ============================================================
 # Homebrew
