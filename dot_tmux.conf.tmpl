@@ -60,9 +60,20 @@ bind C-b send-prefix
 
 {{ end -}}
 # ============================================================
-# 화면 + 스크롤백 클리어 (Ctrl+L)
+# 직관적인 패널 분할 (현재 경로 유지)
 # ============================================================
-bind-key -n C-l if-shell -F '#{alternate_on}' 'send-keys C-l' 'send-keys -R C-l; clear-history'
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+
+# ============================================================
+# 설정 리로드
+# ============================================================
+bind r source-file ~/.tmux.conf \; display-message "tmux.conf 리로드 완료"
+
+# ============================================================
+# 화면 + 스크롤백 클리어 (prefix + C-l, vim-tmux-navigator가 C-l 사용)
+# ============================================================
+bind C-l send-keys -R C-l \; clear-history
 
 # ============================================================
 # Pane 구분: 비활성 pane 어둡게 처리
@@ -122,6 +133,7 @@ set -g status-position bottom
 set -g status-interval 5
 
 set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'christoomey/vim-tmux-navigator'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 

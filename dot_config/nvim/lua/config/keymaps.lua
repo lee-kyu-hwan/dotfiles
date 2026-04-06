@@ -1,10 +1,12 @@
 local map = vim.keymap.set
 
--- 창 이동
-map("n", "<C-h>", "<C-w>h", { desc = "왼쪽 창으로" })
-map("n", "<C-j>", "<C-w>j", { desc = "아래 창으로" })
-map("n", "<C-k>", "<C-w>k", { desc = "위 창으로" })
-map("n", "<C-l>", "<C-w>l", { desc = "오른쪽 창으로" })
+-- 창 이동: vim-tmux-navigator 플러그인이 <C-h/j/k/l> 담당
+
+-- 창 분할/닫기
+map("n", "<leader>sv", "<cmd>vsplit<cr>", { desc = "수직 분할" })
+map("n", "<leader>sh", "<cmd>split<cr>", { desc = "수평 분할" })
+map("n", "<leader>sx", "<cmd>close<cr>", { desc = "현재 창 닫기" })
+map("n", "<leader>se", "<C-w>=", { desc = "창 크기 균등화" })
 
 -- 버퍼
 map("n", "<S-h>", "<cmd>bprevious<cr>", { desc = "이전 버퍼" })
