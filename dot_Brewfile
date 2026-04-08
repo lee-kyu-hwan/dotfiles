@@ -44,7 +44,6 @@ cask "font-meslo-lg-nerd-font"
 
 # Casks
 cask "android-studio"
-cask "claude-code"
 cask "flutter"
 cask "copilot-cli"
 cask "ghostty"
