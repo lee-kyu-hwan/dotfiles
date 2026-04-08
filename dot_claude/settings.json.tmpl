@@ -6,7 +6,11 @@
     "playwright": {
       "command": "npx",
       "args": ["@playwright/mcp@latest"]
-    }
+    }{{ if eq .chezmoi.os "darwin" }},
+    "figma": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3845/sse"
+    }{{ end }}
   },
   "permissions": {
     "allow": [
@@ -16,7 +20,7 @@
     "defaultMode": "auto"
   },
   "enabledPlugins": {
-    "superpowers@claude-plugins-official": true,
+    "superpowers@superpowers-marketplace": true,
     "frontend-design@claude-plugins-official": true,
     "code-review@claude-plugins-official": true,
     "code-simplifier@claude-plugins-official": true,

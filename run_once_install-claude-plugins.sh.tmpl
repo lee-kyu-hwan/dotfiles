@@ -1,0 +1,8 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+# Claude Code 커스텀 플러그인 설치 (macOS only)
+
+# superpowers 마켓플레이스 추가 및 플러그인 설치
+claude plugins marketplace add obra/superpowers-marketplace
+claude plugins install superpowers@superpowers-marketplace
+{{ end -}}
