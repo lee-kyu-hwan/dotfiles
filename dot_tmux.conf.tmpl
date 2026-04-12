@@ -13,8 +13,9 @@ set-window-option -g mode-keys vi
 bind-key -T copy-mode-vi v send-keys -X begin-selection
 bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
 
-# 마우스 드래그 종료 시 즉시 시스템 클립보드로 복사 (OSC 52 활용)
-bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
+# 마우스 드래그 복사 비활성화 (의도치 않은 복사 방지)
+# 복사는 prefix+[ → v선택 → y복사 키보드 워크플로우 사용
+unbind-key -T copy-mode-vi MouseDragEnd1Pane
 
 # "0"번 세션 이름을 "main"으로 자동 변경
 set-hook -g session-created 'if -F "#{==:#{session_name},0}" "rename-session main"'
