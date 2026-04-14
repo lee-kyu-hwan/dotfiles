@@ -17,7 +17,7 @@ bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
 # 복사는 prefix+[ → v선택 → y복사 키보드 워크플로우 사용
 unbind-key -T copy-mode-vi MouseDragEnd1Pane
 
-# 한글 입력 상태에서 copy-mode 종료 (ㅂ = q)
+# 한글 입력 상태에서 copy-mode 종료 (ㅂ = q, 안전망)
 bind-key -T copy-mode-vi ㅂ send-keys -X cancel
 
 # "0"번 세션 이름을 "main"으로 자동 변경
@@ -32,6 +32,9 @@ set-hook -g session-created 'if -F "#{==:#{session_name},0}" "rename-session mai
 set -g prefix M-F12
 bind -n C-b switch-client -T prefix \; run-shell -b "macism com.apple.keylayout.ABC"
 bind C-b send-keys C-b
+
+# --- 1-2. copy-mode 진입 시 영문 전환 (마우스 스크롤 포함) ---
+set-hook -g pane-mode-changed 'if -F "#{pane_in_mode}" "run -b \"macism com.apple.keylayout.ABC\""'
 
 # --- 1-1. 자음 바인딩 (안전망) ---
 bind ㅈ choose-tree -Zw         # w
