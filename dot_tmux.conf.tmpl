@@ -87,7 +87,7 @@ set -g pane-active-border-style fg=colour51
 # ============================================================
 # Pane 레이아웃 정렬 (상단 55%, 하단 2개 50:50)
 # ============================================================
-bind = set-window-option main-pane-height 55% \; select-pane -t 0 \; select-layout main-horizontal
+bind = display-panes "swap-pane -s %% -t 0 \; set-window-option main-pane-height 55% \; select-layout main-horizontal"
 
 # ============================================================
 # OSC 시퀀스 패스스루
