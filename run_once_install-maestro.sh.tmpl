@@ -1,0 +1,8 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+# Maestro CLI 설치 (macOS only)
+
+if ! command -v maestro &> /dev/null; then
+  curl -fsSL "https://get.maestro.mobile.dev" | bash
+fi
+{{ end -}}
