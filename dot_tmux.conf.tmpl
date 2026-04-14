@@ -138,6 +138,10 @@ set -g @plugin 'christoomey/vim-tmux-navigator'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 
+# resurrect: pane 내용 캡처 + 저장 경로 지정
+set -g @resurrect-capture-pane-contents 'on'
+set -g @resurrect-dir '~/.local/share/tmux/resurrect'
+
 # continuum: 15분마다 자동 저장 + tmux 시작 시 자동 복원
 set -g @continuum-restore 'on'
 set -g @continuum-save-interval '15'

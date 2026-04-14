@@ -91,10 +91,16 @@ if command -v bat &>/dev/null; then
 fi
 
 # ============================================================
-# Ghostty Quick Terminal: quick tmux 세션 자동 연결
+# tmux 자동 연결 (재부팅 후에도 세션 복원)
 # ============================================================
-if [[ -n "$GHOSTTY_QUICK_TERMINAL" ]] && [[ -z "$TMUX" ]]; then
-    exec tmux new-session -A -s quick -c ~/code
+if command -v tmux &>/dev/null && [[ -z "$TMUX" ]] && [[ $- == *i* ]]; then
+    if [[ -n "$GHOSTTY_QUICK_TERMINAL" ]]; then
+        # Quick Terminal → quick 세션
+        exec tmux new-session -A -s quick -c ~/code
+    else
+        # 일반 터미널 → main 세션 (continuum이 자동 복원)
+        exec tmux new-session -A -s main
+    fi
 fi
 
 # ============================================================
