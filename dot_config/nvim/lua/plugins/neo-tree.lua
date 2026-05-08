@@ -40,7 +40,7 @@ return {
           follow_current_file = { enabled = true },
           filtered_items = {
             hide_dotfiles = false,
-            hide_gitignored = true,
+            hide_gitignored = false,
           },
         },
       })

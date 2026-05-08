@@ -2,6 +2,7 @@
 
 # Taps
 tap "laishulu/homebrew"
+tap "leoafarias/fvm"
 
 # CLI Tools
 brew "awscli"
@@ -36,10 +37,12 @@ brew "laishulu/homebrew/macism"
 # Languages & Runtimes
 brew "cocoapods"
 brew "firebase-cli"
+brew "leoafarias/fvm/fvm"
 brew "gemini-cli"
 brew "openjdk@17"
 
 # Data
+brew "mysql-client"
 brew "redis", restart_service: :changed
 
 # Fonts

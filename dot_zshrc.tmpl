@@ -49,6 +49,13 @@ if [ -d "/opt/homebrew/opt/openjdk@17" ]; then
 fi
 
 # ============================================================
+# MySQL Client
+# ============================================================
+if [ -d "/opt/homebrew/opt/mysql-client" ]; then
+    export PATH="/opt/homebrew/opt/mysql-client/bin:$PATH"
+fi
+
+# ============================================================
 # Bun
 # ============================================================
 [ -s "$HOME/.bun/_bun" ] && source "$HOME/.bun/_bun"
@@ -124,6 +131,11 @@ _tmux_fix_copy() {
   [[ -n "$TMUX" ]] && tmux refresh-client
 }
 add-zsh-hook precmd _tmux_fix_copy
+
+# ============================================================
+# AWS
+# ============================================================
+export AWS_PROFILE=work
 
 # ============================================================
 # Starship prompt (마지막에 로드)
