@@ -19,5 +19,24 @@ opt.undofile = true
 opt.updatetime = 250
 opt.timeoutlen = 500
 
+-- 외부에서 변경된 파일 자동 reload
+opt.autoread = true
+
+vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold", "CursorHoldI" }, {
+  pattern = "*",
+  callback = function()
+    if vim.fn.mode() ~= "c" and vim.fn.getcmdwintype() == "" then
+      vim.cmd("checktime")
+    end
+  end,
+})
+
+vim.api.nvim_create_autocmd("FileChangedShellPost", {
+  pattern = "*",
+  callback = function()
+    vim.notify("파일이 외부에서 변경되어 reload됨", vim.log.levels.INFO)
+  end,
+})
+
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
