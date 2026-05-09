@@ -82,15 +82,63 @@ local function center()
   win:centerOnScreen()
 end
 
+-- ---------------------------------------------------------------------------
+-- 사이클 분할: 같은 화살표 반복 시 1/2 → 1/3 → 1/4 순환
+-- ---------------------------------------------------------------------------
+local cycleSteps = {
+  -- {xRatio, yRatio, wRatio, hRatio}
+  left   = { {0,   0,   1/2, 1  }, {0,   0,   1/3, 1  }, {0,   0,   1/4, 1  } },
+  right  = { {1/2, 0,   1/2, 1  }, {2/3, 0,   1/3, 1  }, {3/4, 0,   1/4, 1  } },
+  top    = { {0,   0,   1,   1/2}, {0,   0,   1,   1/3}, {0,   0,   1,   1/4} },
+  bottom = { {0,   1/2, 1,   1/2}, {0,   2/3, 1,   1/3}, {0,   3/4, 1,   1/4} },
+}
+
+local function frameMatches(f, screen, xR, yR, wR, hR)
+  local tol = 5  -- sub-pixel 허용 오차
+  return math.abs(f.x - (screen.x + screen.w * xR)) < tol
+    and  math.abs(f.y - (screen.y + screen.h * yR)) < tol
+    and  math.abs(f.w - (screen.w * wR))            < tol
+    and  math.abs(f.h - (screen.h * hR))            < tol
+end
+
+local function cycleSide(side)
+  return function()
+    local win = hs.window.focusedWindow()
+    if not win then return end
+    saveHistory(win)
+
+    local screen = win:screen():frame()
+    local f = win:frame()
+    local steps = cycleSteps[side]
+
+    -- 현재 위치가 사이클의 어느 단계인지 판단
+    local nextIdx = 1  -- 기본: 첫 단계 (1/2)
+    for i, s in ipairs(steps) do
+      if frameMatches(f, screen, s[1], s[2], s[3], s[4]) then
+        nextIdx = (i % #steps) + 1  -- 다음 단계, 끝이면 1로 wrap
+        break
+      end
+    end
+
+    local s = steps[nextIdx]
+    win:setFrame({
+      x = math.floor(screen.x + screen.w * s[1]),
+      y = math.floor(screen.y + screen.h * s[2]),
+      w = math.floor(screen.w * s[3]),
+      h = math.floor(screen.h * s[4]),
+    })
+  end
+end
+
 -- =============================================================================
 -- 키바인딩 (Magnet 기본 단축키)
 -- =============================================================================
 
--- Halves: ⌃⌥ + 화살표
-hs.hotkey.bind(mash, "left",  moveTo(0,   0,   0.5, 1))
-hs.hotkey.bind(mash, "right", moveTo(0.5, 0,   0.5, 1))
-hs.hotkey.bind(mash, "up",    moveTo(0,   0,   1,   0.5))
-hs.hotkey.bind(mash, "down",  moveTo(0,   0.5, 1,   0.5))
+-- Halves with cycle: ⌃⌥ + 화살표 (반복 시 1/2 → 1/3 → 1/4 순환)
+hs.hotkey.bind(mash, "left",  cycleSide("left"))
+hs.hotkey.bind(mash, "right", cycleSide("right"))
+hs.hotkey.bind(mash, "up",    cycleSide("top"))
+hs.hotkey.bind(mash, "down",  cycleSide("bottom"))
 
 -- Corners (Quarters): ⌃⌥ + U/I/J/K
 hs.hotkey.bind(mash, "u", moveTo(0,   0,   0.5, 0.5))  -- 좌상
