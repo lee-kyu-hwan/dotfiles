@@ -21,6 +21,57 @@ Brewfile에 포함되어 있어 `brew bundle --global`로 자동 설치.
 
 로그인/계정 가입은 필요 없음 (오픈소스 MIT 라이선스).
 
+## 현재 설정 — Magnet 호환 윈도우 매니지먼트
+
+dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 매핑한 윈도우 매니지먼트를 구성했다. **외부 Spoon이나 라이브러리 의존 없이 Hammerspoon 내장 API만 사용** (`hs.window`, `hs.hotkey`, `hs.pathwatcher`, `hs.alert`).
+
+### 지원 단축키 전체
+
+| 동작 | 단축키 |
+|------|--------|
+| 좌/우/상/하 절반 | `⌃⌥` + ←/→/↑/↓ |
+| 좌상/우상/좌하/우하 모서리 (4분할) | `⌃⌥` + U/I/J/K |
+| 좌/중/우 1/3 | `⌃⌥` + D/F/G |
+| 좌 2/3 | `⌃⌥` + E |
+| 우 2/3 | `⌃⌥` + T |
+| 최대화 | `⌃⌥` + Return |
+| 중앙 (현재 크기 유지) | `⌃⌥` + C |
+| 이전 위치 복원 | `⌃⌥` + Delete |
+| 이전/다음 모니터로 이동 | `⌃⌥⌘` + ←/→ |
+
+### 구현 디테일
+
+- `hs.window.animationDuration = 0` — Magnet과 동일한 즉시 이동
+- `moveTo(xRatio, yRatio, wRatio, hRatio)` 단일 헬퍼로 DRY 구성 (모든 분할 동작이 이 함수 하나)
+- `screen:frame()` 사용 — Dock/메뉴바 영역 존중
+- `math.floor` 적용 — sub-pixel 잘림 방지
+- 윈도우 ID 기반 history 테이블로 "복원" 동작 구현 (Magnet의 ⌃⌥Delete와 동일 동작)
+- `hs.pathwatcher` 내장 — `~/.hammerspoon/` 내 .lua 파일 변경 시 자동 리로드
+
+### Magnet에서 마이그레이션 시 주의사항
+
+1. **Magnet 종료 필수** — 메뉴바 Magnet 아이콘 → Quit. 동시 실행 시 같은 단축키가 충돌
+2. **Magnet 로그인 항목 제거** — 시스템 설정 → 일반 → 로그인 항목에서 Magnet 빼기 (재부팅 시 자동 실행 방지)
+3. **Hammerspoon을 로그인 항목에 추가** — Hammerspoon Preferences → "Launch Hammerspoon at login" 체크
+4. 며칠 사용 후 안정적이면 Magnet 앱 자체 제거 가능
+
+### init.lua 수정 흐름
+
+```bash
+chezmoi edit ~/.hammerspoon/init.lua    # 자동 apply + commit + push
+# 저장 즉시 pathwatcher가 hs.reload() 호출 → 변경사항 즉시 반영
+```
+
+### 의도적으로 사용하지 않은 Spoon
+
+아래 Spoon들은 강력하지만 **"Magnet 단축키 그대로"** 라는 요구와 매핑이 어긋나서 사용하지 않았다. 향후 사이클식 분할이나 더 풍부한 기능을 원할 때 단계적 도입 가능.
+
+| Spoon | 설치 시점 |
+|-------|----------|
+| MiroWindowsManager | 같은 키 반복으로 1/2→1/3→2/3 사이클을 원할 때 |
+| SpoonInstall | 다른 Spoon을 코드로 관리하고 싶을 때 |
+| ReloadConfiguration | 자체 pathwatcher 대신 Spoon 방식 선호 시 |
+
 ## 커뮤니티 표준 사용 패턴
 
 awesome-hammerspoon, 공식 Spoons, 5+ 인기 dotfiles (zzamboni, cmsj, philc, trishume), HN/Reddit 토론을 cross-reference한 결과.
