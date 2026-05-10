@@ -189,8 +189,8 @@ end
 
 bindIfAppExists(appKey, "w", "Google Chrome")  -- Web
 bindIfAppExists(appKey, "s", "Slack")
-bindIfAppExists(appKey, "g", "Figma")          -- G = Graphics (F는 Mail Search 충돌)
-bindIfAppExists(appKey, "e", "Ghostty")        -- E = 터미널 (T는 Toolbar 충돌 다수)
+bindIfAppExists(appKey, "f", "Figma")          -- ⌥⌘F는 Mail Search 충돌 (글로벌 override)
+bindIfAppExists(appKey, "g", "Ghostty")        -- ⌥⌘G는 일부 앱 Find Next 충돌 (글로벌 override)
 
 -- =============================================================================
 -- 설정 자동 리로드 (~/.hammerspoon/ 내 .lua 변경 시)
