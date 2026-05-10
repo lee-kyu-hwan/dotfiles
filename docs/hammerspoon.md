@@ -38,7 +38,7 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 중앙 (현재 크기 유지) | `⌃⌥` + C |
 | 이전 위치 복원 | `⌃⌥` + Delete |
 | 이전/다음 모니터로 이동 | `⌃⌥⌘` + ←/→ |
-| 앱 토글 (Chrome) | `⌥⌘` + W |
+| 앱 토글 (Chrome) | `⌥⌘` + B |
 | 앱 토글 (Slack) | `⌥⌘` + S |
 | 앱 토글 (Figma) | `⌥⌘` + F |
 | 앱 토글 (Ghostty) | `⌥⌘` + G |
