@@ -1,0 +1,136 @@
+{{ if eq .chezmoi.os "darwin" -}}
+#!/bin/bash
+# macOS 시스템 설정 자동 적용
+# 변경사항: 이 파일 편집 → chezmoi apply 시 자동 재실행
+# 머신별 분기: .machine_type ({{ .machine_type }})
+set +e
+
+echo "▶ macOS 시스템 설정 적용 중..."
+
+# ===========================================================================
+# 1. 키보드 — vim/Flutter 개발자 필수
+# ===========================================================================
+
+# [1] 키 누르고 있을 때 액센트 메뉴 비활성화 (vim hjkl 반복)
+defaults write -g ApplePressAndHoldEnabled -bool false
+
+# [2-3] 키 반복 속도 (재로그인 후 완전 적용)
+defaults write -g KeyRepeat -int 2
+defaults write -g InitialKeyRepeat -int 15
+
+# [4] 자동 텍스트 변환 5종 끄기 (코드 작성 시 거슬림 제거)
+defaults write -g NSAutomaticCapitalizationEnabled -bool false
+defaults write -g NSAutomaticSpellingCorrectionEnabled -bool false
+defaults write -g NSAutomaticQuoteSubstitutionEnabled -bool false
+defaults write -g NSAutomaticDashSubstitutionEnabled -bool false
+defaults write -g NSAutomaticPeriodSubstitutionEnabled -bool false
+
+# ===========================================================================
+# 2. 트랙패드 — 탭 클릭 (이미 적용된 상태이지만 새 머신에서도 보장)
+# ===========================================================================
+
+# [5] 탭 클릭
+defaults write com.apple.AppleMultitouchTrackpad Clicking -bool true
+defaults write com.apple.driver.AppleBluetoothMultitouch.trackpad Clicking -bool true
+defaults -currentHost write -g com.apple.mouse.tapBehavior -int 1
+defaults write -g com.apple.mouse.tapBehavior -int 1
+
+# ===========================================================================
+# 3. Finder
+# ===========================================================================
+
+# [6] 경로 표시줄
+defaults write com.apple.finder ShowPathbar -bool true
+
+# [7] 상태 표시줄
+defaults write com.apple.finder ShowStatusBar -bool true
+
+# [8] 모든 확장자 표시
+defaults write -g AppleShowAllExtensions -bool true
+
+# [9] 현재 폴더에서 검색 (전체 Mac 아님)
+defaults write com.apple.finder FXDefaultSearchScope -string "SCcf"
+
+# [10] 확장자 변경 경고 끔
+defaults write com.apple.finder FXEnableExtensionChangeWarning -bool false
+
+# [11] .DS_Store 네트워크/USB에 안 만듦
+defaults write com.apple.desktopservices DSDontWriteNetworkStores -bool true
+defaults write com.apple.desktopservices DSDontWriteUSBStores -bool true
+
+# ===========================================================================
+# 4. Dock — Hammerspoon 앱 토글과 공존
+# ===========================================================================
+
+# [12] 자동 숨김
+defaults write com.apple.dock autohide -bool true
+
+# [13] 자동 숨김 애니메이션 가속
+defaults write com.apple.dock autohide-delay -float 0
+defaults write com.apple.dock autohide-time-modifier -float 0.4
+
+# [14] 최근 앱 영역 숨김
+defaults write com.apple.dock show-recents -bool false
+
+# [15] Spaces 자동 재정렬 끄기 (tmux/Hammerspoon 사용자 muscle memory 보호)
+defaults write com.apple.dock mru-spaces -bool false
+
+# ===========================================================================
+# 5. 스크린샷 — 데스크탑 정돈
+# ===========================================================================
+
+# [16] 저장 위치
+mkdir -p "${HOME}/Pictures/Screenshots"
+defaults write com.apple.screencapture location -string "${HOME}/Pictures/Screenshots"
+
+# [17] PNG 형식
+defaults write com.apple.screencapture type -string "png"
+
+# [18] 윈도우 그림자 제거
+defaults write com.apple.screencapture disable-shadow -bool true
+
+# ===========================================================================
+# 6. 메뉴바 시계
+# ===========================================================================
+
+# [19] 24시간 + 초 숨김 + 날짜 표시
+defaults write com.apple.menuextra.clock Show24Hour -bool true
+defaults write com.apple.menuextra.clock ShowSeconds -bool false
+defaults write com.apple.menuextra.clock ShowDate -int 1
+
+# ===========================================================================
+# 7. 윈도우 매니지먼트 — Hammerspoon과 충돌 방지
+# ===========================================================================
+
+# [20] macOS 시스템 Window Tiling 끔 (드래그 시 자동 분할 비활성화)
+defaults write com.apple.WindowManager EnableTilingByEdgeDrag -bool false
+
+# ===========================================================================
+# 8. 머신별 분기 (.machine_type)
+# ===========================================================================
+
+{{ if eq .machine_type "personal" -}}
+# 개인 머신: 추가 설정 자리
+{{ end -}}
+
+{{ if eq .machine_type "work" -}}
+# 회사 머신: 추가 설정 자리
+{{ end -}}
+
+# ===========================================================================
+# 9. 즉시 반영 — 관련 프로세스 재시작
+# ===========================================================================
+
+for app in "Dock" "Finder" "SystemUIServer" "ControlCenter" "cfprefsd"; do
+  killall "${app}" >/dev/null 2>&1 || true
+done
+
+echo "✓ macOS 설정 적용 완료"
+echo ""
+echo "⚠ 다음 항목은 재로그인 후 완전 적용됩니다:"
+echo "  - KeyRepeat / InitialKeyRepeat (키 반복 속도)"
+echo ""
+echo "⚠ TCC 보호 영역은 GUI에서 직접 부여 필요:"
+echo "  - 손쉬운 사용 → Hammerspoon"
+echo "  - 화면 녹화 → KeyCastr"
+{{ end -}}
