@@ -38,5 +38,13 @@ vim.api.nvim_create_autocmd("FileChangedShellPost", {
   end,
 })
 
+-- insert 모드 종료 시 자동 영문 전환 (macism)
+vim.api.nvim_create_autocmd("InsertLeave", {
+  pattern = "*",
+  callback = function()
+    vim.fn.system("macism com.apple.keylayout.ABC &")
+  end,
+})
+
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
