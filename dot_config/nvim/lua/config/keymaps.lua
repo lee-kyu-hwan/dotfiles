@@ -15,6 +15,10 @@ map("n", "<S-l>", "<cmd>bnext<cr>", { desc = "다음 버퍼" })
 -- ESC로 검색 하이라이트 제거
 map("n", "<Esc>", "<cmd>nohlsearch<cr>", { desc = "검색 하이라이트 제거" })
 
+-- insert 모드 빠르게 탈출
+map("i", "jk", "<Esc>", { desc = "insert 모드 → normal" })
+map("i", "kj", "<Esc>", { desc = "insert 모드 → normal" })
+
 -- 경로 복사
 map("n", "<leader>yp", function() vim.fn.setreg("+", vim.fn.expand("%")) end, { desc = "상대 경로 복사" })
 map("n", "<leader>yP", function() vim.fn.setreg("+", vim.fn.expand("%:p")) end, { desc = "절대 경로 복사" })
