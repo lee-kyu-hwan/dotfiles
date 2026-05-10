@@ -38,6 +38,24 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 중앙 (현재 크기 유지) | `⌃⌥` + C |
 | 이전 위치 복원 | `⌃⌥` + Delete |
 | 이전/다음 모니터로 이동 | `⌃⌥⌘` + ←/→ |
+| 앱 토글 (Chrome) | `⌃⌥⌘` + W |
+| 앱 토글 (Slack) | `⌃⌥⌘` + S |
+| 앱 토글 (Figma) | `⌃⌥⌘` + F |
+| 앱 토글 (Ghostty) | `⌃⌥⌘` + T |
+
+### 앱 토글 패턴
+
+`⌃⌥⌘` + 한 글자로 앱을 띄우거나 숨긴다 (이미 포커스되어 있으면 hide). `bindIfAppExists` 헬퍼로 미설치 앱은 자동 스킵해서 회사/개인 머신 간 dotfiles portability를 확보한다.
+
+```lua
+local function bindIfAppExists(modifier, key, appName)
+  if hs.application.infoForBundlePath("/Applications/" .. appName .. ".app") then
+    hs.hotkey.bind(modifier, key, toggleApp(appName))
+  end
+end
+```
+
+새 앱 추가 시 한 줄 추가만 하면 끝. 코드는 `dot_hammerspoon/init.lua` 참고.
 
 ### 사이클 분할 동작
 
@@ -163,7 +181,6 @@ local function toggleApp(name)
   end
 end
 
-hs.hotkey.bind(hyper, "e", toggleApp("Ghostty"))
 hs.hotkey.bind(hyper, "w", toggleApp("Google Chrome"))
 hs.hotkey.bind(hyper, "s", toggleApp("Slack"))
 hs.hotkey.bind(hyper, "c", toggleApp("Visual Studio Code"))

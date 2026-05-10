@@ -165,6 +165,32 @@ hs.hotkey.bind(mashCmd, "left",  moveToScreen("previous"))
 hs.hotkey.bind(mashCmd, "right", moveToScreen("next"))
 
 -- =============================================================================
+-- 앱 토글 (⌃⌥⌘ + 한 글자)
+-- 같은 키 다시 누르면 hide. 미설치 앱은 자동 스킵해서 머신별 portability 확보.
+-- =============================================================================
+local function toggleApp(name)
+  return function()
+    local app = hs.application.find(name)
+    if app and app:isFrontmost() then
+      app:hide()
+    else
+      hs.application.launchOrFocus(name)
+    end
+  end
+end
+
+local function bindIfAppExists(modifier, key, appName)
+  if hs.application.infoForBundlePath("/Applications/" .. appName .. ".app") then
+    hs.hotkey.bind(modifier, key, toggleApp(appName))
+  end
+end
+
+bindIfAppExists(mashCmd, "w", "Google Chrome")  -- Web
+bindIfAppExists(mashCmd, "s", "Slack")
+bindIfAppExists(mashCmd, "f", "Figma")
+bindIfAppExists(mashCmd, "t", "Ghostty")        -- Terminal
+
+-- =============================================================================
 -- 설정 자동 리로드 (~/.hammerspoon/ 내 .lua 변경 시)
 -- =============================================================================
 local function reloadConfig(files)
