@@ -2,16 +2,6 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
   },
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest"]
-    }{{ if eq .chezmoi.os "darwin" }},
-    "figma": {
-      "type": "sse",
-      "url": "http://127.0.0.1:3845/sse"
-    }{{ end }}
-  },
   "permissions": {
     "allow": [
       "WebSearch",
@@ -28,8 +18,29 @@
     "context7@claude-plugins-official": true,
     "figma@claude-plugins-official": true
   },
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers-marketplace"
+      }
+    }
+  },
   "language": "Korean",
   "alwaysThinkingEnabled": true,
   "effortLevel": "high",
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest"
+      ]
+    }{{ if eq .chezmoi.os "darwin" }},
+    "figma": {
+      "type": "sse",
+      "url": "http://127.0.0.1:3845/sse"
+    }{{ end }}
+  },
+  "theme": "light-daltonized"
 }
