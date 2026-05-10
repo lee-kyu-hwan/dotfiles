@@ -38,14 +38,18 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 중앙 (현재 크기 유지) | `⌃⌥` + C |
 | 이전 위치 복원 | `⌃⌥` + Delete |
 | 이전/다음 모니터로 이동 | `⌃⌥⌘` + ←/→ |
-| 앱 토글 (Chrome) | `⌃⌥⌘` + W |
-| 앱 토글 (Slack) | `⌃⌥⌘` + S |
-| 앱 토글 (Figma) | `⌃⌥⌘` + F |
-| 앱 토글 (Ghostty) | `⌃⌥⌘` + T |
+| 앱 토글 (Chrome) | `⌥⌘` + W |
+| 앱 토글 (Slack) | `⌥⌘` + S |
+| 앱 토글 (Figma) | `⌥⌘` + G |
+| 앱 토글 (Ghostty) | `⌥⌘` + E |
 
 ### 앱 토글 패턴
 
-`⌃⌥⌘` + 한 글자로 앱을 띄우거나 숨긴다 (이미 포커스되어 있으면 hide). `bindIfAppExists` 헬퍼로 미설치 앱은 자동 스킵해서 회사/개인 머신 간 dotfiles portability를 확보한다.
+`⌥⌘` + 한 글자로 앱을 띄우거나 숨긴다 (이미 포커스되어 있으면 hide). 2-modifier 조합이라 **한손 누름 가능** (왼손 엄지=Cmd + 약지=Option + 글자). `bindIfAppExists` 헬퍼로 미설치 앱은 자동 스킵해서 회사/개인 머신 간 dotfiles portability를 확보한다.
+
+letter는 시스템/앱 단축키 충돌을 피한 조합:
+- `F` 회피 → `G` (Mail의 ⌥⌘F=Search Mail 충돌)
+- `T` 회피 → `E` (Finder/Safari/Mail의 ⌥⌘T=Toolbar 토글 충돌 다수)
 
 ```lua
 local function bindIfAppExists(modifier, key, appName)

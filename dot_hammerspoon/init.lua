@@ -11,6 +11,7 @@ hs.window.animationDuration = 0
 -- ---------------------------------------------------------------------------
 local mash    = { "ctrl", "alt" }         -- ⌃⌥
 local mashCmd = { "ctrl", "alt", "cmd" }  -- ⌃⌥⌘ (모니터 간 이동)
+local appKey  = { "alt", "cmd" }          -- ⌥⌘ (앱 토글, 한손 가능)
 
 -- ---------------------------------------------------------------------------
 -- 복원용: 이동 전 윈도우 위치 저장
@@ -165,8 +166,9 @@ hs.hotkey.bind(mashCmd, "left",  moveToScreen("previous"))
 hs.hotkey.bind(mashCmd, "right", moveToScreen("next"))
 
 -- =============================================================================
--- 앱 토글 (⌃⌥⌘ + 한 글자)
+-- 앱 토글 (⌥⌘ + 한 글자) — 한손 누름 가능
 -- 같은 키 다시 누르면 hide. 미설치 앱은 자동 스킵해서 머신별 portability 확보.
+-- 일부 앱의 같은 단축키(⌥⌘T=Toolbar 등)는 Hammerspoon이 글로벌로 가로챈다.
 -- =============================================================================
 local function toggleApp(name)
   return function()
@@ -185,10 +187,10 @@ local function bindIfAppExists(modifier, key, appName)
   end
 end
 
-bindIfAppExists(mashCmd, "w", "Google Chrome")  -- Web
-bindIfAppExists(mashCmd, "s", "Slack")
-bindIfAppExists(mashCmd, "f", "Figma")
-bindIfAppExists(mashCmd, "t", "Ghostty")        -- Terminal
+bindIfAppExists(appKey, "w", "Google Chrome")  -- Web
+bindIfAppExists(appKey, "s", "Slack")
+bindIfAppExists(appKey, "g", "Figma")          -- G = Graphics (F는 Mail Search 충돌)
+bindIfAppExists(appKey, "e", "Ghostty")        -- E = 터미널 (T는 Toolbar 충돌 다수)
 
 -- =============================================================================
 -- 설정 자동 리로드 (~/.hammerspoon/ 내 .lua 변경 시)
