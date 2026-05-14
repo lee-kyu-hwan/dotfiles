@@ -25,7 +25,7 @@ fi
 
 # 1. Linux 개발 도구 (macOS는 Brew bundle에서 처리)
 if [[ "$(uname)" != "Darwin" ]]; then
-    echo "[1/7] Linux 개발 도구..."
+    echo "[1/8] Linux 개발 도구..."
     if command -v apt-get &>/dev/null; then
         sudo apt-get update
         sudo apt-get install -y tmux neovim zsh ripgrep fd-find
@@ -54,11 +54,11 @@ if [[ "$(uname)" != "Darwin" ]]; then
         fi
     fi
 else
-    echo "[1/7] Linux 개발 도구... skipped (macOS)"
+    echo "[1/8] Linux 개발 도구... skipped (macOS)"
 fi
 
 # 2. Oh My Zsh
-echo "[2/7] Oh My Zsh..."
+echo "[2/8] Oh My Zsh..."
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
     RUNZSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" || {
         echo "  ⚠️ Oh My Zsh 설치 실패"
@@ -69,7 +69,7 @@ else
 fi
 
 # 3. TPM (Tmux Plugin Manager)
-echo "[3/7] TPM..."
+echo "[3/8] TPM..."
 if [ ! -d "$HOME/.tmux/plugins/tpm" ]; then
     git clone https://github.com/tmux-plugins/tpm "$HOME/.tmux/plugins/tpm"
 else
@@ -77,7 +77,7 @@ else
 fi
 
 # 4. chezmoi 설치 + init
-echo "[4/7] chezmoi..."
+echo "[4/8] chezmoi..."
 if ! command -v chezmoi &>/dev/null; then
     sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin" || {
         echo "  ❌ chezmoi 설치 실패"
@@ -103,7 +103,7 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
 fi
 
 # 5. 기존 Stow 환경 정리 (chezmoi 검증 통과 후 실행)
-echo "[5/7] Stow 마이그레이션 정리..."
+echo "[5/8] Stow 마이그레이션 정리..."
 STOW_TARGETS=(.tmux.conf .zshrc .gitconfig .gitconfig-work .gitconfig-personal
               .gitignore_global .Brewfile .config/ghostty/config
               .config/starship.toml .claude/settings.json)
@@ -132,15 +132,23 @@ if [ "$stow_found" = false ]; then
 fi
 
 # 6. chezmoi apply
-echo "[6/7] chezmoi apply..."
+echo "[6/8] chezmoi apply..."
 "$CHEZMOI" apply
 
-# 7. Brew bundle (macOS only)
+# 7. TPM 플러그인 설치 (chezmoi가 ~/.tmux.conf를 배치한 뒤 실행)
+echo "[7/8] TPM 플러그인 설치..."
+if [ -x "$HOME/.tmux/plugins/tpm/bin/install_plugins" ] && [ -f "$HOME/.tmux.conf" ]; then
+    "$HOME/.tmux/plugins/tpm/bin/install_plugins"
+else
+    echo "  ⚠️ TPM 또는 ~/.tmux.conf 없음 (skip)"
+fi
+
+# 8. Brew bundle (macOS only)
 if [[ "$(uname)" == "Darwin" ]] && [ -f "$HOME/.Brewfile" ]; then
-    echo "[7/7] Brew bundle..."
+    echo "[8/8] Brew bundle..."
     brew bundle --global
 else
-    echo "[7/7] Brew bundle... skipped (not macOS)"
+    echo "[8/8] Brew bundle... skipped (not macOS)"
 fi
 
 echo ""
@@ -149,4 +157,3 @@ echo ""
 echo "후속 작업:"
 echo "  - Neovim 첫 실행 시 플러그인 자동 설치 (네트워크 필요)"
 echo "  - Neovim에서 :Mason으로 LSP 서버 설치 상태 확인"
-echo "  - tmux에서 prefix + I로 TPM 플러그인 설치"
