@@ -170,20 +170,30 @@ hs.hotkey.bind(mashCmd, "right", moveToScreen("next"))
 -- 같은 키 다시 누르면 hide. 미설치 앱은 자동 스킵해서 머신별 portability 확보.
 -- 일부 앱의 같은 단축키(⌥⌘T=Toolbar 등)는 Hammerspoon이 글로벌로 가로챈다.
 -- =============================================================================
-local function toggleApp(name)
+local function toggleApp(bundleID)
   return function()
-    local app = hs.application.find(name)
+    local app = hs.application.get(bundleID)
     if app and app:isFrontmost() then
       app:hide()
     else
-      hs.application.launchOrFocus(name)
+      hs.application.launchOrFocusByBundleID(bundleID)
     end
   end
 end
 
 local function bindIfAppExists(modifier, key, appName)
-  if hs.application.infoForBundlePath("/Applications/" .. appName .. ".app") then
-    hs.hotkey.bind(modifier, key, toggleApp(appName))
+  -- macOS 기본 앱은 /System/Applications에 있으므로 두 경로 모두 체크.
+  -- bundle ID로 토글하면 locale/표시명 영향을 안 받아 시스템 앱도 안정적으로 hide된다.
+  local paths = {
+    "/Applications/" .. appName .. ".app",
+    "/System/Applications/" .. appName .. ".app",
+  }
+  for _, p in ipairs(paths) do
+    local info = hs.application.infoForBundlePath(p)
+    if info and info.CFBundleIdentifier then
+      hs.hotkey.bind(modifier, key, toggleApp(info.CFBundleIdentifier))
+      return
+    end
   end
 end
 
@@ -191,6 +201,8 @@ bindIfAppExists(appKey, "b", "Google Chrome")  -- Browser
 bindIfAppExists(appKey, "s", "Slack")
 bindIfAppExists(appKey, "f", "Figma")          -- ⌥⌘F는 Mail Search 충돌 (글로벌 override)
 bindIfAppExists(appKey, "g", "Ghostty")        -- ⌥⌘G는 일부 앱 Find Next 충돌 (글로벌 override)
+bindIfAppExists(appKey, "p", "Spotify")
+bindIfAppExists(appKey, "n", "Notes")          -- macOS 기본 메모
 
 -- =============================================================================
 -- 설정 자동 리로드 (~/.hammerspoon/ 내 .lua 변경 시)
