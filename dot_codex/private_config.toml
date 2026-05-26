@@ -23,12 +23,27 @@ args = ["-y", "@upstash/context7-mcp"]
 [mcp_servers.playwright]
 command = "npx"
 args = ["-y", "@playwright/mcp@latest"]
-
-[mcp_servers.playwright.tools.browser_resize]
-approval_mode = "approve"
-
-[mcp_servers.playwright.tools.browser_navigate]
-approval_mode = "approve"
+enabled = true
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+default_tools_approval_mode = "approve"
+enabled_tools = [
+  "browser_navigate",
+  "browser_navigate_back",
+  "browser_snapshot",
+  "browser_click",
+  "browser_hover",
+  "browser_select_option",
+  "browser_type",
+  "browser_press_key",
+  "browser_fill_form",
+  "browser_take_screenshot",
+  "browser_wait_for",
+  "browser_console_messages",
+  "browser_tabs",
+  "browser_resize",
+  "browser_close",
+]
 
 [mcp_servers.figma]
 url = "https://mcp.figma.com/mcp"

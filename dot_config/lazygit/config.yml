@@ -4,8 +4,8 @@ gui:
   theme:
     lightTheme: false
 git:
-  paging:
-    pager: "delta --dark --paging=never --line-numbers"
+  pagers:
+    - pager: "delta --dark --paging=never --line-numbers"
 os:
   editPreset: "nvim"
 customCommands:
