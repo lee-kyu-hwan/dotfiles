@@ -1,0 +1,46 @@
+profile = "full_auto"
+
+[projects."/Users/lee-kyu-hwan/code/zambaguni-front"]
+trust_level = "trusted"
+
+[projects."/Users/lee-kyu-hwan/code/zambaguni-mobile"]
+trust_level = "trusted"
+
+[projects."/Users/lee-kyu-hwan/code/dotfiles"]
+trust_level = "trusted"
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "model", "git-branch", "pull-request-number", "run-state", "five-hour-limit", "used-tokens", "fast-mode"]
+status_line_use_colors = true
+
+[tui.model_availability_nux]
+"gpt-5.5" = 4
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+
+[mcp_servers.playwright.tools.browser_resize]
+approval_mode = "approve"
+
+[mcp_servers.playwright.tools.browser_navigate]
+approval_mode = "approve"
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+
+[profiles.full_auto]
+approval_policy = "on-request"
+sandbox_mode = "workspace-write"
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+
+[sandbox_workspace_write]
+network_access = true
+
+[notice]
+fast_default_opt_out = true
