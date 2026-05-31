@@ -42,5 +42,72 @@
       "url": "http://127.0.0.1:3845/sse"
     }{{ end }}
   },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{ .chezmoi.homeDir }}/.local/bin/ai-agent-ghostty-notify",
+            "args": [
+              "Claude Code"
+            ]
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{ .chezmoi.homeDir }}/.local/bin/ai-agent-ghostty-notify",
+            "args": [
+              "Claude Subagent"
+            ]
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{ .chezmoi.homeDir }}/.local/bin/ai-agent-ghostty-notify",
+            "args": [
+              "Claude Task"
+            ]
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{ .chezmoi.homeDir }}/.local/bin/ai-agent-ghostty-notify",
+            "args": [
+              "Claude Code"
+            ]
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{ .chezmoi.homeDir }}/.local/bin/ai-agent-ghostty-notify",
+            "args": [
+              "Claude Code"
+            ]
+          }
+        ]
+      }
+    ]
+  },
   "theme": "light-daltonized"
 }
