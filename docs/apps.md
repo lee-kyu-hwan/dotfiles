@@ -7,15 +7,20 @@ Brewfile로 관리되는 macOS 애플리케이션 및 런타임 목록.
 | 이름 | 종류 | 설명 |
 |------|------|------|
 | [android-studio](#android-studio) | Cask (앱) | Android/Flutter/React Native 개발 IDE |
-| [claude-code](#claude-code) | Cask (앱) | Anthropic Claude Code CLI |
 | [copilot-cli](#copilot-cli) | Cask (앱) | GitHub Copilot CLI |
+| [flutter](#flutter) | Cask (SDK) | Flutter SDK |
+| [gcloud-cli](#gcloud-cli) | Cask (CLI) | Google Cloud CLI |
 | [ghostty](#ghostty) | Cask (앱) | GPU 가속 터미널 에뮬레이터 |
+| [hammerspoon](#hammerspoon) | Cask (앱) | macOS 자동화/윈도우 매니저 |
 | [keycastr](#keycastr) | Cask (앱) | 키 입력 시각화 도구 |
 | [reactotron](#reactotron) | Cask (앱) | React Native 디버깅 도구 |
+| [font-meslo-lg-nerd-font](#font-meslo-lg-nerd-font) | Cask (폰트) | 터미널/Neovim 아이콘 폰트 |
 | [cocoapods](#cocoapods) | Formula (CLI) | iOS 의존성 관리자 |
-| [flutter](#flutter) | Formula (CLI) | Flutter SDK |
+| [firebase-cli](#firebase-cli) | Formula (CLI) | Firebase 프로젝트 관리 CLI |
+| [fvm](#fvm) | Formula (CLI) | Flutter 버전 관리자 |
 | [gemini-cli](#gemini-cli) | Formula (CLI) | Google Gemini CLI |
 | [openjdk@17](#openjdk17) | Formula (CLI) | Java 17 런타임 |
+| [mysql-client](#mysql-client) | Formula (CLI) | MySQL 클라이언트 |
 | [redis](#redis) | Formula (CLI) | 인메모리 데이터 스토어 |
 
 ---
@@ -32,16 +37,6 @@ Android SDK, AVD(에뮬레이터 관리자), 디버거가 내장되어 있어 �
 
 ---
 
-### claude-code
-
-Anthropic의 Claude AI를 터미널에서 직접 사용할 수 있는 공식 CLI 도구.
-코드 작성, 리팩터링, 버그 수정, 코드베이스 탐색 등을 자연어로 지시할 수 있다.
-
-- **주요 용도**: AI 코딩 어시스턴트, 코드 리뷰, 자동화 스크립트 작성
-- **관련 설정**: `~/.claude/` 디렉토리에 설정 및 프로젝트별 컨텍스트 관리
-
----
-
 ### copilot-cli
 
 GitHub Copilot을 터미널에서 사용할 수 있게 해주는 CLI 도구.
@@ -52,6 +47,25 @@ GitHub Copilot을 터미널에서 사용할 수 있게 해주는 CLI 도구.
 
 ---
 
+### flutter
+
+Google의 크로스플랫폼 UI 프레임워크 SDK. Brewfile에서는 공식 cask로 설치한다.
+
+- **주요 용도**: Flutter 앱 개발, 빌드, 테스트, 패키지 관리
+- **주요 명령어**: `flutter run`, `flutter build`, `flutter pub get`, `flutter doctor`
+- **의존 관계**: Android 빌드에 `android-studio` + `openjdk@17`, iOS 빌드에 `cocoapods` 필요
+
+---
+
+### gcloud-cli
+
+Google Cloud 리소스를 터미널에서 관리하는 공식 CLI.
+
+- **주요 용도**: GCP 프로젝트/인증/배포 관리, Firebase와 Google Cloud 연동 작업
+- **주요 명령어**: `gcloud auth login`, `gcloud config set project`, `gcloud app deploy`
+
+---
+
 ### ghostty
 
 Rust로 작성된 GPU 가속 터미널 에뮬레이터. 빠른 렌더링과 낮은 레이턴시가 특징.
@@ -59,6 +73,16 @@ Rust로 작성된 GPU 가속 터미널 에뮬레이터. 빠른 렌더링과 낮�
 - **주요 용도**: 기본 터미널 에뮬레이터
 - **테마**: One Dark
 - **관련 설정**: `dot_config/ghostty/` — 폰트, 테마, 키바인딩 등 설정 관리
+
+---
+
+### hammerspoon
+
+Lua로 macOS 자동화와 윈도우 매니지먼트를 구성하는 앱. 이 dotfiles에서는 Magnet 호환 단축키를 제공한다.
+
+- **주요 용도**: 윈도우 분할, 앱 토글, 자동 리로드
+- **설정 상세**: [docs/hammerspoon.md](hammerspoon.md) 참고
+- **관련 설정**: `dot_hammerspoon/init.lua`
 
 ---
 
@@ -83,6 +107,15 @@ React Native 및 React 앱 전용 데스크톱 디버깅 도구.
 
 ---
 
+### font-meslo-lg-nerd-font
+
+Meslo LG Nerd Font. 터미널, Starship, lazygit, Neovim 아이콘 표시에 사용한다.
+
+- **주요 용도**: 터미널 글꼴, Nerd Font 아이콘 렌더링
+- **관련 설정**: Ghostty와 lazygit의 아이콘 표시
+
+---
+
 ## 언어 및 런타임 (Formulae)
 
 ### cocoapods
@@ -94,13 +127,21 @@ Ruby로 작성된 iOS/macOS 앱의 의존성 관리자. Xcode 프로젝트에 �
 
 ---
 
-### flutter
+### firebase-cli
 
-Google의 크로스플랫폼 UI 프레임워크 SDK. iOS, Android, Web, Desktop 앱을 단일 Dart 코드베이스로 개발한다.
+Firebase 프로젝트를 관리하는 공식 CLI.
 
-- **주요 용도**: Flutter 앱 개발, 빌드, 테스트, 패키지 관리
-- **주요 명령어**: `flutter run`, `flutter build`, `flutter pub get`, `flutter doctor`
-- **의존 관계**: Android 빌드에 `android-studio` + `openjdk@17`, iOS 빌드에 `cocoapods` 필요
+- **주요 용도**: Firebase Hosting 배포, Cloud Functions 관리, 프로젝트 설정 확인
+- **주요 명령어**: `firebase login`, `firebase projects:list`, `firebase deploy`
+
+---
+
+### fvm
+
+Flutter SDK 버전을 프로젝트별로 고정하고 전환하는 CLI.
+
+- **주요 용도**: Flutter 프로젝트별 SDK 버전 관리
+- **주요 명령어**: `fvm install`, `fvm use`, `fvm flutter doctor`
 
 ---
 
@@ -124,6 +165,15 @@ OpenJDK 17 LTS 버전. Android 빌드 도구(Gradle)가 Java 런타임을 필요
 
 ## 데이터
 
+### mysql-client
+
+MySQL 서버에 접속하기 위한 클라이언트 CLI. `dot_zshrc.tmpl`과 Neovim database 플러그인에서 Homebrew 경로를 PATH에 추가한다.
+
+- **주요 용도**: 로컬/원격 MySQL 접속, SQL 실행
+- **주요 명령어**: `mysql`, `mysqldump`
+
+---
+
 ### redis
 
 인메모리 키-값 데이터 스토어. 캐싱, 세션 관리, 메시지 큐 등 다양한 용도로 사용되는 오픈소스 DB.
@@ -131,3 +181,11 @@ OpenJDK 17 LTS 버전. Android 빌드 도구(Gradle)가 Java 런타임을 필요
 - **주요 용도**: 로컬 개발 환경의 캐시 서버, 백엔드 API 세션 저장소, 작업 큐(BullMQ 등)
 - **주요 명령어**: `redis-server` (서버 실행), `redis-cli` (CLI 클라이언트)
 - **서비스 등록**: `brew services start redis`로 시스템 시작 시 자동 실행 가능
+
+## Brewfile 외 설치
+
+Claude Code CLI는 Brewfile이 아니라 `install.sh`에서 공식 설치 스크립트로 설치한다.
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```

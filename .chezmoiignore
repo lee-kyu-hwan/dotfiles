@@ -12,6 +12,7 @@ setup.sh
 {{ if eq .machine_type "server" }}
 .Brewfile
 .config/ghostty/config
+.hammerspoon/init.lua
 run_once_configure-keycastr.sh
 run_onchange_brew-bundle.sh
 {{ end }}

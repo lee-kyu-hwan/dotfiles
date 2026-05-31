@@ -8,6 +8,7 @@ Brewfile에서 관리하는 CLI 도구 목록과 사용법 정리.
 |------|-----------|------|
 | [bat](#bat) | `cat` | 파일 내용 출력 (syntax highlighting, 줄번호, git 변경 표시) |
 | [eza](#eza) | `ls` | 디렉토리 목록 (컬러, 아이콘, git 상태) |
+| [fastfetch](#fastfetch) | - | 터미널 시작 시 시스템 정보 표시 |
 | [fd](#fd) | `find` | 파일 검색 |
 | [ripgrep](#ripgrep) | `grep` | 텍스트 검색 |
 | [zoxide](#zoxide) | `cd` | 디렉토리 이동 (학습 기반) |
@@ -15,13 +16,17 @@ Brewfile에서 관리하는 CLI 도구 목록과 사용법 정리.
 | [delta](#delta) | - | git diff pager (syntax highlighting) |
 | [lazygit](#lazygit) | - | 터미널 Git UI |
 | [git](#git) | - | 버전 관리 |
+| [git-crypt](#git-crypt) | - | Git 저장소 내 민감 파일 암호화 |
 | [git-lfs](#git-lfs) | - | Git Large File Storage |
+| [gitleaks](#gitleaks) | - | Git 시크릿 스캔 |
 | [gh](#gh) | - | GitHub CLI |
 | [neovim](#neovim) | `vi` | 에디터 |
 | [starship](#starship) | - | 프롬프트 |
 | [tmux](#tmux) | - | 터미널 멀티플렉서 |
 | [jq](#jq) | - | JSON 파싱/필터링 |
 | [awscli](#awscli) | - | AWS CLI |
+| [kubectl](#kubectl) | - | Kubernetes CLI |
+| [terminal-notifier](#terminal-notifier) | - | macOS 알림 전송 CLI |
 | [node](#node) | - | Node.js 런타임 |
 | [pnpm](#pnpm) | `npm` | Node.js 패키지 매니저 |
 | [pipx](#pipx) | - | Python CLI 도구 격리 설치 |
@@ -63,6 +68,18 @@ eza -la --icons --git
 
 # 트리 형식으로 출력 (2단계 깊이)
 eza --tree --level=2 --icons
+```
+
+### fastfetch
+
+터미널 시작 시 시스템 정보를 빠르게 표시하는 도구. `dot_zshrc.tmpl`에서 인터랙티브 셸일 때 자동 실행된다.
+
+```sh
+# 시스템 정보 표시
+fastfetch
+
+# 설정 파일 지정
+fastfetch --config ~/.config/fastfetch/config.jsonc
 ```
 
 ### fd
@@ -176,6 +193,33 @@ git lfs ls-files
 
 # LFS 파일 다운로드
 git lfs pull
+```
+
+### git-crypt
+
+Git 저장소 안에서 특정 파일만 GPG로 암호화해 관리하는 도구.
+
+```sh
+# 저장소에 git-crypt 초기화
+git-crypt init
+
+# 권한 있는 GPG 사용자 추가
+git-crypt add-gpg-user USER_ID
+
+# 현재 저장소 잠금 상태 확인
+git-crypt status
+```
+
+### gitleaks
+
+커밋 이력과 작업 트리에서 API 키, 토큰 같은 시크릿이 들어갔는지 검사한다.
+
+```sh
+# 현재 저장소 스캔
+gitleaks detect
+
+# 커밋 전 staged 변경 확인
+gitleaks protect --staged
 ```
 
 ### delta
@@ -360,6 +404,30 @@ aws ec2 describe-instances --query 'Reservations[*].Instances[*].InstanceId'
 
 # 프로파일 지정해서 실행
 aws --profile work s3 ls
+```
+
+### kubectl
+
+Kubernetes 클러스터를 관리하는 공식 CLI. Brew 패키지명은 `kubernetes-cli`, 실행 파일명은 `kubectl`.
+
+```sh
+# 현재 컨텍스트 확인
+kubectl config current-context
+
+# Pod 목록 확인
+kubectl get pods
+
+# 배포 상태 확인
+kubectl rollout status deployment/my-app
+```
+
+### terminal-notifier
+
+macOS 알림 센터에 터미널에서 알림을 보내는 CLI.
+
+```sh
+# 간단한 알림
+terminal-notifier -title "작업 완료" -message "빌드가 끝났습니다"
 ```
 
 ---

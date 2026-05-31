@@ -62,8 +62,11 @@ Linux:                                 ┌────────────�
 | neovim | Neovim (lazy.nvim, LSP, telescope) ([키맵 & 치트시트](docs/neovim.md)) | O | O | O |
 | lazygit | lazygit 터미널 Git UI | O | O | O |
 | starship | Starship 프롬프트 | O | O | O |
+| fastfetch | 터미널 시작 시 시스템 정보 표시 | O | O | O |
 | claude | Claude Code 전역 설정 | O | O | O |
-| aws | AWS CLI SSO 설정 ([설정 문서](docs/aws-cli.md)) | O | O | X |
+| codex | Codex CLI 전역 설정 | O | O | O |
+| aws | AWS CLI SSO 설정 ([설정 문서](docs/aws-cli.md)) | O | O | O |
+| hammerspoon | Magnet 호환 윈도우 매니지먼트 ([설정 문서](docs/hammerspoon.md)) | O | O | X |
 | ghostty | Ghostty 터미널 설정 | O | O | X |
 | keycastr | 키 입력 시각화 ([설정 문서](docs/keycastr.md)) | O | O | X |
 
@@ -71,8 +74,8 @@ Linux:                                 ┌────────────�
 
 CLI 도구, 앱, 런타임은 Brewfile로 관리합니다. 상세 목록:
 
-- [CLI 도구 목록 & 사용법](docs/cli-tools.md) — bat, eza, zoxide, fzf, delta, jq 등 22개
-- [앱 & 런타임 목록](docs/apps.md) — Android Studio, Ghostty, Flutter, Redis 등 11개
+- [CLI 도구 목록 & 사용법](docs/cli-tools.md) — bat, eza, zoxide, fzf, delta, jq 등
+- [앱 & 런타임 목록](docs/apps.md) — Android Studio, Ghostty, Flutter, Redis 등
 
 #### 패키지 추가
 

@@ -47,7 +47,7 @@ chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push 
 
 ### .chezmoiignore
 
-`server`에서만 macOS 전용 파일(Brewfile, Ghostty, KeyCastr)을 제외. 나머지 설정은 모든 머신에 배포.
+`server`에서만 macOS 전용 파일(Brewfile, Ghostty, Hammerspoon, KeyCastr)을 제외. 나머지 설정은 모든 머신에 배포.
 
 ### 설치 2단계 구조
 
