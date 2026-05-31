@@ -1,0 +1,56 @@
+#!/bin/sh
+
+agent="${*:-AI Agent}"
+payload="$(cat)"
+
+jq_value() {
+  key="$1"
+  fallback="$2"
+
+  if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
+    value="$(printf '%s' "$payload" | jq -r "$key // empty" 2>/dev/null || true)"
+    if [ -n "$value" ] && [ "$value" != "null" ]; then
+      printf '%s' "$value"
+      return
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+event="$(jq_value '.hook_event_name // .type // .event // .notification_type' 'notification')"
+message="$(jq_value '.message // .msg // .title // .body' '')"
+cwd="$(jq_value '.cwd' "$PWD")"
+project="${cwd##*/}"
+
+case "$event" in
+  Stop|SubagentStop|TaskCompleted|agent-turn-complete|turn-complete|completed|done)
+    body="${project:-workspace}: 작업 완료"
+    ;;
+  Notification|PermissionRequest|permission_prompt|idle_prompt|elicitation_dialog|approval-requested|approval_required)
+    body="${project:-workspace}: 확인 필요"
+    ;;
+  *)
+    body="${message:-${project:-workspace}: $event}"
+    ;;
+esac
+
+if command -v jq >/dev/null 2>&1 && printf '%s' "$payload" | jq -e 'has("hook_event_name")' >/dev/null 2>&1; then
+  seq="$(printf '\033]777;notify;%s;%s\007' "$agent" "$body")"
+  jq -nc --arg seq "$seq" '{terminalSequence: $seq}'
+  exit 0
+fi
+
+if command -v terminal-notifier >/dev/null 2>&1 && /bin/sh -c '
+  terminal-notifier -title "$1" -message "$2" -sound Ping -activate com.mitchellh.ghostty >/dev/null 2>&1
+' sh "$agent" "$body" >/dev/null 2>&1; then
+  exit 0
+elif command -v osascript >/dev/null 2>&1; then
+  osascript \
+    -e 'on run argv' \
+    -e 'display notification (item 2 of argv) with title (item 1 of argv) sound name "Ping"' \
+    -e 'end run' \
+    "$agent" "$body" >/dev/null 2>&1
+else
+  printf '%s: %s\n' "$agent" "$body" >&2
+fi
