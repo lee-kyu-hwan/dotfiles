@@ -42,24 +42,45 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 앱 토글 (Slack) | `⌥⌘` + S |
 | 앱 토글 (Figma) | `⌥⌘` + F |
 | 앱 토글 (Ghostty) | `⌥⌘` + G |
+| 앱 토글 (Spotify) | `⌥⌘` + P |
+| 앱 토글 (Notes) | `⌥⌘` + N |
 
 ### 앱 토글 패턴
 
 `⌥⌘` + 한 글자로 앱을 띄우거나 숨긴다 (이미 포커스되어 있으면 hide). 2-modifier 조합이라 **한손 누름 가능** (왼손 엄지=Cmd + 약지=Option + 글자). `bindIfAppExists` 헬퍼로 미설치 앱은 자동 스킵해서 회사/개인 머신 간 dotfiles portability를 확보한다.
 
-letter는 앱 이름 첫 글자 기준. 일부 앱 단축키 충돌은 Hammerspoon이 글로벌로 가로채므로 무시:
+letter는 대체로 앱 이름 첫 글자 기준이다. 일부 앱 단축키 충돌은 Hammerspoon이 글로벌로 가로채므로 무시:
 - `⌥⌘+F` → Mail의 Search Mail과 충돌 (Figma 토글이 우선)
 - `⌥⌘+G` → 일부 텍스트 에디터의 Find Next와 충돌 (Cmd+G 대체 가능)
 
 ```lua
+local function toggleApp(bundleID)
+  return function()
+    local app = hs.application.get(bundleID)
+    if app and app:isFrontmost() then
+      app:hide()
+    else
+      hs.application.launchOrFocusByBundleID(bundleID)
+    end
+  end
+end
+
 local function bindIfAppExists(modifier, key, appName)
-  if hs.application.infoForBundlePath("/Applications/" .. appName .. ".app") then
-    hs.hotkey.bind(modifier, key, toggleApp(appName))
+  local paths = {
+    "/Applications/" .. appName .. ".app",
+    "/System/Applications/" .. appName .. ".app",
+  }
+  for _, p in ipairs(paths) do
+    local info = hs.application.infoForBundlePath(p)
+    if info and info.CFBundleIdentifier then
+      hs.hotkey.bind(modifier, key, toggleApp(info.CFBundleIdentifier))
+      return
+    end
   end
 end
 ```
 
-새 앱 추가 시 한 줄 추가만 하면 끝. 코드는 `dot_hammerspoon/init.lua` 참고.
+bundle ID로 토글하므로 앱 표시명 로케일 변화에 덜 민감하다. macOS 기본 앱은 `/System/Applications`도 함께 확인한다. 새 앱 추가 시 `bindIfAppExists(appKey, "키", "앱 이름")` 한 줄을 추가하면 된다.
 
 ### 사이클 분할 동작
 
@@ -378,16 +399,19 @@ end)
 
 익숙해진 후 `ClipboardTool` → `URLDispatcher` → `Seal` → `VimMode` 단계적 추가가 표준 학습 경로.
 
-## dotfiles로 관리하기
+## dotfiles 관리
 
-`~/.hammerspoon/init.lua`를 chezmoi로 관리하려면:
+현재 `~/.hammerspoon/init.lua`는 `dot_hammerspoon/init.lua`로 관리된다. 수정은 다음 흐름을 사용한다:
 
 ```bash
-chezmoi add ~/.hammerspoon/init.lua
-chezmoi add ~/.hammerspoon/Spoons   # Spoon 디렉토리 전체
+chezmoi edit ~/.hammerspoon/init.lua
 ```
 
-여러 lua 파일로 분할한 경우 디렉토리 통째로 add 가능.
+Spoon을 추가하거나 여러 lua 파일로 분할한다면 해당 파일 또는 디렉토리를 chezmoi에 추가한다:
+
+```bash
+chezmoi add ~/.hammerspoon/Spoons
+```
 
 ## 참고 자료
 

@@ -7,7 +7,7 @@ Leader 키: `<Space>`
 ## 첫 실행 안내
 
 1. `nvim` 실행 → lazy.nvim이 플러그인 자동 다운로드 (네트워크 필요)
-2. mason-lspconfig이 LSP 서버 자동 설치 (ts_ls, tailwindcss, eslint, lua_ls, jsonls)
+2. mason-lspconfig이 LSP 서버 자동 설치 (vtsls, tailwindcss, eslint, lua_ls, jsonls)
 3. 설치 상태 확인: `:Mason` → 목록에서 installed 확인
 4. treesitter 파서 자동 설치: `:TSInstallInfo`로 확인
 5. 문제 발생 시: `:checkhealth`로 진단
@@ -50,6 +50,8 @@ Leader 키: `<Space>`
 | `<Space>fb` | 버퍼 목록 | ★ |
 | `<Space>fh` | 도움말 검색 | ★ |
 | `<Space>fr` | 최근 파일 | ★ |
+| `<Space>fp` | 프로젝트 디렉토리 선택 후 파일 검색 | ★ |
+| `<Space>fP` | 프로젝트 디렉토리 선택 후 텍스트 검색 | ★ |
 
 ### LSP (코드 탐색)
 
@@ -73,6 +75,7 @@ Leader 키: `<Space>`
 |----|------|------|
 | `K` | 호버 정보 (타입, 문서) | 0.11 빌트인 |
 | `<C-s>` (Insert) | 시그니처 도움말 | 0.11 빌트인 |
+| `<Space>ih` | Inlay Hints 토글 | ★ |
 
 #### 리팩터링
 
@@ -108,6 +111,7 @@ Leader 키: `<Space>`
 | `<Space>hr` | hunk reset | ★ |
 | `<Space>hS` | 버퍼 전체 stage | ★ |
 | `<Space>hR` | 버퍼 전체 reset | ★ |
+| `<Space>hb` | 현재 줄 blame 토글 | ★ |
 
 #### LazyGit에서 diff 보기
 
@@ -135,6 +139,16 @@ Leader 키: `<Space>`
 |----|------|------|
 | `<Space>cf` | 코드 포맷 (수동) | ★ |
 | 저장 시 | 자동 포맷 (format-on-save) | ★ |
+
+### Database
+
+> 설정 파일: `dot_config/nvim/lua/plugins/database.lua`
+
+vim-dadbod-ui를 사용해 Neovim 안에서 DB 연결과 쿼리 실행을 관리한다. macOS에서는 Homebrew `mysql-client` 경로를 자동으로 PATH에 추가한다.
+
+| 키 | 기능 | 구분 |
+|----|------|------|
+| `<Space>db` | Database UI 토글 | ★ |
 
 ### 편집
 
@@ -205,6 +219,16 @@ s를 누른 후 → 이동할 위치의 글자 입력 (예: "di")
 ```
 
 `f`/`t`와 달리 화면 내 아무 위치로 이동 가능. 줄을 넘나드는 이동에 유용.
+
+### 입력기/자동 괄호/키 힌트
+
+> 설정 파일: `dot_config/nvim/lua/plugins/editor.lua`
+
+| 플러그인 | 기능 |
+|----------|------|
+| im-select.nvim | Insert 종료, 명령줄 종료, 포커스 복귀 시 영문 입력기로 전환 |
+| nvim-autopairs | 괄호/따옴표 자동 닫기 |
+| which-key.nvim | leader 키 조합 힌트 표시 |
 
 ### 코드 구조 선택/이동 (treesitter-textobjects)
 
@@ -351,7 +375,7 @@ LSP 진단(에러, 경고)을 하단 패널에 목록으로 표시. quickfix보�
 
 별도 키맵 없이 자동 표시.
 
-### 자동완성 (nvim-cmp)
+### 자동완성 (blink.cmp)
 
 > 설정 파일: `dot_config/nvim/lua/plugins/cmp.lua`
 
@@ -361,9 +385,11 @@ LSP 진단(에러, 경고)을 하단 패널에 목록으로 표시. quickfix보�
 | `<C-p>` | 이전 항목 | ★ |
 | `<CR>` | 선택 확인 | ★ |
 | `<Tab>` | 다음 항목 / 스니펫 점프 | ★ |
+| `<S-Tab>` | 이전 항목 / 스니펫 뒤로 이동 | ★ |
 | `<C-Space>` | 자동완성 수동 호출 | ★ |
-| `<C-d>` | 문서 위로 스크롤 | ★ |
-| `<C-f>` | 문서 아래로 스크롤 | ★ |
+| `<C-e>` | 자동완성 메뉴 닫기 | ★ |
+| `<C-d>` | 문서 아래로 스크롤 | ★ |
+| `<C-u>` | 문서 위로 스크롤 | ★ |
 
 ---
 

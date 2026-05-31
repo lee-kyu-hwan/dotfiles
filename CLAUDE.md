@@ -58,8 +58,8 @@ chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push 
 
 `dot_config/nvim/lua/` 하위:
 - `config/` — options, keymaps, lazy.nvim 부트스트랩
-- `plugins/` — 플러그인별 파일 분리 (lsp, cmp, telescope, neo-tree, git, conform, editor, theme, treesitter)
-- lsp.lua는 `vim.lsp.config()` + `vim.lsp.enable()` 네이티브 API 사용 (Neovim 0.11+ 필요)
+- `plugins/` — 플러그인별 파일 분리 (lsp, cmp/blink.cmp, telescope, neo-tree, git, conform, editor, theme, treesitter, database, dashboard)
+- lsp.lua는 `vim.lsp.config()` + mason-lspconfig `automatic_enable` 기반 네이티브 LSP API 사용 (Neovim 0.11+ 필요)
 
 ### Neovim 캐시 문제
 
