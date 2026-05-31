@@ -76,6 +76,8 @@ rm -rf ~/.cache/nvim && rm -rf ~/.local/share/nvim/lazy
 - `run_onchange_brew-bundle.sh.tmpl` — Brewfile 변경 시 `brew bundle --global` 자동 실행 (macOS only)
 - `run_onchange_configure-macos.sh.tmpl` — macOS 시스템 설정 (defaults write) 변경 시 자동 적용 (macOS only). 자세한 내용은 `docs/macos-defaults.md`
 - `run_once_configure-keycastr.sh.tmpl` — 최초 1회 KeyCastr 설정 적용 (macOS only)
+- `run_once_install-claude-plugins.sh.tmpl` — 최초 1회 Claude Code superpowers 플러그인 설치 (macOS only)
+- `run_once_install-maestro.sh.tmpl` — 최초 1회 Maestro CLI 설치 (macOS only)
 
 ## 언어
 

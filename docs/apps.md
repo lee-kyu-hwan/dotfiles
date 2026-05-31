@@ -189,3 +189,9 @@ Claude Code CLI는 Brewfile이 아니라 `install.sh`에서 공식 설치 스크
 ```bash
 curl -fsSL https://claude.ai/install.sh | bash
 ```
+
+Maestro CLI는 `run_once_install-maestro.sh.tmpl`에서 최초 1회 설치한다.
+
+```bash
+curl -fsSL "https://get.maestro.mobile.dev" | bash
+```

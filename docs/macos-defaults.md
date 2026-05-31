@@ -4,7 +4,15 @@
 
 ## 동작 방식
 
-`run_onchange_*.sh.tmpl` 패턴 — 스크립트 내용 변경 시 chezmoi가 SHA256 hash로 감지해서 자동 재실행. 사용자가 GUI에서 설정을 되돌려도 다음 `chezmoi apply`에서 다시 강제 적용된다.
+`run_onchange_*.sh.tmpl` 패턴 — 렌더링된 스크립트 내용이 바뀌면 chezmoi가 SHA256 hash로 감지해서 자동 재실행한다. GUI에서 설정만 되돌린 경우에는 스크립트 hash가 그대로라 다음 `chezmoi apply`만으로 재실행되지 않는다.
+
+강제로 다시 적용하려면 스크립트 주석이라도 수정해 hash를 바꾸는 방법이 가장 단순하다. 실행 상태를 직접 지울 때는 `scriptState` 전체가 아니라 `configure-macos.sh`에 해당하는 key만 삭제한다:
+
+```bash
+chezmoi state dump | rg -C2 configure-macos.sh
+chezmoi state delete --bucket=scriptState --key=<configure-macos.sh의 hash>
+chezmoi apply
+```
 
 ## 적용된 설정 (20개)
 
@@ -101,9 +109,9 @@ chezmoi apply
 ## 새 머신 셋업 흐름
 
 ```bash
-# 1. dotfiles 적용
-sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply lee-kyu-hwan
-brew bundle --global
+# 1. README의 2단계 설치 흐름 실행
+./install.sh
+claude "~/code/dotfiles/setup.sh를 실행해서 개발 환경 설정을 완료해줘"
 
 # 2. 자동 적용된 설정 확인
 defaults read com.apple.dock autohide   # 1
