@@ -1,4 +1,4 @@
-profile = "full_auto"
+notify = ["/Users/lee-kyu-hwan/.local/bin/ai-agent-ghostty-notify", "Codex"]
 
 [projects."/Users/lee-kyu-hwan/code/zambaguni-front"]
 trust_level = "trusted"
@@ -48,11 +48,6 @@ enabled_tools = [
 [mcp_servers.figma]
 url = "https://mcp.figma.com/mcp"
 
-[profiles.full_auto]
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
-model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
 
 [sandbox_workspace_write]
 network_access = true
