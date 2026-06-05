@@ -73,6 +73,12 @@ bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
 
 # ============================================================
+# 윈도우 순서 이동 (Ctrl+Shift+←/→)
+# ============================================================
+bind-key -n C-S-Left swap-window -t -1 \; previous-window
+bind-key -n C-S-Right swap-window -t +1 \; next-window
+
+# ============================================================
 # 설정 리로드
 # ============================================================
 bind r source-file ~/.tmux.conf \; display-message "tmux.conf 리로드 완료"
