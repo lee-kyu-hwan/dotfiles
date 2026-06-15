@@ -6,6 +6,9 @@
 -- Magnet과 동일하게 즉시 이동 (애니메이션 없음)
 hs.window.animationDuration = 0
 
+-- hs CLI(IPC) 활성화 — `hs -c "..."` 로 외부에서 lua 실행/디버깅 가능
+require("hs.ipc")
+
 -- ---------------------------------------------------------------------------
 -- Modifier 정의
 -- ---------------------------------------------------------------------------
@@ -214,8 +217,9 @@ bindIfAppExists(appKey, "n", "Notes")          -- macOS 기본 메모
 local function findMobileDeviceApps()
   -- 안드로이드 SDK emulator 경로에서 뜬 프로세스의 PID 집합 (이름 무관)
   local androidPids = {}
-  local ok, out = hs.execute("ps -ax -o pid=,comm=")
-  if ok then
+  -- hs.execute 반환값은 output, status 순서 (status가 두 번째)
+  local out, ok = hs.execute("ps -ax -o pid=,comm=")
+  if ok and out then
     for pid, comm in out:gmatch("(%d+)%s+([^\n]+)") do
       if comm:match("Library/Android/sdk/emulator") then
         androidPids[tonumber(pid)] = true
@@ -236,12 +240,14 @@ local function toggleMobileDevices()
   local apps = findMobileDeviceApps()
   if #apps == 0 then return end
 
-  local anyFront = false
+  -- 보임 기반 판정: 하나라도 보이면 전부 숨김, 다 숨겨졌으면 전부 표시.
+  -- frontmost 기준과 달리 두 앱 상태가 어긋나도 즉시 동기화된다.
+  local anyVisible = false
   for _, a in ipairs(apps) do
-    if a:isFrontmost() then anyFront = true; break end
+    if not a:isHidden() then anyVisible = true; break end
   end
 
-  if anyFront then
+  if anyVisible then
     for _, a in ipairs(apps) do a:hide() end
   else
     for _, a in ipairs(apps) do a:unhide() end
