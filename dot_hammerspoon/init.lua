@@ -205,6 +205,53 @@ bindIfAppExists(appKey, "p", "Spotify")
 bindIfAppExists(appKey, "n", "Notes")          -- macOS 기본 메모
 
 -- =============================================================================
+-- 모바일 디바이스 전체 토글 (iOS 시뮬레이터 + 안드로이드 에뮬레이터) — ⌥⌘E
+-- 하나라도 앞에 있으면 전부 숨김, 아니면 전부 표시 + 하나에 포커스.
+-- iOS는 단일 프로세스(Simulator)지만 안드로이드 에뮬레이터는 AVD마다 별도
+-- 프로세스이고 이름이 아키텍처/버전마다 다르므로(qemu-system-aarch64 등)
+-- 실행 경로(.../Android/sdk/emulator/)로 식별해 아키텍처 변화에도 안 깨진다.
+-- =============================================================================
+local function findMobileDeviceApps()
+  -- 안드로이드 SDK emulator 경로에서 뜬 프로세스의 PID 집합 (이름 무관)
+  local androidPids = {}
+  local ok, out = hs.execute("ps -ax -o pid=,comm=")
+  if ok then
+    for pid, comm in out:gmatch("(%d+)%s+([^\n]+)") do
+      if comm:match("Library/Android/sdk/emulator") then
+        androidPids[tonumber(pid)] = true
+      end
+    end
+  end
+
+  local apps = {}
+  for _, app in ipairs(hs.application.runningApplications()) do
+    if (app:name() or ""):match("^Simulator$") or androidPids[app:pid()] then
+      apps[#apps + 1] = app
+    end
+  end
+  return apps
+end
+
+local function toggleMobileDevices()
+  local apps = findMobileDeviceApps()
+  if #apps == 0 then return end
+
+  local anyFront = false
+  for _, a in ipairs(apps) do
+    if a:isFrontmost() then anyFront = true; break end
+  end
+
+  if anyFront then
+    for _, a in ipairs(apps) do a:hide() end
+  else
+    for _, a in ipairs(apps) do a:unhide() end
+    apps[1]:activate()
+  end
+end
+
+hs.hotkey.bind(appKey, "e", toggleMobileDevices)  -- ⌥⌘E: 시뮬레이터 + 에뮬레이터 전체 토글
+
+-- =============================================================================
 -- 설정 자동 리로드 (~/.hammerspoon/ 내 .lua 변경 시)
 -- =============================================================================
 local function reloadConfig(files)
