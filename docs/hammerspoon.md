@@ -150,6 +150,7 @@ end
 - `math.floor` 적용 — sub-pixel 잘림 방지
 - 윈도우 ID 기반 history 테이블로 "복원" 동작 구현 (Magnet의 ⌃⌥Delete와 동일 동작)
 - `hs.pathwatcher` 내장 — `~/.hammerspoon/` 내 .lua 파일 변경 시 자동 리로드
+- `require("hs.ipc")` — `hs` CLI(`brew`로 설치됨)로 외부에서 lua를 실행해 디버깅할 수 있게 IPC 포트를 연다. 예: `hs -c 'hs.reload()'`, `hs -c '<lua 코드>'`
 
 ### Magnet에서 마이그레이션 시 주의사항
 
