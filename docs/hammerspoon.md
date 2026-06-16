@@ -44,6 +44,7 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 앱 토글 (Ghostty) | `⌥⌘` + G |
 | 앱 토글 (Spotify) | `⌥⌘` + P |
 | 앱 토글 (Notes) | `⌥⌘` + N |
+| 모바일 디바이스 전체 토글 (iOS 시뮬레이터 + 안드로이드 에뮬레이터) | `⌥⌘` + E |
 
 ### 앱 토글 패턴
 
@@ -81,6 +82,52 @@ end
 ```
 
 bundle ID로 토글하므로 앱 표시명 로케일 변화에 덜 민감하다. macOS 기본 앱은 `/System/Applications`도 함께 확인한다. 새 앱 추가 시 `bindIfAppExists(appKey, "키", "앱 이름")` 한 줄을 추가하면 된다.
+
+### 모바일 디바이스 전체 토글 (`⌥⌘E`)
+
+iOS 시뮬레이터와 안드로이드 에뮬레이터를 **한 키로 함께** 보였다/숨겼다 한다. 일반 앱 토글과 메커니즘이 다른 이유:
+
+- **iOS 시뮬레이터**는 디바이스를 여러 개 띄워도 단일 `Simulator` 프로세스(`com.apple.iphonesimulator`)라 한 번에 처리된다.
+- **안드로이드 에뮬레이터**는 AVD마다 별도 프로세스이고 이름이 아키텍처/버전마다 다르다(`qemu-system-aarch64` 등). 그래서 프로세스 이름이 아니라 **실행 경로(`Library/Android/sdk/emulator/`)** 로 식별해 아키텍처가 바뀌어도 안 깨진다. (참고: MiniSim 같은 도구는 `qemu-system-aarch64` 파일명을 매칭해 인텔 맥에서 깨질 수 있다)
+
+판정은 **보임(`isHidden`) 기준**이다 — 하나라도 보이면 전부 숨기고, 다 숨겨져 있으면 전부 표시한다. `frontmost` 기준과 달리 두 앱의 상태가 어긋나도 누르는 즉시 동기화된다.
+
+```lua
+local function findMobileDeviceApps()
+  -- 안드로이드 SDK emulator 경로에서 뜬 프로세스의 PID 집합 (이름 무관)
+  local androidPids = {}
+  local out, ok = hs.execute("ps -ax -o pid=,comm=")  -- 반환값은 output, status 순서
+  if ok and out then
+    for pid, comm in out:gmatch("(%d+)%s+([^\n]+)") do
+      if comm:match("Library/Android/sdk/emulator") then
+        androidPids[tonumber(pid)] = true
+      end
+    end
+  end
+  local apps = {}
+  for _, app in ipairs(hs.application.runningApplications()) do
+    if (app:name() or ""):match("^Simulator$") or androidPids[app:pid()] then
+      apps[#apps + 1] = app
+    end
+  end
+  return apps
+end
+
+local function toggleMobileDevices()
+  local apps = findMobileDeviceApps()
+  if #apps == 0 then return end
+  local anyVisible = false
+  for _, a in ipairs(apps) do
+    if not a:isHidden() then anyVisible = true; break end
+  end
+  if anyVisible then
+    for _, a in ipairs(apps) do a:hide() end
+  else
+    for _, a in ipairs(apps) do a:unhide() end
+    apps[1]:activate()
+  end
+end
+```
 
 ### 사이클 분할 동작
 
