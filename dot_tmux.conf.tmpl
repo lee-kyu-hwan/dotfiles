@@ -81,6 +81,14 @@ bind-key -n C-S-Left  swap-window -t -1 \; previous-window
 bind-key -n C-S-Right swap-window -t +1 \; next-window
 
 # ============================================================
+# 윈도우 번호 자동 정렬 (빈 번호 메우기)
+#   - 윈도우 닫을 때 자동 재번호 (renumber-windows)
+#   - prefix + R 로 즉시 재정렬 (move-window -r)
+# ============================================================
+set -g renumber-windows on
+bind R move-window -r \; display-message "윈도우 번호 재정렬 완료"
+
+# ============================================================
 # 설정 리로드
 # ============================================================
 bind r source-file ~/.tmux.conf \; display-message "tmux.conf 리로드 완료"
