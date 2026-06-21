@@ -46,7 +46,10 @@ tmux 패인과 Neovim 창을 구분 없이 이동합니다. prefix 없이 사용
 | 키 | 기능 | 구분 |
 |----|------|------|
 | `Ctrl+B` | prefix (macOS: 영문 전환 + prefix) | ★ |
+| `prefix` → `Ctrl+B` | 리터럴 `Ctrl+B` 전송 (중첩 tmux에 prefix 전달) | ★ |
 | `prefix` → `:` | 명령어 모드 (영문 자동 전환) | ★ |
+
+> `prefix → Ctrl+B`는 OS별로 정의가 다릅니다. macOS는 `send-keys C-b`(prefix가 `M-F12`라 C-b는 영문 전환 트릭에 쓰임), Linux는 표준 `send-prefix`. 결과는 둘 다 안쪽으로 `Ctrl+B`를 전달합니다.
 
 ### 자음 바인딩 (macOS only — 안전망)
 
