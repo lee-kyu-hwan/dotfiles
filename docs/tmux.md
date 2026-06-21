@@ -71,9 +71,16 @@ tmux 패인과 Neovim 창을 구분 없이 이동합니다. prefix 없이 사용
 
 | 키 | 기능 | 구분 |
 |----|------|------|
+| `Ctrl+L` | 오른쪽 패인/창으로 이동 (vim-tmux-navigator) | ★ |
 | `prefix` → `Ctrl+L` | 화면 + 스크롤백 클리어 | ★ |
 
-> vim-tmux-navigator가 `Ctrl+L`을 사용하므로, 화면 클리어는 `prefix + Ctrl+L`로 변경되었습니다.
+> vim-tmux-navigator가 `Ctrl+L`을 "오른쪽 이동"으로 가져가므로, 화면 클리어는 `prefix + Ctrl+L`로 옮겼습니다.
+>
+> ⚠️ 단, 플러그인은 보상으로 `prefix C-l`을 `send-keys C-l`(단순 클리어)에 **자동 매핑**하는데, 이게 우리의 `clear-history`(스크롤백 클리어) 바인딩을 덮어쓴다. 이를 막기 위해 플러그인 로드 전에 자동 매핑을 비활성화한다:
+> ```tmux
+> set -g @vim_navigator_prefix_mapping_clear_screen ""
+> ```
+> 이 한 줄이 있어야 `prefix + Ctrl+L`의 스크롤백 클리어가 실제로 동작한다. ([vim-tmux-navigator Issue #9](https://github.com/christoomey/vim-tmux-navigator/issues/9))
 
 ### 복사 모드 커스텀
 
