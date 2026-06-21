@@ -16,6 +16,7 @@ Brewfile에 포함되어 있어 `brew bundle --global`로 자동 설치.
 |------|-----|------|
 | 비주얼라이저 | Svelte | 모던 UI |
 | 표시 모드 | Modifier 키만 | 일반 타이핑 숨김, 단축키만 표시 |
+| Command 키만 표시 | 끔 | Command 외 다른 Modifier(Ctrl, Option, Shift)도 함께 표시 |
 | 폰트 크기 | 18pt | |
 | 투명도 | 70% | |
 | 페이드 지연 | 1초 | 표시 후 1초 뒤 사라짐 |

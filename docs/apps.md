@@ -1,6 +1,9 @@
 # macOS 앱 목록
 
-Brewfile로 관리되는 macOS 애플리케이션 및 런타임 목록.
+Brewfile로 관리되는 macOS 애플리케이션 중 **GUI 앱(cask)** 과 **런타임/플랫폼 도구** 중심의 목록이다.
+`bat`, `eza`, `ripgrep` 같은 범용 CLI 도구는 여기서 다루지 않으며 [cli-tools.md](cli-tools.md)를 참고한다.
+
+> 정리 기준: 데스크톱 앱·SDK·폰트·플랫폼 CLI(클라우드/모바일/DB 런타임)는 이 문서, 셸 작업용 범용 CLI는 cli-tools.md.
 
 ## 요약 테이블
 
@@ -17,7 +20,8 @@ Brewfile로 관리되는 macOS 애플리케이션 및 런타임 목록.
 | [font-meslo-lg-nerd-font](#font-meslo-lg-nerd-font) | Cask (폰트) | 터미널/Neovim 아이콘 폰트 |
 | [cocoapods](#cocoapods) | Formula (CLI) | iOS 의존성 관리자 |
 | [firebase-cli](#firebase-cli) | Formula (CLI) | Firebase 프로젝트 관리 CLI |
-| [fvm](#fvm) | Formula (CLI) | Flutter 버전 관리자 |
+| [fvm](#fvm) | Formula (CLI, tap) | Flutter 버전 관리자 |
+| [supabase](#supabase) | Formula (CLI) | Supabase 백엔드 플랫폼 CLI |
 | [gemini-cli](#gemini-cli) | Formula (CLI) | Google Gemini CLI |
 | [openjdk@17](#openjdk17) | Formula (CLI) | Java 17 런타임 |
 | [mysql-client](#mysql-client) | Formula (CLI) | MySQL 클라이언트 |
@@ -142,6 +146,7 @@ Flutter SDK 버전을 프로젝트별로 고정하고 전환하는 CLI.
 
 - **주요 용도**: Flutter 프로젝트별 SDK 버전 관리
 - **주요 명령어**: `fvm install`, `fvm use`, `fvm flutter doctor`
+- **설치 경로**: Homebrew 코어가 아닌 `leoafarias/fvm` tap 경유 (`tap "leoafarias/fvm"` → `brew "leoafarias/fvm/fvm"`)
 
 ---
 
@@ -151,6 +156,16 @@ Google Gemini AI 모델을 터미널에서 직접 사용할 수 있는 공식 CL
 
 - **주요 용도**: AI 텍스트 생성, 코드 보조, Google 생태계 연동 작업
 - **전제 조건**: Google 계정 인증 또는 API 키 설정 필요
+
+---
+
+### supabase
+
+오픈소스 Firebase 대안인 Supabase 백엔드 플랫폼을 관리하는 공식 CLI. 로컬 개발 스택 실행과 마이그레이션/배포에 사용한다.
+
+- **주요 용도**: 로컬 Supabase 스택 실행, DB 마이그레이션 관리, 프로젝트 배포
+- **주요 명령어**: `supabase init`, `supabase start`, `supabase db push`, `supabase functions deploy`
+- **전제 조건**: 로컬 스택 실행 시 Docker 필요, 원격 작업 시 `supabase login` 인증
 
 ---
 

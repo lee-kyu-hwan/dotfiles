@@ -14,6 +14,24 @@ Leader 키: `<Space>`
 
 ## 커스텀 키맵
 
+### 시작 화면 (alpha-nvim)
+
+> 설정 파일: `dot_config/nvim/lua/plugins/dashboard.lua`
+
+인자 없이 `nvim`을 실행하면 표시되는 대시보드. 아스키 아트 헤더와 빠른 실행 버튼을 제공한다.
+
+| 키 | 기능 | 구분 |
+|----|------|------|
+| `l` | LazyGit 열기 (`<leader>gg`) | ★ |
+| `d` | Database UI (`<leader>db`) | ★ |
+| `f` | 파일 검색 (Telescope find_files) | ★ |
+| `r` | 최근 파일 (Telescope oldfiles) | ★ |
+| `g` | 텍스트 검색 (Telescope live_grep) | ★ |
+| `p` | 프로젝트 파일 검색 (`<leader>fp`) | ★ |
+| `P` | 프로젝트 텍스트 검색 (`<leader>fP`) | ★ |
+| `e` | 파일 탐색기 (Neotree toggle) | ★ |
+| `q` | 종료 (`:qa`) | ★ |
+
 ### 파일 탐색기 (neo-tree)
 
 > 설정 파일: `dot_config/nvim/lua/plugins/neo-tree.lua`
@@ -57,6 +75,8 @@ Leader 키: `<Space>`
 
 > 설정 파일: `dot_config/nvim/lua/plugins/lsp.lua`
 > Neovim 0.11+ 빌트인 키맵 기반. `gd`만 Telescope로 오버라이드 (import문이 아닌 실제 파일로 이동).
+>
+> lua 파일 편집 시에는 lazydev.nvim(`dot_config/nvim/lua/plugins/lazydev.lua`)이 Neovim 런타임 및 `vim.uv` 타입을 LSP에 자동 보강하여 자동완성/문서를 강화한다. 별도 키맵 없이 동작.
 
 #### 탐색
 
@@ -350,6 +370,19 @@ LSP 진단(에러, 경고)을 하단 패널에 목록으로 표시. quickfix보�
 | `<S-h>` | 이전 버퍼 | ★ |
 | `<S-l>` | 다음 버퍼 | ★ |
 
+### 경로 복사
+
+> 설정 파일: `dot_config/nvim/lua/config/keymaps.lua`
+
+현재 파일의 경로/파일명을 시스템 클립보드(`+` 레지스터)로 복사.
+
+| 키 | 기능 | 구분 |
+|----|------|------|
+| `<Space>yp` | 상대 경로 복사 | ★ |
+| `<Space>yP` | 절대 경로 복사 | ★ |
+| `<Space>yf` | 파일명 복사 | ★ |
+| `<Space>yl` | 경로:라인번호 복사 | ★ |
+
 ### 기타
 
 > 설정 파일: `dot_config/nvim/lua/config/keymaps.lua`
@@ -357,6 +390,8 @@ LSP 진단(에러, 경고)을 하단 패널에 목록으로 표시. quickfix보�
 | 키 | 기능 | 구분 |
 |----|------|------|
 | `<Esc>` | 검색 하이라이트 제거 | ★ |
+| `jk` (Insert) | Insert → Normal 모드 (Esc 대체) | ★ |
+| `kj` (Insert) | Insert → Normal 모드 (Esc 대체) | ★ |
 | `<` / `>` (비주얼) | 들여쓰기 유지하며 이동 | ★ |
 
 ### 상태바 (lualine.nvim)

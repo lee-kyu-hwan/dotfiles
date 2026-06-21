@@ -6,7 +6,22 @@ IAM Identity Center(SSO)를 사용하여 시크릿 키 없이 AWS CLI를 인증�
 
 | 프로필 | 역할 | 용도 |
 |--------|------|------|
-| `work` | AdministratorAccess | 업무용 기본 프로필 |
+| `default` | - | 기본 region/output 설정 (`ap-northeast-2`, `json`) |
+| `work` | AdministratorAccess | 업무용 SSO 프로필 (`ALA` 세션 사용) |
+
+`default`는 region/output 같은 공통 기본값만 갖고, 실제 SSO 인증은 `work` 프로필에서 수행한다.
+
+## SSO 세션
+
+`work` 프로필은 `ALA` SSO 세션을 참조한다. SSO 세션은 여러 프로필이 공유할 수 있는 로그인 설정 묶음이다.
+
+| 세션 | 설정 | 값 |
+|------|------|------|
+| `ALA` | `sso_start_url` | AWS access portal URL (IAM Identity Center → 설정에서 확인) |
+| `ALA` | `sso_region` | `ap-northeast-2` |
+| `ALA` | `sso_registration_scopes` | `sso:account:access` |
+
+`work` 프로필은 이 세션을 `sso_session = ALA`로 참조하며, `sso_account_id`(IAM Identity Center에서 확인)와 `sso_role_name = AdministratorAccess`를 지정한다.
 
 ## 사용법
 

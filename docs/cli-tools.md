@@ -25,6 +25,7 @@ Brewfile에서 관리하는 CLI 도구 목록과 사용법 정리.
 | [tmux](#tmux) | - | 터미널 멀티플렉서 |
 | [jq](#jq) | - | JSON 파싱/필터링 |
 | [awscli](#awscli) | - | AWS CLI |
+| [supabase](#supabase) | - | Supabase CLI |
 | [kubectl](#kubectl) | - | Kubernetes CLI |
 | [terminal-notifier](#terminal-notifier) | - | macOS 알림 전송 CLI |
 | [node](#node) | - | Node.js 런타임 |
@@ -133,7 +134,7 @@ tree -ad -L 3
 
 ### fzf
 
-범용 fuzzy finder. 파이프로 연결해 어떤 목록에도 사용할 수 있다. `Ctrl+R`로 히스토리 검색, `Ctrl+T`로 파일 검색이 기본 제공된다.
+범용 fuzzy finder. 파이프로 연결해 어떤 목록에도 사용할 수 있다. `Ctrl+R`로 히스토리 검색, `Ctrl+T`로 파일 검색이 기본 제공된다. `dot_zshrc.tmpl`에서 `eval "$(fzf --zsh)"`로 셸 통합을 로드해 이 키바인딩이 동작한다.
 
 ```sh
 # 현재 디렉토리에서 파일 fuzzy 검색
@@ -404,6 +405,21 @@ aws ec2 describe-instances --query 'Reservations[*].Instances[*].InstanceId'
 
 # 프로파일 지정해서 실행
 aws --profile work s3 ls
+```
+
+### supabase
+
+Supabase 프로젝트를 CLI에서 관리하는 도구. 로컬 개발 스택 실행, DB 마이그레이션, 타입 생성 등에 사용한다.
+
+```sh
+# 로컬 Supabase 스택 시작
+supabase start
+
+# 새 마이그레이션 생성
+supabase migration new add_users_table
+
+# 원격 DB 스키마로 마이그레이션 동기화
+supabase db push
 ```
 
 ### kubectl
