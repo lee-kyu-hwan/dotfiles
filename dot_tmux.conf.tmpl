@@ -160,6 +160,11 @@ set -g @plugin 'christoomey/vim-tmux-navigator'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 
+# vim-tmux-navigator: prefix C-l 자동 매핑 비활성화
+#   → 플러그인이 prefix C-l을 안 건드리므로, 위의 사용자 정의
+#     "화면 + 스크롤백 클리어"(bind C-l ... clear-history)가 살아난다
+set -g @vim_navigator_prefix_mapping_clear_screen ""
+
 # resurrect: pane 내용 캡처 + 저장 경로 지정
 set -g @resurrect-capture-pane-contents 'on'
 set -g @resurrect-dir '~/.local/share/tmux/resurrect'
