@@ -37,6 +37,7 @@ tmux 패인과 Neovim 창을 구분 없이 이동합니다. prefix 없이 사용
 | `Ctrl+j` | 아래로 이동 (tmux/vim 공유) | ★ |
 | `Ctrl+k` | 위로 이동 (tmux/vim 공유) | ★ |
 | `Ctrl+l` | 오른쪽으로 이동 (tmux/vim 공유) | ★ |
+| `Ctrl+\` | 직전 패인/창으로 토글 이동 (tmux/vim 공유) | ★ |
 
 ### 한글 IME 호환 (macOS only)
 
