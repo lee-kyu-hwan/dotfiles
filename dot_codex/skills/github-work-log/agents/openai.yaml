@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub Work Log"
+  short_description: "GitHub API 기반 기간별 업무 활동 로그"
+  default_prompt: "Use $github-work-log to summarize my GitHub work for 2026-06-01..2026-06-28."
