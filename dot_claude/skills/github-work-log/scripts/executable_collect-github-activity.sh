@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  collect-github-activity.sh YYYY-MM-DD
-  collect-github-activity.sh YYYY-MM-DD..YYYY-MM-DD
+  collect-github-activity.sh YYYYMMDD
+  collect-github-activity.sh YYYYMMDD-YYYYMMDD
 
 Environment:
   GITHUB_WORK_LOG_REPO  owner/repo scope. Defaults to zambaguni/zambaguni-front.
@@ -25,15 +25,22 @@ validate_date() {
   [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "invalid date: $1"
 }
 
+compact_to_iso() {
+  local d="$1"
+  echo "${d:0:4}-${d:4:2}-${d:6:2}"
+}
+
 parse_date_arg() {
   local raw="$1"
 
-  if [[ "$raw" == *".."* ]]; then
-    FROM_DATE="${raw%%..*}"
-    TO_DATE="${raw##*..}"
+  if [[ "$raw" =~ ^[0-9]{8}-[0-9]{8}$ ]]; then
+    FROM_DATE="$(compact_to_iso "${raw%-*}")"
+    TO_DATE="$(compact_to_iso "${raw#*-}")"
+  elif [[ "$raw" =~ ^[0-9]{8}$ ]]; then
+    FROM_DATE="$(compact_to_iso "$raw")"
+    TO_DATE="$FROM_DATE"
   else
-    FROM_DATE="$raw"
-    TO_DATE="$raw"
+    die "invalid date format: $raw (expected YYYYMMDD or YYYYMMDD-YYYYMMDD)"
   fi
 
   validate_date "$FROM_DATE"
