@@ -3,17 +3,7 @@
   "logo": {
     "source": "~/.config/fastfetch/macgraw.txt",
     "type": "file",
-    "position": "top",
-    "color": {
-      // $1: red comb / hat
-      "1": "#c44a3d",
-      // $2: Matrix green body
-      "2": "#00ff41",
-      // $3: orange beak
-      "3": "#e5892d",
-      // $4: dark gray eyes / brow
-      "4": "#30343a"
-    }
+    "position": "top"
   },
   "display": {
     "separator": " → "
