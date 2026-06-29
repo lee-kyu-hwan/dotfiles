@@ -14,10 +14,10 @@ date-only request, collect activity through `gh api`, then synthesize business-f
 
 Accept only one date argument:
 
-- `YYYY-MM-DD` for one day
-- `YYYY-MM-DD..YYYY-MM-DD` for a range
+- `YYYYMMDD` for one day (e.g. `20260626`)
+- `YYYYMMDD-YYYYMMDD` for a range (e.g. `20260626-20260629`)
 - Korean relative dates like `오늘`, `어제`, `이번 주` only after resolving them to absolute dates
-  in `Asia/Seoul`
+  in `Asia/Seoul` and converting to `YYYYMMDD` or `YYYYMMDD-YYYYMMDD` format
 
 Do not ask for repository, login, branch, or local git details unless the API collection fails.
 
@@ -41,8 +41,8 @@ Defaults:
 Run the bundled script from the skill directory:
 
 ```bash
-./scripts/collect-github-activity.sh YYYY-MM-DD
-./scripts/collect-github-activity.sh YYYY-MM-DD..YYYY-MM-DD
+./scripts/collect-github-activity.sh YYYYMMDD
+./scripts/collect-github-activity.sh YYYYMMDD-YYYYMMDD
 ```
 
 The script returns JSON containing:
@@ -70,36 +70,46 @@ implementation trivia:
 - Good: `파트너 모바일 지도 카드 사용성 개선`
 - Avoid: `fix: marker padding`, `PR #123 처리`
 
-When drafting a work report, use exactly four work items totaling eight hours and exactly three
-next-business-day plan items:
-
-```markdown
-## 업무 수행 내역
-
-| No. | 업무 내용 | 진행 상태 | 소요 시간 |
-|-----|----------|-----------|-----------|
-| 1 | {업무 제목} | 완료 | N시간 00분 |
-
-### 1. {업무 제목}
-- {세부 내용}
-
-## 성과 및 특이사항
-
-**주요 성과**
-
-- {성과}
-
-## 익일(출근일) 업무 계획
-
-1. {계획}
-```
-
-For a simple summary, use a shorter numbered list:
+Default output format — use this unless the user asks for `간단히` or `요약만`:
 
 ```text
-1. {작업 제목}
-   - {업무 관점의 세부 내용}
+**업무 수행 내역**
+
+1. {업무 제목}
+   진행 상태: 완료 / 소요 시간: 0시간 00분
+
+2. {업무 제목}
+   진행 상태: 완료 / 소요 시간: 0시간 00분
+
+3. {업무 제목}
+   진행 상태: 완료 / 소요 시간: 0시간 00분
+
+4. {업무 제목}
+   진행 상태: 완료·진행중 / 소요 시간: 0시간 00분
+
+---
+
+**성과 및 특이사항**
+- 주요 성과: {한 문장}
+- 이슈 / 장애: 없음
+- 협업 요청 사항: 없음
+
+---
+
+**익일(출근일) 업무 계획**
+
+1. {계획} [상]
+2. {계획} [중]
+3. {계획} [하]
 ```
+
+Output rules:
+
+- Exactly four work items. No markdown tables.
+- Total 소요 시간 across four items: 10 hours (for a single day or averaged over the period).
+- Exactly three 익일 업무 계획 items with priority tags [상/중/하].
+- Omit issue numbers, PR numbers, commit prefixes, and review-request process activities from item titles.
+- When the user requests `간단히` or `요약만`, fall back to a simple numbered list instead.
 
 ## Comment and Review Evidence
 
