@@ -24,7 +24,7 @@ Do not ask for repository, login, branch, or local git details unless the API co
 Defaults:
 
 - GitHub login: current authenticated user from `gh api user`
-- Repository: `zambaguni/zambaguni-front`
+- Repositories: `zambaguni/zambaguni-front`, `zambaguni/zambaguni-mobile`
 - Timezone: `Asia/Seoul`
 
 ## Hard Rules
@@ -53,10 +53,14 @@ The script returns JSON containing:
 - reviewed pull requests
 - created issues
 - issue and pull request conversations where the user commented
+- exact issue and pull request comments authored by the user
+- pull request inline review comments authored by the user
+- submitted pull request reviews authored by the user
 - commit search results
 
-Use `GITHUB_WORK_LOG_REPO=owner/repo` only when the user explicitly requests a different
-repository. It is an environment override, not a normal prompt parameter.
+Use `GITHUB_WORK_LOG_REPOS=owner/repo,owner/repo` only when the user explicitly requests a
+different repository set. `GITHUB_WORK_LOG_REPO=owner/repo` is still supported as a legacy
+single-repository override. These are environment overrides, not normal prompt parameters.
 
 ## Synthesis
 
@@ -97,8 +101,23 @@ For a simple summary, use a shorter numbered list:
    - {업무 관점의 세부 내용}
 ```
 
+## Comment and Review Evidence
+
+Prefer exact REST-collected comment and review data when summarizing discussion work:
+
+- `searches.issue_comments` contains issue and pull request conversation comments created by the
+  user during the date range.
+- `searches.pull_request_review_comments` contains inline PR review comments created by the user
+  during the date range.
+- `searches.pull_request_reviews` contains submitted PR review records, including review state and
+  body, filtered by `submitted_at`.
+
+Use `searches.commented_conversations` as a backup signal for conversation context, not as proof
+that every listed conversation received a new user comment in the range.
+
 ## Limitations
 
 GitHub Search can identify PRs, issues, reviews, comments, and commits matching the date range,
-but some comment searches are conversation-level rather than exact comment-body extraction. Treat
-the collected JSON as evidence to summarize, not as final wording.
+but some search results are conversation-level rather than exact activity records. Treat the
+collected JSON as evidence to summarize, not as final wording. Exact comment and review fields are
+more reliable for "what the user wrote" than search conversation matches.
