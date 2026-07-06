@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Import Claude Session"
+  short_description: "Import a Claude Code transcript into Codex from the Codex side."
+  default_prompt: "Find the current Claude Code transcript for this workspace and import it into a resumable Codex thread."
