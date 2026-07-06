@@ -13,9 +13,14 @@ set-window-option -g mode-keys vi
 bind-key -T copy-mode-vi v send-keys -X begin-selection
 bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
 
-# 마우스 드래그 복사 비활성화 (의도치 않은 복사 방지)
-# 복사는 prefix+[ → v선택 → y복사 키보드 워크플로우 사용
-unbind-key -T copy-mode-vi MouseDragEnd1Pane
+# 마우스 드래그를 무조건 tmux copy-mode로 처리 (정렬 유지 복사)
+#   - 에이전트 TUI(codex/claude)는 마우스 리포팅을 켜므로, tmux 기본값은
+#     드래그를 앱으로 넘겨버림 → Ghostty 네이티브 선택으로 흘러가 정렬이 깨짐.
+#   - 드래그를 강제로 copy-mode로 보내 tmux grid 기준(wrap 인식)으로 복사.
+#   - 클릭/스크롤은 그대로 앱에 전달됨. (드래그만 copy-mode 우선)
+bind-key -n MouseDrag1Pane copy-mode -M
+bind-key -T copy-mode-vi MouseDrag1Pane    send-keys -X begin-selection
+bind-key -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-and-cancel
 
 # 한글 입력 상태에서 copy-mode 종료 (ㅂ = q, 안전망)
 bind-key -T copy-mode-vi ㅂ send-keys -X cancel
