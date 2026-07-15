@@ -15,7 +15,8 @@
 
 ### 설치 및 업그레이드
 
-- chezmoi `run_onchange` 스크립트가 공식 버전 URL로 nvm v0.40.5를 설치한다.
+- chezmoi `run_onchange_before` 스크립트가 공식 버전 URL로 nvm v0.40.5를 설치한다.
+- nvm 설치를 일반 적용 단계보다 먼저 실행해 이후 Homebrew bundle이 실패해도 Node.js 설치가 선행되도록 한다.
 - `PROFILE=/dev/null`을 사용해 nvm 설치기가 홈의 셸 설정을 직접 수정하지 못하게 한다.
 - `NVM_DIR`은 XDG 경로인 `${XDG_CONFIG_HOME:-$HOME/.config}/nvm`을 사용한다.
 - 스크립트가 `nvm install 24`, `nvm alias default 24`, `nvm use default`를 실행한다.
@@ -36,7 +37,7 @@
 
 ## 변경 파일
 
-- `run_onchange_install-nvm.sh.tmpl`: nvm v0.40.5와 Node.js 24 설치 및 default alias 설정
+- `run_onchange_before_install-nvm.sh.tmpl`: Brew 적용 전에 nvm v0.40.5와 Node.js 24 설치 및 default alias 설정
 - `dot_zshrc.tmpl`: nvm 초기화 코드
 - `dot_Brewfile`: Homebrew Node 제거
 - `README.md`: 설치 흐름과 관리 정책 설명
@@ -54,7 +55,7 @@
 1. 변경된 셸 스크립트에 `bash -n`을 실행한다.
 2. `chezmoi execute-template`로 zsh 템플릿 렌더링을 확인한다.
 3. `chezmoi diff`에서 의도한 `.zshrc` 및 Brewfile 변경만 확인한다.
-4. `chezmoi apply`를 실행한다.
+4. `chezmoi apply --source-path run_onchange_before_install-nvm.sh.tmpl`로 nvm 스크립트를 독립 실행한다.
 5. 새 zsh에서 `command -v nvm`, `nvm version`, `node --version`, `nvm alias default`를 확인한다.
 6. 기대값은 nvm v0.40.5, Node.js v24.x, default alias 24이다.
 7. dotfiles 저장소에서 `git diff --check`를 통과한다.
