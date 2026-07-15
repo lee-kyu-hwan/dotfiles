@@ -4,7 +4,7 @@
 
 **Goal:** `chezmoi apply`로 nvm v0.40.5와 최신 Node.js 24.x를 설치하고 새 zsh 세션의 기본 Node 버전을 24로 설정한다.
 
-**Architecture:** chezmoi `run_onchange` 스크립트가 버전이 고정된 공식 nvm 설치 스크립트를 실행하고 Node.js 24 및 default alias를 보장한다. 셸 초기화는 `dot_zshrc.tmpl`만 관리하며, Homebrew Node 의존성을 제거해 대화형 셸의 Node 관리 주체를 nvm으로 단일화한다.
+**Architecture:** chezmoi `run_onchange_before` 스크립트가 버전이 고정된 공식 nvm 설치 스크립트를 일반 적용 단계보다 먼저 실행하고 Node.js 24 및 default alias를 보장한다. 셸 초기화는 `dot_zshrc.tmpl`만 관리하며, Homebrew Node 의존성을 제거해 대화형 셸의 Node 관리 주체를 nvm으로 단일화한다.
 
 **Tech Stack:** chezmoi 2.70+, Bash, zsh, nvm v0.40.5, Node.js 24, Homebrew Bundle
 
@@ -12,7 +12,7 @@
 
 ## 파일 구조
 
-- Create: `run_onchange_install-nvm.sh.tmpl` — nvm v0.40.5 설치·업데이트, Node.js 24 설치, default alias 검증
+- Create: `run_onchange_before_install-nvm.sh.tmpl` — Brew 적용 전에 nvm v0.40.5 설치·업데이트, Node.js 24 설치, default alias 검증
 - Modify: `dot_zshrc.tmpl` — 모든 지원 OS에서 XDG 기반 nvm 초기화
 - Modify: `dot_Brewfile` — Homebrew Node 관리 제거
 - Modify: `README.md` — 설치 흐름과 Node 관리 정책 문서화
@@ -22,7 +22,7 @@
 
 **Files:**
 
-- Create: `run_onchange_install-nvm.sh.tmpl`
+- Create: `run_onchange_before_install-nvm.sh.tmpl`
 - Modify: `dot_zshrc.tmpl:74-75`
 
 - [ ] **Step 1: 원하는 설정이 아직 없음을 확인한다**
@@ -32,16 +32,16 @@ Run:
 ```bash
 cd ~/code/dotfiles
 set -euo pipefail
-test -f run_onchange_install-nvm.sh.tmpl
-rg -q 'NVM_VERSION="v0.40.5"' run_onchange_install-nvm.sh.tmpl
+test -f run_onchange_before_install-nvm.sh.tmpl
+rg -q 'NVM_VERSION="v0.40.5"' run_onchange_before_install-nvm.sh.tmpl
 rg -q 'export NVM_DIR=' dot_zshrc.tmpl
 ```
 
-Expected: `run_onchange_install-nvm.sh.tmpl`이 없으므로 exit code 1.
+Expected: `run_onchange_before_install-nvm.sh.tmpl`이 없으므로 exit code 1.
 
 - [ ] **Step 2: nvm 설치 스크립트를 추가한다**
 
-Create `run_onchange_install-nvm.sh.tmpl`:
+Create `run_onchange_before_install-nvm.sh.tmpl`:
 
 ```bash
 #!/bin/bash
@@ -113,10 +113,10 @@ Run:
 ```bash
 cd ~/code/dotfiles
 set -euo pipefail
-bash -n run_onchange_install-nvm.sh.tmpl
+bash -n run_onchange_before_install-nvm.sh.tmpl
 chezmoi execute-template < dot_zshrc.tmpl > /tmp/dotfiles-zshrc-rendered
 zsh -n /tmp/dotfiles-zshrc-rendered
-rg -q 'NVM_VERSION="v0.40.5"' run_onchange_install-nvm.sh.tmpl
+rg -q 'NVM_VERSION="v0.40.5"' run_onchange_before_install-nvm.sh.tmpl
 rg -q 'export NVM_DIR=' /tmp/dotfiles-zshrc-rendered
 ```
 
@@ -126,7 +126,7 @@ Expected: exit code 0.
 
 ```bash
 cd ~/code/dotfiles
-git add run_onchange_install-nvm.sh.tmpl dot_zshrc.tmpl
+git add run_onchange_before_install-nvm.sh.tmpl dot_zshrc.tmpl
 git commit -m "feat: nvm과 Node 24 자동 설치"
 ```
 
@@ -248,7 +248,7 @@ git commit -m "docs: nvm 기반 Node 관리 방법 추가"
 
 - Apply: `~/.zshrc`
 - Apply: `~/.Brewfile`
-- Execute: `run_onchange_install-nvm.sh.tmpl`
+- Execute: `run_onchange_before_install-nvm.sh.tmpl`
 
 - [ ] **Step 1: 적용 예정 변경을 확인한다**
 
@@ -266,7 +266,9 @@ Expected: `.zshrc`에는 nvm 관리 블록이 추가되고 curl 설치기가 직
 Run:
 
 ```bash
-chezmoi apply --exclude=scripts ~/.zshrc ~/.Brewfile
+cp ~/.zshrc /tmp/zshrc-before-nvm-chezmoi
+cp ~/.Brewfile /tmp/Brewfile-before-nvm-chezmoi
+chezmoi apply --force --exclude=scripts ~/.zshrc ~/.Brewfile
 ```
 
 Expected: exit code 0. 다른 chezmoi 대상의 로컬 차이는 변경하지 않는다.
@@ -276,10 +278,11 @@ Expected: exit code 0. 다른 chezmoi 대상의 로컬 차이는 변경하지 �
 Run:
 
 ```bash
-chezmoi apply --include=scripts
+cd ~/code/dotfiles
+chezmoi apply --source-path run_onchange_before_install-nvm.sh.tmpl
 ```
 
-Expected: nvm v0.40.5가 `~/.config/nvm`에 설치 또는 갱신되고 최신 Node.js 24.x가 default alias로 설정된다. 변경된 Brewfile에 대한 `brew bundle --global`도 성공한다.
+Expected: nvm v0.40.5가 `~/.config/nvm`에 설치 또는 갱신되고 최신 Node.js 24.x가 default alias로 설정된다. `run_onchange_before` 단계로 실행하므로 이후 Brew bundle 적용의 성공 여부와 독립적으로 nvm 설치가 완료된다.
 
 - [ ] **Step 4: 새 zsh 세션의 기본 Node를 검증한다**
 
@@ -305,12 +308,16 @@ Run:
 cd ~/code/dotfiles
 set -euo pipefail
 chezmoi diff ~/.zshrc ~/.Brewfile
-brew bundle check --global
+formulas="$(brew bundle list --global --formula)"
+if printf '%s\n' "$formulas" | rg -x 'node'; then
+  echo 'Brewfile must not manage the node formula' >&2
+  exit 1
+fi
 git diff --check
 git status -sb
 ```
 
-Expected: `.zshrc`와 `.Brewfile`의 chezmoi diff가 없고, Brew bundle check와 Git 공백 검사가 통과하며, `chore/add-nvm` 브랜치에 커밋되지 않은 변경이 없다.
+Expected: `.zshrc`와 `.Brewfile`의 chezmoi diff가 없고, 전역 Brewfile의 formula 목록에 정확히 `node`인 항목이 없으며, Git 공백 검사가 통과하고 `chore/add-nvm` 브랜치에 커밋되지 않은 변경이 없다. 기존 패키지 업데이트나 tap 신뢰 상태는 이 작업의 완료 조건이 아니다.
 
 ### Task 4: 최종 이력 확인
 
@@ -327,4 +334,4 @@ git diff --stat origin/main...HEAD
 git status -sb
 ```
 
-Expected: 설계, nvm 설치·셸 설정, 문서·Brewfile의 세 커밋만 존재하고 작업 트리가 깨끗하다. 사용자가 push를 요청하지 않았으므로 원격 전송은 하지 않는다.
+Expected: 설계·계획, nvm 설치·셸 설정, 문서·Brewfile 및 적용 순서 보완에 해당하는 커밋만 존재하고 작업 트리가 깨끗하다. 사용자가 push를 요청하지 않았으므로 원격 전송은 하지 않는다.
