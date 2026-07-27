@@ -32,13 +32,13 @@ if [[ "$actual_nvm_version" != "$expected_nvm_version" ]]; then
   exit 1
 fi
 
-if [[ "$actual_node_version" != v24.* ]]; then
-  echo "Expected Node.js v24.x, got $actual_node_version" >&2
+if [[ "$actual_node_version" != v"$NODE_VERSION".* ]]; then
+  echo "Expected Node.js v$NODE_VERSION.x, got $actual_node_version" >&2
   exit 1
 fi
 
-if [[ "$default_node_version" != v24.* ]]; then
-  echo "Expected default Node.js v24.x, got $default_node_version" >&2
+if [[ "$default_node_version" != v"$NODE_VERSION".* ]]; then
+  echo "Expected default Node.js v$NODE_VERSION.x, got $default_node_version" >&2
   exit 1
 fi
 
