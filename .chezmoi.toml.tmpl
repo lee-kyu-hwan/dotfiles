@@ -1,9 +1,11 @@
 {{- $machine_type := promptChoiceOnce . "machine_type" "Machine type (work: 회사 맥북, personal: 개인 맥북, server: Linux 개발서버)" (list "work" "personal" "server") }}
+{{- $nvm_auto_use_hook := promptStringOnce . "nvm_auto_use_hook" "프로젝트 nvm auto-use 훅 경로 (없으면 빈 값)" "" }}
 
 sourceDir = "{{ .chezmoi.sourceDir }}"
 
 [data]
   machine_type = "{{ $machine_type }}"
+  nvm_auto_use_hook = "{{ $nvm_auto_use_hook }}"
 
 [edit]
   apply = true

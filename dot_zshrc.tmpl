@@ -79,6 +79,16 @@ export NVM_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
 
+{{ if hasKey . "nvm_auto_use_hook" -}}
+{{ if .nvm_auto_use_hook -}}
+# 프로젝트가 제공하는 .nvmrc auto-use 훅. 경로는 머신별 설정이라
+# chezmoi.toml의 nvm_auto_use_hook에 두고 repo에는 담지 않는다.
+if [[ -r {{ .nvm_auto_use_hook }} ]]; then
+  source {{ .nvm_auto_use_hook }}
+fi
+{{ end -}}
+{{ end -}}
+
 # ============================================================
 # PATH 추가
 # ============================================================
