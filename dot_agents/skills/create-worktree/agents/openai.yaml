@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Worktree"
+  short_description: "브랜치용 Git worktree 생성 및 Workmux 윈도우 구성"
+  default_prompt: "Use $create-worktree to create a Workmux worktree for 392-feat/add-partner-chat-enabled."

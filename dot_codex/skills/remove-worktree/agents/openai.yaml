@@ -1,4 +1,0 @@
-interface:
-  display_name: "Remove Worktree"
-  short_description: "git worktree 제거 + Orca/tmux 레이아웃 정리"
-  default_prompt: "Use $remove-worktree to remove the worktree named 392-add-partner-chat-enabled."
