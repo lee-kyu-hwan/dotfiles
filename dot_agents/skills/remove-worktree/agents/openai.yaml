@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remove Worktree"
+  short_description: "Git worktree와 Workmux 윈도우 및 로컬 브랜치 정리"
+  default_prompt: "Use $remove-worktree to remove the Workmux worktree named 392-add-partner-chat-enabled."
