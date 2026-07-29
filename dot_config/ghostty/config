@@ -11,6 +11,14 @@ window-padding-y = 4
 
 copy-on-select = false
 
+# 스크롤백 (기본 10MB/surface → 1MB)
+#
+# .zshrc가 모든 Ghostty 셸을 tmux로 exec하므로 히스토리는 tmux가 관리한다
+# (history-limit 2000행). Ghostty 스크롤백은 실질적으로 쓰이지 않으므로
+# 낮춰도 손실이 없고, 스크롤백·reflow 경로의 누수 노출면만 줄어든다.
+# 참고: ghostty#10258(리사이즈 reflow 누수), ghostty#10289(스크롤백 프루닝 누수)
+scrollback-limit = 1000000
+
 # 알림
 desktop-notifications = true
 

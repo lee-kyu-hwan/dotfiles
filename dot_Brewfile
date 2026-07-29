@@ -3,6 +3,7 @@
 # Taps
 tap "laishulu/homebrew"
 tap "leoafarias/fvm"
+tap "raine/workmux"
 
 # CLI Tools
 brew "awscli"
@@ -34,12 +35,12 @@ brew "zoxide"
 brew "zsh-autosuggestions"
 brew "zsh-syntax-highlighting"
 brew "laishulu/homebrew/macism"
+brew "raine/workmux/workmux"
 
 # Languages & Runtimes
 brew "cocoapods"
 brew "firebase-cli"
 brew "leoafarias/fvm/fvm"
-brew "gemini-cli"
 brew "openjdk@17"
 
 # Data
@@ -51,6 +52,7 @@ cask "font-meslo-lg-nerd-font"
 
 # Casks
 cask "android-studio"
+cask "antigravity-cli"
 cask "flutter"
 cask "copilot-cli"
 cask "docker"
