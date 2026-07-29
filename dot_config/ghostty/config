@@ -23,7 +23,15 @@ scrollback-limit = 1000000
 desktop-notifications = true
 
 # Quick Terminal
-keybind = global:ctrl+grave_accent=toggle_quick_terminal
+#
+# Option+F10/F11/F12 3연속 체계로 통일한다.
+#   M-F10 = Quick Terminal (여기, Ghostty 전역)
+#   M-F11 = workmux dashboard popup (.tmux.conf, root 바인딩)
+#   M-F12 = tmux prefix (.tmux.conf)
+#
+# F10~F12는 macOS 기본이 미디어키(음소거/볼륨)이므로 fn을 함께 눌러야 한다
+# (fn+Option+F10). 음량 조절을 그대로 쓰기 위해 fnState는 바꾸지 않는다.
+keybind = global:alt+f10=toggle_quick_terminal
 quick-terminal-position = center
 quick-terminal-animation-duration = 0.15
 quick-terminal-screen = mouse
