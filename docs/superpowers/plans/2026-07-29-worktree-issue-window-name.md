@@ -60,7 +60,8 @@ Replace the current `## 이름 파생` section with:
   `392-feat/...` → `392`, `ZF-115-chore/...` → `ZF-115`. 없으면 생략한다.
 - **윈도우 이름**: 이슈 번호가 있으면 `{이슈번호}-{짧은이름}`, 없으면 짧은
   이름을 그대로 사용한다.
-  `392-add-partner-chat-enabled`, `ZF-115-some-feature`, `login-bug`
+  workmux는 target name을 소문자로 정규화하므로 실제 target은
+  `392-add-partner-chat-enabled`, `zf-115-some-feature`, `login-bug`
 - **디렉터리명**: 스크립트가 `../{repo명}-{짧은이름}` 에 만든다. 이슈 번호는
   디렉터리가 아니라 tmux 윈도우에만 붙인다.
 - 같은 브랜치의 worktree가 이미 있으면 새로 만들지 않고 기존 경로를 안내한다.
@@ -116,16 +117,19 @@ allowed-tools: Bash
 - Deploy: `/Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md`
 - Deploy: `/Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md`
 
-- [ ] **Step 1: Validate both skill directories**
+- [ ] **Step 1: Validate the Codex skill and Claude frontmatter**
 
 Run:
 
 ```bash
-python3 /Users/lee-kyu-hwan/.codex/skills/.system/skill-creator/scripts/quick_validate.py dot_agents/skills/create-worktree
-python3 /Users/lee-kyu-hwan/.codex/skills/.system/skill-creator/scripts/quick_validate.py dot_claude/skills/create-worktree
+/opt/homebrew/bin/python3 /Users/lee-kyu-hwan/.codex/skills/.system/skill-creator/scripts/quick_validate.py dot_agents/skills/create-worktree
+/opt/homebrew/bin/python3 -c 'from pathlib import Path; import yaml; text = Path("dot_claude/skills/create-worktree/SKILL.md").read_text(); frontmatter = text.split("---", 2)[1]; metadata = yaml.safe_load(frontmatter); expected = {"name": "create-worktree", "description": "Use when creating a new git worktree for a branch to work on in isolation from the main workspace", "argument-hint": "<branch-name>", "user-invocable": True, "allowed-tools": "Bash"}; assert metadata == expected, metadata; print("Claude frontmatter is valid!")'
 ```
 
-Expected: both commands report `Skill is valid!`.
+Expected: the Codex command reports `Skill is valid!`; the YAML assertion reports
+`Claude frontmatter is valid!`. The Codex validator is not run against the Claude
+skill because it intentionally rejects Claude-only `argument-hint` and
+`user-invocable` keys.
 
 - [ ] **Step 2: Verify the two skill bodies stay identical**
 
@@ -138,29 +142,37 @@ diff -u <(tail -n +6 dot_agents/skills/create-worktree/SKILL.md) \
 
 Expected: exit code 0 and no output.
 
-- [ ] **Step 3: Run the GREEN scenario**
+- [ ] **Step 3: Run safe workmux GREEN dry-runs**
 
-Dispatch a fresh agent with the same prompt from Task 1, but point it at each
-updated skill in separate runs.
+Run:
 
-Expected:
-
-```text
-392-feat/add-partner-chat-enabled → 392-add-partner-chat-enabled
-ZF-115-chore/some-feature → ZF-115-some-feature
-fix/login-bug → login-bug
+```bash
+workmux open --help
+workmux add 392-feat/add-partner-chat-enabled --target-name 392-add-partner-chat-enabled --dry-run
+workmux add ZF-115-chore/some-feature --target-name ZF-115-some-feature --dry-run
+workmux add fix/login-bug --target-name login-bug --dry-run
 ```
 
-Every `workmux open` and `workmux add` command must include the matching
-`--target-name`.
+Expected: `workmux open --help` lists `--target-name <TARGET_NAME>`, confirming
+the wrapper-script path supports the option. The dry-runs produce these `Target`
+outputs (workmux normalizes target names to lowercase):
+
+```text
+Target:    392-add-partner-chat-enabled (window)
+Target:    zf-115-some-feature (window)
+Target:    login-bug (window)
+```
+
+The help command is read-only. Each `workmux add` command is a dry-run and must
+create no worktree or tmux window.
 
 - [ ] **Step 4: Apply the two managed files with chezmoi**
 
 Run:
 
 ```bash
-chezmoi apply /Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md
-chezmoi apply /Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md
+chezmoi -S /Users/lee-kyu-hwan/code/dotfiles__worktrees/fix-worktree-issue-window-name apply /Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md
+chezmoi -S /Users/lee-kyu-hwan/code/dotfiles__worktrees/fix-worktree-issue-window-name apply /Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md
 ```
 
 Expected: both commands exit 0.
@@ -179,17 +191,17 @@ git diff --check
 
 Expected: all commands exit 0 with no output.
 
-- [ ] **Step 6: Commit the implementation**
+- [ ] **Step 6: Amend the implementation commit**
 
 Run:
 
 ```bash
 git add \
-  dot_agents/skills/create-worktree/SKILL.md \
-  dot_claude/skills/create-worktree/SKILL.md \
-  docs/superpowers/plans/2026-07-29-worktree-issue-window-name.md
-git commit -m "fix(skills): worktree window issue 번호 복원"
+  docs/superpowers/plans/2026-07-29-worktree-issue-window-name.md \
+  docs/superpowers/specs/2026-07-29-worktree-issue-window-name-design.md
+git commit --amend --no-edit
 ```
 
-Expected: one commit containing the two synchronized skill updates and this
-implementation plan.
+Expected: the existing Task 2 commit is amended with this implementation-plan
+and design-spec corrections, leaving one commit containing the two synchronized
+skill updates, the plan, and the design spec.

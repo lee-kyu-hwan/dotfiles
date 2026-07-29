@@ -29,7 +29,7 @@ git-crypt 저장소에서는 그것이 smudge 필터 에러로 **실패한다**.
 
 ```bash
 ./scripts/create-worktree.sh {브랜치명}    # 필터 우회·키 링크·재체크아웃 + 의존성 설치
-workmux open {디렉토리명}                   # 기존 worktree를 입양해 레이아웃만 얹는다
+workmux open {디렉토리명} --target-name {윈도우이름}  # 기존 worktree를 입양해 레이아웃만 얹는다
 ```
 
 - 스크립트의 확인 프롬프트는 `-y`나 `yes |`로 우회하지 않고 사용자에게 직접 확인받는다.
@@ -43,14 +43,19 @@ workmux open {디렉토리명}                   # 기존 worktree를 입양해 
 workmux가 생성과 윈도우 구성을 한 번에 한다.
 
 ```bash
-workmux add {브랜치명}
+workmux add {브랜치명} --target-name {윈도우이름}
 ```
 
 ## 이름 파생
 
-- **짧은 이름**: 브랜치명에서 `*/` 앞 prefix를 제거한다.
-  `392-feat/add-partner-chat-enabled` → `add-partner-chat-enabled`
-- **디렉토리명**: 스크립트가 `../{repo명}-{짧은이름}` 에 만든다.
+- **짧은 이름**: 브랜치명에서 `*/` prefix를 제거한다.
+- **이슈 번호**: 브랜치명의 선행 숫자 ID 또는 `ZF-숫자`를 사용하며, 없으면 생략한다.
+- **윈도우이름**: 이슈 번호가 있으면 `{이슈번호}-{짧은이름}`, 없으면 짧은 이름이다.
+  workmux는 target name을 소문자로 정규화하므로 `ZF-숫자`가 포함된 실제 target도 소문자다.
+  `392-feat/add-partner-chat-enabled` → `392-add-partner-chat-enabled`,
+  `ZF-115-feat/some-feature` → `zf-115-some-feature`,
+  `login-bug` → `login-bug`
+- **디렉토리명**: 스크립트는 계속 `../{repo명}-{짧은이름}` 에 만들며 이슈 번호를 붙이지 않는다.
   `workmux open`에는 이 디렉토리명(`zambaguni-front-add-partner-chat-enabled`)을 넘긴다.
 - 같은 브랜치의 worktree가 이미 있으면 새로 만들지 않고 기존 경로를 안내한다.
 
