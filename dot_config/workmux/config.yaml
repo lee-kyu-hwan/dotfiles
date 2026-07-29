@@ -15,6 +15,18 @@ panes:
     focus: true
   - split: vertical
 
+# 상태 아이콘을 tmux window-status-format에 자동 삽입하지 않는다.
+# .tmux.conf에 ⏸/● 커스텀 포맷이 이미 있어 덮이면 안 되므로, workmux가
+# @workmux_status 사용자 옵션만 export하게 두고 포맷에서 직접 참조한다.
+status_format: false
+
+# 새 worktree가 갈라져 나올 기준 브랜치.
+# 기본값은 "현재 체크아웃된 브랜치"라서 feature 브랜치에서 worktree를 만들면
+# 의도치 않게 stacked branch가 된다. auto는 main_branch(remote HEAD 자동 감지)를
+# 쓴다 — zambaguni-front는 origin/develop, dotfiles는 origin/main으로 해석된다.
+# 개별 재정의는 --base 플래그.
+base_branch: auto
+
 # Nerd Font 아이콘 사용 여부. workmux가 폰트를 감지해 런타임에 이 값을 설정
 # 파일에 직접 써넣는다. 소스에 명시하지 않으면 chezmoi apply마다 제거되고
 # workmux가 다시 써넣어 영구 drift(MM)가 된다.

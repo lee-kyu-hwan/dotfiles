@@ -1,5 +1,10 @@
 set -g mouse on
 
+# 터미널의 포커스 변화를 tmux에 전달한다. 이게 off면 pane-focus-in 훅이
+# 발동하지 않는다 — 아래 macism 입력기 전환 훅 중 하나가 이 이벤트를 쓴다.
+# (after-select-pane/window는 tmux 내부 이벤트라 이 옵션과 무관하게 동작한다)
+set -g focus-events on
+
 # ============================================================
 # 클립보드 및 복사 설정 (OSC 52 지원)
 # ============================================================
@@ -58,7 +63,9 @@ bind ㅅ clock-mode               # t
 # --- 2. macism 훅 (상태 초기화) ---
 set-hook -g after-select-pane   'run-shell -b "macism com.apple.keylayout.ABC"'
 set-hook -g after-select-window 'run-shell -b "macism com.apple.keylayout.ABC"'
-set-hook -g pane-focus-in       'run-shell -b "macism com.apple.keylayout.ABC"'
+# 주의: pane-focus-in은 윈도우 스코프 훅이라 -g가 아니라 -gw로 설정해야
+# tmux가 등록한다. -g로 두면 조용히 무시된다. focus-events on도 함께 필요하다.
+set-hook -gw pane-focus-in      'run-shell -b "macism com.apple.keylayout.ABC"'
 
 # --- 3. 명령어 모드 강제 전환 ---
 bind : run-shell "macism com.apple.keylayout.ABC" \; command-prompt
@@ -127,6 +134,17 @@ set -g pane-active-border-style fg=colour51
 bind = run-shell "$HOME/.local/bin/tmux-stack-layout"
 
 # ============================================================
+# workmux (worktree + 에이전트)
+#
+# 사이드바는 쓰지 않는다 — 윈도우마다 pane을 하나씩 차지해 작업 pane이 좁아지고
+# 3-pane 레이아웃이 재배치된다. 상태는 window-status-format의 @workmux_status로
+# 항상 보이고, 자세히 볼 때만 dashboard를 popup으로 띄운다 (pane 소비 0).
+# ============================================================
+bind W display-popup -h 85% -w 90% -E "workmux dashboard"
+bind G run-shell "workmux last-done"     # 마지막으로 끝난 에이전트로 이동
+bind Tab run-shell "workmux last-agent"  # 마지막 에이전트로 이동
+
+# ============================================================
 # OSC 시퀀스 패스스루
 # ============================================================
 set -g allow-passthrough on
@@ -150,10 +168,14 @@ set -g status-right "#[fg=colour248] %m/%d %H:%M "
 #   activity (출력 중)    = 초록 ● (진행 중)
 #   silence (20초 무출력) = 빨강 ⏸ (작업 완료/대기 — 확인 필요)
 #   일반                  = 회색 (idle)
-set -g window-status-format "#{?window_silence_flag,#[fg=colour196 bold] #I #W ⏸ ,#{?window_activity_flag,#[fg=colour46 bold] #I #W ● , #I #W }}"
+#   @workmux_status       = workmux 에이전트 상태 (🤖 작업중 / 💬 입력대기 / ✅ 완료)
+#
+# workmux는 status_format: false일 때 포맷을 덮지 않고 @workmux_status만
+# export한다. 아래처럼 직접 참조해야 ⏸/● 표시와 함께 보인다.
+set -g window-status-format "#{?window_silence_flag,#[fg=colour196 bold] #I #W ⏸ ,#{?window_activity_flag,#[fg=colour46 bold] #I #W ● , #I #W }}#{?@workmux_status,#{@workmux_status} ,}"
 
 # 윈도우 탭: 현재 활성
-set -g window-status-current-format "#[fg=colour16,bg=colour39,bold] #I #W "
+set -g window-status-current-format "#[fg=colour16,bg=colour39,bold] #I #W #{?@workmux_status,#{@workmux_status} ,}"
 
 # Activity + Silence 모니터링
 set -g monitor-activity on
