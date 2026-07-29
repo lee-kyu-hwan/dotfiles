@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Worktree"
+  short_description: "브랜치용 git worktree 생성 + Orca/tmux 레이아웃 구성"
+  default_prompt: "Use $create-worktree to create a worktree for 392-feat/add-partner-chat-enabled."
