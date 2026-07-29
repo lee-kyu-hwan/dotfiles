@@ -5,6 +5,16 @@ set -g mouse on
 # (after-select-pane/window는 tmux 내부 이벤트라 이 옵션과 무관하게 동작한다)
 set -g focus-events on
 
+# tmux 서버는 데몬이라 오래 살아남는다. Ghostty를 재시작하면 새 환경변수가
+# 생기는데, update-environment에 없으면 서버가 옛 값을 계속 물려준다.
+# 기본값에는 Ghostty 관련 항목이 하나도 없어 직접 추가한다.
+set -ga update-environment GHOSTTY_RESOURCES_DIR
+set -ga update-environment GHOSTTY_BIN_DIR
+set -ga update-environment GHOSTTY_SHELL_FEATURES
+set -ga update-environment TERM_PROGRAM
+set -ga update-environment TERM_PROGRAM_VERSION
+set -ga update-environment TERMINFO
+
 # ============================================================
 # 클립보드 및 복사 설정 (OSC 52 지원)
 # ============================================================
