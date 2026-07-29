@@ -151,6 +151,13 @@ bind = run-shell "$HOME/.local/bin/tmux-stack-layout"
 # 항상 보이고, 자세히 볼 때만 dashboard를 popup으로 띄운다 (pane 소비 0).
 # ============================================================
 bind W display-popup -h 85% -w 90% -E "workmux dashboard"
+
+# prefix 없이 단일 조작으로도 띄운다. Option+F10/F11/F12 3연속 체계의 가운데다.
+#   M-F10 = Quick Terminal (Ghostty 전역), M-F12 = prefix
+# F10~F12는 macOS 기본이 미디어키라 fn을 함께 눌러야 한다 (fn+Option+F11).
+# root 테이블이므로 이 키는 pane 안 앱에 전달되지 않는다 —
+# nvim(F키·Alt 매핑 0개)·readline·Ghostty 어느 쪽과도 충돌하지 않음을 확인했다.
+bind -n M-F11 display-popup -h 85% -w 90% -E "workmux dashboard"
 bind G run-shell "workmux last-done"     # 마지막으로 끝난 에이전트로 이동
 bind Tab run-shell "workmux last-agent"  # 마지막 에이전트로 이동
 
