@@ -120,6 +120,21 @@ if command -v bat &>/dev/null; then
 fi
 
 # ============================================================
+# Ghostty 셸 통합
+#
+# Ghostty는 자기가 직접 띄운 셸에만 통합을 자동 주입한다. 아래 tmux 블록이
+# exec tmux를 하므로 tmux가 다시 띄우는 셸에는 주입되지 않는다 —
+# ghostty-integration 파일 상단 주석이 tmux를 그 사례로 명시하고 이 코드를
+# 권장한다. 반드시 exec tmux **앞**에 두어야 한다(exec 이후는 실행 안 됨).
+#
+# 멱등하다: 비대화형 셸과 이미 초기화된 셸에서는 즉시 return 0 한다.
+# 켜지는 기능은 GHOSTTY_SHELL_FEATURES가 결정한다 (현재 cursor:blink,path,title).
+# ============================================================
+if [[ -n "$GHOSTTY_RESOURCES_DIR" ]]; then
+    source "$GHOSTTY_RESOURCES_DIR"/shell-integration/zsh/ghostty-integration
+fi
+
+# ============================================================
 # tmux 자동 연결 (재부팅 후에도 세션 복원)
 #
 # 주의: 이 로직을 바꾼 뒤에는 Ghostty를 Cmd+Q로 "완전 종료 후 재실행"
