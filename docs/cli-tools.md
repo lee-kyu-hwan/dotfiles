@@ -450,19 +450,28 @@ terminal-notifier -title "작업 완료" -message "빌드가 끝났습니다"
 
 ## 언어/런타임
 
-### node
+### node / nvm
 
-Node.js 런타임.
+Node.js 런타임은 nvm으로 관리하며 기본 버전은 최신 24.x다. nvm 자체는 dotfiles에서 v0.40.5로 고정한다.
 
 ```sh
-# 버전 확인
+# 현재 버전 확인
+nvm --version
 node --version
 
-# 스크립트 실행
-node script.js
+# Node.js 24 설치 및 사용
+nvm install 24
+nvm use 24
 
-# REPL 실행
-node
+# 새 셸의 기본 버전 설정
+nvm alias default 24
+
+# 프로젝트의 .nvmrc 사용
+nvm install
+nvm use
+
+# 설치된 버전 확인
+nvm ls
 ```
 
 ### pnpm

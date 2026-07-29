@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+
+NVM_VERSION="v0.40.5"
+NODE_VERSION="24"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+mkdir -p "$XDG_CONFIG_HOME"
+export NVM_DIR="$XDG_CONFIG_HOME/nvm"
+
+install_script="$(mktemp)"
+trap 'rm -f "$install_script"' EXIT
+
+curl -fsSL \
+  "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" \
+  -o "$install_script"
+PROFILE=/dev/null NVM_DIR="$NVM_DIR" bash "$install_script"
+
+# shellcheck source=/dev/null
+. "$NVM_DIR/nvm.sh"
+
+nvm install "$NODE_VERSION"
+nvm alias default "$NODE_VERSION"
+nvm use default
+
+expected_nvm_version="${NVM_VERSION#v}"
+actual_nvm_version="$(nvm --version)"
+actual_node_version="$(node --version)"
+default_node_version="$(nvm version default)"
+
+if [[ "$actual_nvm_version" != "$expected_nvm_version" ]]; then
+  echo "Expected nvm $expected_nvm_version, got $actual_nvm_version" >&2
+  exit 1
+fi
+
+if [[ "$actual_node_version" != v"$NODE_VERSION".* ]]; then
+  echo "Expected Node.js v$NODE_VERSION.x, got $actual_node_version" >&2
+  exit 1
+fi
+
+if [[ "$default_node_version" != v"$NODE_VERSION".* ]]; then
+  echo "Expected default Node.js v$NODE_VERSION.x, got $default_node_version" >&2
+  exit 1
+fi
+
+echo "nvm $actual_nvm_version"
+echo "Node.js $actual_node_version"
+echo "default $default_node_version"

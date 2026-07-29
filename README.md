@@ -27,7 +27,8 @@ macOS:                                 ┌────────────�
 ┌──────────────────────┐               │ Oh My Zsh                │
 │ [1/2] Homebrew       │               │ TPM (tmux plugin)        │
 │ [2/2] Claude Code    │  ───────────> │ chezmoi init + apply     │
-└──────────────────────┘               │ Brew bundle              │
+└──────────────────────┘               │ nvm + Node.js 24         │
+                                       │ Brew bundle              │
                                        └──────────────────────────┘
 
 Linux:                                 ┌──────────────────────────┐
@@ -35,7 +36,8 @@ Linux:                                 ┌────────────�
 │ [1/2] apt/dnf        │               │ Oh My Zsh                │
 │      + Node.js (LTS) │  ───────────> │ TPM (tmux plugin)        │
 │ [2/2] Claude Code    │               │ chezmoi init + apply     │
-└──────────────────────┘               └──────────────────────────┘
+└──────────────────────┘               │ nvm + Node.js 24         │
+                                       └──────────────────────────┘
 ```
 
 ## 머신 타입
@@ -58,6 +60,7 @@ Linux:                                 ┌────────────�
 |--------|------|----------|----------|--------|
 | tmux | tmux 설정 (macOS: 한글 IME 호환) ([키맵 & 치트시트](docs/tmux.md)) | O | O | O |
 | zsh | Zsh 설정 (Oh My Zsh + Starship + autosuggestions + syntax-highlighting) | O | O | O |
+| nvm | Node.js 버전 관리 (nvm v0.40.5 + 기본 Node.js 24) | O | O | O |
 | git | Git 설정 (includeIf 분기, delta, alias) | O | O | O |
 | neovim | Neovim (lazy.nvim, LSP, telescope) ([키맵 & 치트시트](docs/neovim.md)) | O | O | O |
 | lazygit | lazygit 터미널 Git UI | O | O | O |
@@ -69,6 +72,18 @@ Linux:                                 ┌────────────�
 | hammerspoon | Magnet 호환 윈도우 매니지먼트 ([설정 문서](docs/hammerspoon.md)) | O | O | X |
 | ghostty | Ghostty 터미널 설정 | O | O | X |
 | keycastr | 키 입력 시각화 ([설정 문서](docs/keycastr.md)) | O | O | X |
+
+### Node.js
+
+Node.js는 Homebrew가 아니라 nvm으로 관리합니다. `chezmoi apply`가 nvm v0.40.5와 최신 Node.js 24.x를 설치하고 default alias를 24로 설정합니다.
+
+```bash
+nvm install 24
+nvm use 24
+nvm alias default 24
+```
+
+프로젝트에 `.nvmrc`가 있으면 해당 디렉터리에서 `nvm install`과 `nvm use`를 실행합니다.
 
 ### Homebrew 패키지 (macOS)
 
