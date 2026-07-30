@@ -242,10 +242,11 @@ decode하지 않은 bytes `repr`와 type, operation, errno를 포함해 snapshot
 Manifest mismatch는 before/after record를 path별로 대조하여 path 집합이 그대로인
 content-only 또는 mode-only 변경도 실제로 달라진 path만 진단한다.
 
-배포 미리보기와 적용 명령에는 심링크 하나와 스킬 디렉터리 7개의 절대 경로를
-리터럴로 모두 적는다. 타깃이 비어 있는 `chezmoi diff`나 `chezmoi apply`는 절대
-실행하지 않는다. 새 머신에서 부모 디렉터리를 만들 수 있도록 적용 명령에는
-`--parent-dirs`를 사용한다.
+배포 미리보기와 적용 명령에는 심링크 하나와 7개 `SKILL.md` leaf 파일의 절대
+경로를 리터럴로 모두 적는다. 기존 스킬 디렉터리만 타깃으로 주면 하위
+`SKILL.md` 변경이 포함되지 않을 수 있으므로 디렉터리 경로를 대신 사용하지 않는다.
+타깃이 비어 있는 `chezmoi diff`나 `chezmoi apply`는 절대 실행하지 않는다. 새
+머신에서 부모 디렉터리를 만들 수 있도록 적용 명령에는 `--parent-dirs`를 사용한다.
 
 ## 검증 기준
 

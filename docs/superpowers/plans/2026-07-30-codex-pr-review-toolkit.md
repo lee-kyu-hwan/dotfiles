@@ -757,16 +757,16 @@ Run:
 ```bash
 chezmoi -S "$PWD" diff --parent-dirs \
   "$HOME/.codex/pr-review-toolkit-claude" \
-  "$HOME/.codex/skills/pr-review-toolkit" \
-  "$HOME/.codex/skills/pr-review-toolkit-comment-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-pr-test-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-silent-failure-hunter" \
-  "$HOME/.codex/skills/pr-review-toolkit-type-design-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-code-reviewer" \
-  "$HOME/.codex/skills/pr-review-toolkit-code-simplifier"
+  "$HOME/.codex/skills/pr-review-toolkit/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-comment-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-pr-test-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-silent-failure-hunter/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-type-design-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-code-reviewer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-code-simplifier/SKILL.md"
 ```
 
-Expected: the diff contains one new symlink and seven new skill directories. It
+Expected: the diff contains one new symlink and seven new `SKILL.md` files. It
 does not contain `~/.codex/config.toml`, marketplace state, or unrelated files.
 All eight targets are literal arguments; this Step defines no state consumed by
 the next Step.
@@ -778,19 +778,21 @@ Run:
 ```bash
 chezmoi -S "$PWD" apply --parent-dirs \
   "$HOME/.codex/pr-review-toolkit-claude" \
-  "$HOME/.codex/skills/pr-review-toolkit" \
-  "$HOME/.codex/skills/pr-review-toolkit-comment-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-pr-test-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-silent-failure-hunter" \
-  "$HOME/.codex/skills/pr-review-toolkit-type-design-analyzer" \
-  "$HOME/.codex/skills/pr-review-toolkit-code-reviewer" \
-  "$HOME/.codex/skills/pr-review-toolkit-code-simplifier"
+  "$HOME/.codex/skills/pr-review-toolkit/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-comment-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-pr-test-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-silent-failure-hunter/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-type-design-analyzer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-code-reviewer/SKILL.md" \
+  "$HOME/.codex/skills/pr-review-toolkit-code-simplifier/SKILL.md"
 ```
 
 Expected: exit code 0. `--parent-dirs` creates missing `.codex/skills`
 ancestors on a new machine without applying unrelated sibling files. If the
 workspace sandbox rejects writes under the home directory, rerun this exact
-command with escalated permission; do not remove any literal target.
+command with escalated permission; do not remove any literal target. The seven
+leaf-file targets are intentional: targeting an existing skill directory does
+not reliably include its changed `SKILL.md`.
 
 - [ ] **Step 5: Verify deployed files and symlink**
 
