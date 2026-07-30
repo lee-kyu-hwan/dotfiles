@@ -22,7 +22,7 @@ Dispatch a fresh agent with only the current skill path and this prompt:
 
 ```text
 Use the create-worktree skill at
-/Users/lee-kyu-hwan/code/dotfiles/dot_agents/skills/create-worktree/SKILL.md.
+~/code/dotfiles/dot_agents/skills/create-worktree/SKILL.md.
 Do not execute commands. For each branch below, state the exact workmux command
 and resulting tmux window name:
 1. 392-feat/add-partner-chat-enabled
@@ -54,14 +54,14 @@ Replace the current `## 이름 파생` section with:
 ```markdown
 ## 이름 파생
 
-- **짧은 이름**: 브랜치명에서 `*/` 앞 prefix를 제거한다.
+- **짧은 이름**: 브랜치명에서 마지막 `/`까지를 제거한다.
   `392-feat/add-partner-chat-enabled` → `add-partner-chat-enabled`
-- **이슈 번호**: 브랜치명 선두의 숫자 또는 `ZF-숫자`를 사용한다.
-  `392-feat/...` → `392`, `ZF-115-chore/...` → `ZF-115`. 없으면 생략한다.
-- **윈도우 이름**: 이슈 번호가 있으면 `{이슈번호}-{짧은이름}`, 없으면 짧은
-  이름을 그대로 사용한다.
-  workmux는 target name을 소문자로 정규화하므로 실제 target은
-  `392-add-partner-chat-enabled`, `zf-115-some-feature`, `login-bug`
+- **이슈 번호**: 브랜치명 **맨 앞**의 숫자 또는 `ZF-숫자`만 인식한다. 맨 앞이 아니면
+  이슈 번호가 아니다 — `feat/392-add-x`는 이슈 번호가 없는 것으로 본다.
+- **윈도우이름**: 이슈 번호가 있을 때만 `{이슈번호}-{짧은이름}`을 만들어
+  `--target-name`에 넘긴다. **이슈 번호가 없으면 `--target-name`을 생략한다** —
+  workmux 기본 이름에는 저장소 이름이 들어가므로 다른 저장소의 같은 이름 브랜치와
+  충돌하지 않는다.
 - **디렉터리명**: 스크립트가 `../{repo명}-{짧은이름}` 에 만든다. 이슈 번호는
   디렉터리가 아니라 tmux 윈도우에만 붙인다.
 - 같은 브랜치의 worktree가 이미 있으면 새로 만들지 않고 기존 경로를 안내한다.
@@ -78,7 +78,8 @@ workmux open {디렉토리명}
 to:
 
 ```bash
-workmux open {디렉토리명} --target-name {윈도우이름}
+workmux open {디렉토리명} --target-name {윈도우이름}  # 이슈 번호가 있을 때
+workmux open {디렉토리명}                             # 이슈 번호가 없을 때
 ```
 
 Keep the git-crypt restriction and the existing path-discovery instructions.
@@ -94,7 +95,8 @@ workmux add {브랜치명}
 to:
 
 ```bash
-workmux add {브랜치명} --target-name {윈도우이름}
+workmux add {브랜치명} --target-name {윈도우이름}   # 이슈 번호가 있을 때
+workmux add {브랜치명}                              # 이슈 번호가 없을 때
 ```
 
 - [ ] **Step 4: Apply the same body changes to the Claude skill**
@@ -114,15 +116,15 @@ allowed-tools: Bash
 **Files:**
 - Validate: `dot_agents/skills/create-worktree/SKILL.md`
 - Validate: `dot_claude/skills/create-worktree/SKILL.md`
-- Deploy: `/Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md`
-- Deploy: `/Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md`
+- Deploy: `~/.agents/skills/create-worktree/SKILL.md`
+- Deploy: `~/.claude/skills/create-worktree/SKILL.md`
 
 - [ ] **Step 1: Validate the Codex skill and Claude frontmatter**
 
 Run:
 
 ```bash
-/opt/homebrew/bin/python3 /Users/lee-kyu-hwan/.codex/skills/.system/skill-creator/scripts/quick_validate.py dot_agents/skills/create-worktree
+/opt/homebrew/bin/python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py dot_agents/skills/create-worktree
 /opt/homebrew/bin/python3 -c 'from pathlib import Path; import yaml; text = Path("dot_claude/skills/create-worktree/SKILL.md").read_text(); frontmatter = text.split("---", 2)[1]; metadata = yaml.safe_load(frontmatter); expected = {"name": "create-worktree", "description": "Use when creating a new git worktree for a branch to work on in isolation from the main workspace", "argument-hint": "<branch-name>", "user-invocable": True, "allowed-tools": "Bash"}; assert metadata == expected, metadata; print("Claude frontmatter is valid!")'
 ```
 
@@ -171,8 +173,8 @@ create no worktree or tmux window.
 Run:
 
 ```bash
-chezmoi -S /Users/lee-kyu-hwan/code/dotfiles__worktrees/fix-worktree-issue-window-name apply /Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md
-chezmoi -S /Users/lee-kyu-hwan/code/dotfiles__worktrees/fix-worktree-issue-window-name apply /Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md
+chezmoi -S . apply ~/.agents/skills/create-worktree/SKILL.md
+chezmoi -S . apply ~/.claude/skills/create-worktree/SKILL.md
 ```
 
 Expected: both commands exit 0.
@@ -183,9 +185,9 @@ Run:
 
 ```bash
 cmp dot_agents/skills/create-worktree/SKILL.md \
-  /Users/lee-kyu-hwan/.agents/skills/create-worktree/SKILL.md
+  ~/.agents/skills/create-worktree/SKILL.md
 cmp dot_claude/skills/create-worktree/SKILL.md \
-  /Users/lee-kyu-hwan/.claude/skills/create-worktree/SKILL.md
+  ~/.claude/skills/create-worktree/SKILL.md
 git diff --check
 ```
 
