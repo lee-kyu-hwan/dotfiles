@@ -1,91 +1,58 @@
 ---
 name: deep-research
-description: Use when the user wants a deep, multi-source, fact-checked research report on any topic (triggers like "딥 리서치", "deep research", "웹조사해서 정리", "리서치 보고서"). Runs a structured pipeline — decompose into search angles, search, extract falsifiable claims from sources, adversarially verify, synthesize a cited report. For a quick single-fact lookup, just search directly instead.
+description: Use when the user wants a deep, multi-source, fact-checked research report on any topic (triggers like "딥 리서치", "deep research", "웹조사해서 정리", "리서치 보고서"). Runs the deep-research workflow — decompose into search angles, search, extract falsifiable claims, adversarially verify, synthesize a cited report. For a quick single-fact lookup, just search directly instead.
 ---
 
 # Deep Research
 
-## Overview
+파이프라인은 `dot_claude/workflows/deep-research.js` 워크플로가 실행한다. 이 스킬은
+앞단(질문 다듬기)과 뒷단(결과 전달)만 담당한다. **절차를 여기서 다시 서술하지 않는다** —
+두 곳에 적으면 수치가 어긋난다. 실제 앵글 수·fetch 상한·검증 임계값은 워크플로 상단의
+상수가 유일한 기준이다.
 
-Produce a fact-checked, citation-backed research report through a fixed pipeline:
-Scope → Search → Fetch/Extract → Verify → Synthesize. Every finding in the final
-report must trace back to a fetched source and survive a skeptical verification pass.
+## Step 0 — 스코프 확인 (실행 전)
 
-Respond in the user's language (Korean by default). Keep source titles/quotes in
-their original language.
+질문이 불충분하면 2-3개만 되묻는다. 예: 예산·용도·지역이 없는 "어떤 차를 살까".
+충분하면 연구 질문을 한 문장으로 정리하고 그대로 진행한다.
 
-## Step 0 — Scope check (before any search)
+WebSearch 한 번으로 끝나는 단일 사실 조회에는 이 스킬을 쓰지 않는다.
 
-If the question is underspecified (e.g. "what car to buy" without budget/use-case/region),
-ask 2-3 clarifying questions first. Otherwise restate the research question in one
-sentence and proceed.
+## Step 1 — 워크플로 실행
 
-## Step 1 — Decompose into search angles
+```
+Workflow({ name: "deep-research", args: "<다듬은 질문>" })
+```
 
-Break the question into 5 complementary search angles. Pick angles that suit the domain,
-for example:
+되묻기로 얻은 답을 질문 문장에 녹여 넘긴다. `args`는 문자열이어야 하며, 비어 있으면
+워크플로가 즉시 에러를 반환한다.
 
-- broad/primary · academic/technical · recent news · contrarian/skeptical · practitioner/implementation
-- tech: state-of-art · benchmarks · limitations · industry adoption · cost/tradeoffs
-- medical: anatomy · common causes · serious differentials · authoritative refs · red flags
+워크플로가 하는 일: 질문을 검색 앵글로 분해 → 앵글별 병렬 검색 → URL 중복 제거 후
+소스 fetch·주장 추출 → 주장별 3표 적대적 검증 → **확정된 주장만** 종합해 인용이 붙은
+보고서.
 
-Write one specific search query per angle. Avoid redundant angles.
+## Step 2 — 결과 전달
 
-## Step 2 — Search
+반환값을 사용자 언어(기본 한국어)로 전달한다. 소스 제목과 인용문은 원문 언어를 유지한다.
 
-Run a web search for each angle (refine the query if the first attempt is low-signal).
-Keep the top 4-6 results per angle. Skip obvious SEO spam and content farms.
-Rank by relevance to the ORIGINAL question, not just the query.
+`stats`를 함께 확인하고, 다음이 0이 아니면 **반드시 사용자에게 밝힌다.**
 
-Dedup URLs across angles (normalize: drop scheme/www/trailing slash). Cap the fetch
-list at ~15 sources, preferring high-relevance and primary sources.
+| 필드 | 뜻 |
+| --- | --- |
+| `anglesFailed` | 검색이 죽은 앵글 수. 커버리지가 계획(`anglesPlanned`)보다 좁다 |
+| `fetchErrored` | fetch가 실패한 소스 수 |
+| `budgetDropped` | 토큰 예산·fetch 상한으로 건너뛴 소스 |
+| `unverified` | 검증기가 실패해 판정하지 못한 주장. **"반박됨"과 다르다** |
+| `killed` | 적대적 검증에서 반박된 주장. `refuted[]`에 이유가 담긴다 |
 
-## Step 3 — Fetch and extract claims
+각 finding의 `vote`(예 `3-0`, `2-1`)를 그대로 전달한다. `2-1`은 검증단이 갈린 것이므로
+만장일치처럼 서술하지 않는다.
 
-For each selected source, fetch the page content. For each source record:
-
-- **sourceQuality**: primary (official docs / research / institution) · secondary (reporting) · blog · forum · unreliable
-- **publishDate** if available
-- **2-5 falsifiable claims** that bear on the question. Each claim must:
-  - be a concrete, checkable statement (not a vague generality)
-  - include a short direct quote from the source as support
-  - be rated central / supporting / tangential
-
-If a fetch fails or the page is irrelevant/paywalled, mark the source unreliable and move on.
-
-## Step 4 — Adversarial verification
-
-Rank claims by importance (central first) then source quality. Verify the top ~15
-claims. For each, actively try to REFUTE it:
-
-1. Does the quote actually support the claim, or is it an overreach/misread?
-2. Search for contradicting evidence — does any credible source dispute or heavily qualify it?
-3. Is the source quality sufficient for the claim's strength? (extraordinary claims need primary sources)
-4. Is it outdated? (check dates — old claims in fast-moving fields are suspect)
-5. Is it marketing copy / press release / cherry-picked benchmark / forum speculation?
-
-Verdict per claim: **confirmed** / **refuted** / **unverified** (could not check).
-Default to refuted when uncertain. For load-bearing claims, prefer verifying against
-the primary source directly (official docs over blog posts citing them).
-
-## Step 5 — Synthesize the report
-
-1. Merge claims that say the same thing; combine their sources.
-2. Group related claims into findings that directly answer the question.
-3. Assign confidence per finding:
-   - **high** — multiple primary sources, no credible dispute
-   - **medium** — secondary sources, or minor disputes/qualifications
-   - **low** — single source or blog-quality only
-4. Report structure:
-   - 3-5 sentence executive summary answering the question
-   - Findings grouped by theme, each with confidence + inline source links
-   - Refuted claims (for transparency, brief)
-   - Caveats: what is uncertain, weak sources, time-sensitivity
-   - 2-4 open questions that emerged but were not answered
+`summary`가 인프라 실패(rate limit, API 에러, 전체 앵글 실패)를 말하면 그것을 리서치
+결론으로 전달하지 않는다. 재시도를 제안한다.
 
 ## Hard rules
 
-- Never present an unverified or refuted claim as a finding.
-- Every finding cites at least one fetched URL — no citations from memory.
-- Distinguish "no evidence found" from "evidence against" — say which one it is.
-- Do not write files unless the user explicitly asks to save the report.
+- 반박되거나 미검증인 주장을 finding으로 제시하지 않는다.
+- 모든 finding은 fetch된 URL을 최소 하나 인용한다. 기억에서 인용하지 않는다.
+- "증거를 찾지 못함"과 "반대 증거가 있음"을 구분해 말한다.
+- 사용자가 저장을 요청하지 않으면 파일을 쓰지 않는다.
