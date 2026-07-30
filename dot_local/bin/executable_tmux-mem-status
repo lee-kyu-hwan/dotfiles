@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# 메모리 요약. 인자 없으면 tmux status-right용 한 줄, --detail 이면 popup용 상세.
+#
+#   G:147M  C:3.3G×7  sw:3.6G
+#
+# 왜 이 세 개인가:
+#   - Ghostty: ghostty#10258 reflow 누수의 카나리아. 74GB 사고의 당사자다.
+#     한 세션에 폭이 다른 클라이언트가 붙으면(window-size latest) 포커스가
+#     옮겨갈 때마다 스크롤백 reflow가 일어나고, 그 경로가 메모리를 해제하지
+#     않는다. 평소 150~250MB 대역을 벗어나면 신호다.
+#   - claude: 실측 인스턴스당 약 490MB로 단일 최대 소비자다. worktree 윈도우
+#     마다 띄우면 순식간에 GB 단위가 된다. 개수를 함께 보여 "안 쓰는
+#     worktree의 에이전트를 끌 시점"을 판단할 수 있게 한다.
+#   - 스왑: 실제 압박 신호. "여유율"은 쓰지 않는다 — memory_pressure는
+#     압축 메모리를 분모에서 제외해 실제보다 낙관적으로 나오고(54% vs 35%),
+#     vm_stat 기반 계산도 inactive를 여유로 볼지에 따라 크게 흔들린다.
+#     스왑 사용량은 정의가 하나뿐이고 체감 저하와 직결된다.
+#
+# status-interval(5초)마다 실행되므로 빨라야 한다. ps 한 번 + sysctl 한 번만
+# 쓴다. memory_pressure(23ms)와 vm_stat은 위 이유로 쓰지 않는다.
+set -uo pipefail
+
+GHOSTTY_WARN_MB=1000   # 평소 150~250MB. 1GB를 넘으면 reflow 누수 의심
+SWAP_WARN_MB=4096      # 이 위로는 체감 저하가 시작된다
+SWAP_CAUTION_MB=2048
+
+# --- ps 한 번으로 집계 ---
+# comm 은 실행 파일 경로 전체가 나올 수 있다. Ghostty는 실제로
+# /Applications/Ghostty.app/Contents/MacOS/ghostty 로 나오므로 basename 으로
+# 비교해야 한다. $2=="ghostty" 로 비교하면 0이 나온다.
+#
+# comm 에는 공백이 든 경로도 온다(91개 프로세스: "Google Chrome.app/...",
+# "Software Update.app/..."). $2 만 보면 "Google" 로 잘리므로 첫 필드 이후
+# 전체를 경로로 취한다.
+collect() {
+  ps -Ao rss=,comm= 2>/dev/null | awk '
+    {
+      rss  = $1
+      path = substr($0, index($0, $2))
+      n = split(path, seg, "/")
+      name = seg[n]
+      if      (name == "ghostty") g += rss
+      else if (name == "claude")  { c += rss; cn++ }
+      else if (name == "codex")   x += rss
+      else if (name == "nvim")    v += rss
+    }
+    END { printf "%d %d %d %d %d\n", g+0, c+0, cn+0, x+0, v+0 }
+  '
+}
+
+# vm_stat 에는 compressor 가 든 줄이 둘이다:
+#   "Pages stored in compressor"   = 압축 전 원본 크기 (26.9G — 이걸 쓰면 오해)
+#   "Pages occupied by compressor" = 실제 점유 물리 메모리 (7.9G — 이게 맞다)
+# 앞을 앵커로 고정하고 첫 매칭에서 빠져나온다.
+compressed() {
+  vm_stat 2>/dev/null | awk '
+    /^Pages occupied by compressor/ {
+      gsub(/\./, "", $5)
+      printf "%.1fG", $5 * 16384 / 1073741824
+      exit
+    }
+  '
+}
+
+swap_used_mb() {
+  # total = 5120.00M  used = 3633.94M  free = 1486.06M  (encrypted)
+  sysctl -n vm.swapusage 2>/dev/null | awk '{
+    for (i = 1; i <= NF; i++)
+      if ($i == "used") { sub(/M$/, "", $(i+2)); printf "%d\n", $(i+2); exit }
+  }'
+}
+
+human() {
+  awk -v kb="$1" 'BEGIN {
+    if (kb >= 1048576) printf "%.1fG", kb / 1048576
+    else               printf "%dM",   kb / 1024
+  }'
+}
+
+read -r g_kb c_kb c_n x_kb v_kb < <(collect)
+sw_mb=$(swap_used_mb)
+: "${sw_mb:=0}"
+
+# ============================================================
+# --detail: popup 용 상세
+# ============================================================
+if [ "${1:-}" = "--detail" ]; then
+  printf '메모리 상세 — %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+
+  printf 'Ghostty      %8s   (평소 150~250M / %dM 넘으면 reflow 누수 의심)\n' \
+    "$(human "$g_kb")" "$GHOSTTY_WARN_MB"
+  printf 'claude       %8s   × %d개 (인스턴스당 평균 %s)\n' \
+    "$(human "$c_kb")" "$c_n" "$([ "$c_n" -gt 0 ] && human $((c_kb / c_n)) || echo -)"
+  printf 'codex        %8s\n' "$(human "$x_kb")"
+  printf 'nvim         %8s\n' "$(human "$v_kb")"
+  printf '스왑 사용     %8s   (%s)\n' "${sw_mb}M" "$(sysctl -n vm.swapusage 2>/dev/null)"
+  printf '압축 메모리   %8s\n' "$(compressed)"
+  printf '커널 압박     %8s   (1=정상 2=경고 4=위험)\n' \
+    "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
+
+  printf '\n--- 프로세스 그룹 상위 10 ---\n'
+  ps -Ao rss=,comm= 2>/dev/null | awk '
+    {
+      path = substr($0, index($0, $2))
+      n = split(path, seg, "/")
+      s[seg[n]] += $1
+    }
+    END { for (k in s) printf "%d\t%s\n", s[k], k }
+  ' | sort -rn | head -10 | awk -F'\t' '{ printf "%9.1f MB  %s\n", $1/1024, $2 }'
+
+  printf '\n--- tmux 클라이언트 (같은 세션에 폭이 다른 클라이언트가 있으면 누수 위험) ---\n'
+  tmux list-clients -F '#{client_name}  세션=#{client_session}  #{client_width}x#{client_height}' 2>/dev/null \
+    || echo '(tmux 밖)'
+
+  printf '\n아무 키나 누르면 닫힙니다.'
+  read -rsn1
+  exit 0
+fi
+
+# ============================================================
+# 기본: status-right 한 줄
+# ============================================================
+if [ "$((g_kb / 1024))" -ge "$GHOSTTY_WARN_MB" ]; then
+  g_out="#[fg=colour196,bold]G:$(human "$g_kb")#[default]"
+else
+  g_out="G:$(human "$g_kb")"
+fi
+
+if [ "$sw_mb" -ge "$SWAP_WARN_MB" ]; then
+  sw_out="#[fg=colour196,bold]sw:$(human $((sw_mb * 1024)))#[default]"
+elif [ "$sw_mb" -ge "$SWAP_CAUTION_MB" ]; then
+  sw_out="#[fg=colour214]sw:$(human $((sw_mb * 1024)))#[default]"
+else
+  sw_out="sw:$(human $((sw_mb * 1024)))"
+fi
+
+if [ "$c_n" -gt 0 ]; then
+  printf '%s  C:%s×%d  %s' "$g_out" "$(human "$c_kb")" "$c_n" "$sw_out"
+else
+  printf '%s  %s' "$g_out" "$sw_out"
+fi
