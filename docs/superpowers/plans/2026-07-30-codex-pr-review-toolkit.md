@@ -431,11 +431,42 @@ Before reviewing:
 
 ## Scope
 
-1. Record `git status --porcelain=v1` and the current diff before review.
-2. Honor an explicit PR number, commit range, file list, or diff scope from the user.
-3. Without an explicit scope, inspect `git status` and `git diff`.
-4. Try `gh pr view` when PR context would help. If no PR exists or the command fails, continue with the local Git scope and report that fallback briefly.
-5. Read `AGENTS.md` when present. Otherwise read `CLAUDE.md` or another repository instruction file that actually exists.
+1. Honor an explicit PR number, commit range, file list, or diff scope from the user.
+2. Without an explicit scope, inspect `git status` and `git diff`.
+3. Try `gh pr view` when PR context would help. If no PR exists or the command fails, continue with the local Git scope and report that fallback briefly.
+4. Read `AGENTS.md` when present. Otherwise read `CLAUDE.md` or another repository instruction file that actually exists.
+5. Immediately before analysis-only reviewer execution, run a read-only
+   baseline and retain these concise outputs in the review context under
+   distinct `before` labels:
+   - raw HEAD: `git rev-parse HEAD`;
+   - NUL-safe exact status fingerprint:
+     `git status --porcelain=v1 -z | shasum -a 256`;
+   - exact unstaged diff fingerprint:
+     `git diff --binary | shasum -a 256`;
+   - exact staged diff fingerprint:
+     `git diff --cached --binary | shasum -a 256`;
+   - an exact untracked fingerprint made by streaming every original path,
+     file-type marker, and worktree content SHA-256 (or symlink target digest)
+     with NUL separators directly into `shasum -a 256`; and
+   - bounded path-level manifests for unstaged, staged, and untracked changes.
+     Enumerate paths with NUL-safe Git commands such as `git diff --raw -z`,
+     `git diff --cached --raw -z`, and
+     `git ls-files --others --exclude-standard -z`. Parse rename/copy records
+     completely. Use neutral variables such as `review_changed_path`, never
+     zsh's reserved `path`. Safely escape every path and status with
+     `printf '%q'`. For every unstaged and staged tracked record, include the
+     raw diff's old and new Git modes. A staged record also includes its staged
+     object ID. An unstaged worktree state signature includes regular file
+     content SHA-256, the exact symlink target digest without an added newline,
+     or the checked-out gitlink worktree OID. If a gitlink is absent or cannot
+     be read, use an explicit absent or unavailable marker. Use an explicit
+     deletion or other file-type marker for every remaining state.
+   Each manifest is bounded to one metadata record per Git-reported path.
+   Records contain only status, escaped path, type, and digest metadata; never
+   include diff hunks or file contents. Complete status, diff, and untracked
+   streams go directly to their fingerprint pipelines and are not retained in
+   the review context. Do not store NUL streams in variables or files, and do
+   not create or modify any filesystem object for baseline capture.
 
 ## Aspect selection
 
@@ -459,19 +490,21 @@ Applicability rules:
 
 ## Reviewer execution
 
-For every selected reviewer:
+For every selected analysis-only reviewer:
 
 1. Read its entire upstream `agents/<name>.md`.
 2. Ignore Claude-only frontmatter as runtime configuration.
 3. Pass the same Git scope and project instructions to the reviewer.
 4. Preserve the upstream role, criteria, scoring, and output format.
-5. For all reviewers except an explicitly authorized `code-simplifier`, state that the task is analysis-only and must not modify files.
+5. State that the task is analysis-only and must not modify files.
 
-When the user requests `parallel`, explicitly dispatch independent reviewers as
-parallel sub-agents. Respect the available concurrency limit and run remaining
-reviewers in a second batch. Otherwise run reviewers sequentially. If sub-agent
-execution is unavailable, run the same roles sequentially and disclose the
-fallback.
+Run all selected analysis-only reviewers to completion before starting
+`code-simplifier`. When the user requests `parallel`, explicitly dispatch only
+independent analysis-only reviewers as parallel sub-agents. Respect the
+available concurrency limit and run remaining reviewers in a second batch.
+Otherwise run reviewers sequentially. If sub-agent execution is unavailable,
+run the same roles sequentially and disclose the fallback. Never dispatch
+`code-simplifier` in parallel with any reviewer.
 
 If one reviewer fails, preserve completed reports and identify the failed role
 and reason in the final summary.
@@ -502,9 +535,22 @@ Deduplicate overlapping findings and produce:
 Omit empty finding bullets, state `None` under empty severity sections, and do
 not invent positive observations.
 
-After a read-only review, compare Git status and diff with the recorded
-baseline. If they changed, do not revert user work; report that the review did
-not preserve the baseline and identify the changed paths.
+After all analysis-only reviewers complete, aggregate their reports and run the
+same read-only command set again under distinct `after` labels. Compare HEAD
+and every exact fingerprint first. If any value differs, compare the retained
+before/after path-level manifests to report every affected path and whether
+HEAD, status, unstaged content, staged object, or untracked path/content
+changed. Do not revert user work or run `code-simplifier` after a failed
+baseline comparison. Keep both fingerprint and manifest output sets in the
+review context through the final report. This entire baseline workflow must
+perform no filesystem writes.
+
+When `code-simplifier` is selected with explicit modification authority, run
+it only after the analysis-only reports have been aggregated and the baseline
+comparison has passed. Read its entire upstream `agents/code-simplifier.md`,
+pass it the same Git scope and project instructions, and preserve its upstream
+role, criteria, scoring, and output format. This is a separate sequential
+mutation phase; it may modify files and must never be parallel-dispatched.
 ```
 
 - [ ] **Step 3: Validate the orchestrator**
@@ -525,11 +571,21 @@ Run:
 
 ```bash
 rg -n \
-  'Default `all` never includes|explicitly authorizes code modification|Do not use an embedded|gh pr view|parallel sub-agents|AGENTS.md|compare Git status and diff' \
+  'Default `all` never includes|explicitly authorizes code modification|Do not use an embedded|gh pr view|parallel sub-agents|AGENTS.md|analysis-only reviewers|Never dispatch|review context|NUL-safe exact|bounded path-level manifests|one metadata record per Git-reported path|review_changed_path|old and new Git modes|staged object ID|worktree state signature|regular file content SHA-256|exact symlink target digest|checked-out gitlink worktree OID|absent or unavailable marker|deletion or other file-type marker|never include diff hunks|affected path|no filesystem writes|comparison has passed' \
   dot_codex/skills/pr-review-toolkit/SKILL.md
+
+if rg -n \
+  'mktemp|snapshot (directory|file)|cleanup trap|retain their complete stdout|human-readable raw (unstaged|staged) diff|Keep the raw outputs|raw status, unstaged diff, staged diff' \
+  dot_codex/skills/pr-review-toolkit/SKILL.md
+then
+  exit 1
+fi
 ```
 
-Expected: all seven expressions match.
+Expected: all safety, routing, phase-separation, exact-fingerprint, and bounded
+path-diagnostic expressions match, then the negative gate exits 0 with no
+output. The inner read-only skill contains no filesystem-backed baseline
+requirement and does not retain complete diff stdout.
 
 - [ ] **Step 5: Commit the orchestrator**
 
@@ -794,10 +850,52 @@ Run:
 
 ```bash
 set -e
-review_before_status=$(git status --porcelain=v1)
-review_before_diff_hash=$(git diff --binary | shasum -a 256)
-review_output_file=$(mktemp -t pr-review-toolkit-review)
-trap 'test ! -e "$review_output_file" || unlink "$review_output_file"' EXIT HUP INT TERM
+review_snapshot_dir=$(mktemp -d -t pr-review-toolkit-snapshot)
+review_cleanup_snapshot() {
+  test ! -e "$review_snapshot_dir" || rm -rf -- "$review_snapshot_dir"
+}
+trap review_cleanup_snapshot EXIT HUP INT TERM
+
+review_write_untracked_manifest() {
+  review_paths_file=$1
+  review_manifest_file=$2
+  while IFS= read -r -d '' review_untracked_path
+  do
+    printf '%s\0' "$review_untracked_path"
+    shasum -a 256 < "$review_untracked_path"
+  done < "$review_paths_file" > "$review_manifest_file"
+}
+
+review_capture_snapshot() {
+  review_snapshot_prefix=$1
+  git rev-parse HEAD > "$review_snapshot_dir/$review_snapshot_prefix.head"
+  git status --porcelain=v1 -z > "$review_snapshot_dir/$review_snapshot_prefix.status"
+  git diff --binary > "$review_snapshot_dir/$review_snapshot_prefix.unstaged.diff"
+  git diff --cached --binary > "$review_snapshot_dir/$review_snapshot_prefix.staged.diff"
+  git ls-files --others --exclude-standard -z \
+    > "$review_snapshot_dir/$review_snapshot_prefix.untracked.paths"
+  review_write_untracked_manifest \
+    "$review_snapshot_dir/$review_snapshot_prefix.untracked.paths" \
+    "$review_snapshot_dir/$review_snapshot_prefix.untracked.manifest"
+  for review_snapshot_artifact in \
+    head status unstaged.diff staged.diff untracked.paths untracked.manifest
+  do
+    shasum -a 256 < \
+      "$review_snapshot_dir/$review_snapshot_prefix.$review_snapshot_artifact" \
+      > "$review_snapshot_dir/$review_snapshot_prefix.$review_snapshot_artifact.sha256"
+  done
+}
+
+review_list_nul_paths() {
+  review_paths_file=$1
+  while IFS= read -r -d '' review_untracked_path
+  do
+    print -r -- "$review_untracked_path"
+  done < "$review_paths_file"
+}
+
+review_capture_snapshot before
+review_output_file="$review_snapshot_dir/review-output.md"
 
 codex exec \
   --ephemeral \
@@ -809,15 +907,58 @@ codex exec \
 rg -n '^# PR Review Summary$' "$review_output_file"
 rg -n '^## (Critical Issues|Important Issues|Suggestions|Strengths|Recommended Action)$' \
   "$review_output_file"
-test "$review_before_status" = "$(git status --porcelain=v1)"
-test "$review_before_diff_hash" = "$(git diff --binary | shasum -a 256)"
+review_capture_snapshot after
 
-unlink "$review_output_file"
-trap - EXIT HUP INT TERM
+review_snapshot_mismatch=0
+for review_snapshot_artifact in \
+  head status unstaged.diff staged.diff untracked.paths untracked.manifest
+do
+  if ! cmp -s \
+    "$review_snapshot_dir/before.$review_snapshot_artifact.sha256" \
+    "$review_snapshot_dir/after.$review_snapshot_artifact.sha256"
+  then
+    print -r -- "Review baseline fingerprint mismatch: $review_snapshot_artifact"
+  fi
+  if ! cmp -s \
+    "$review_snapshot_dir/before.$review_snapshot_artifact" \
+    "$review_snapshot_dir/after.$review_snapshot_artifact"
+  then
+    review_snapshot_mismatch=1
+    print -r -- "Review baseline mismatch: $review_snapshot_artifact"
+    case "$review_snapshot_artifact" in
+      status)
+        print -r -- 'Before status paths:'
+        tr '\0' '\n' < "$review_snapshot_dir/before.status"
+        print -r -- 'After status paths:'
+        tr '\0' '\n' < "$review_snapshot_dir/after.status"
+        ;;
+      unstaged.diff|staged.diff)
+        git diff --no-index -- \
+          "$review_snapshot_dir/before.$review_snapshot_artifact" \
+          "$review_snapshot_dir/after.$review_snapshot_artifact" || true
+        ;;
+      untracked.paths|untracked.manifest)
+        print -r -- 'Before untracked paths:'
+        review_list_nul_paths "$review_snapshot_dir/before.untracked.paths"
+        print -r -- 'After untracked paths:'
+        review_list_nul_paths "$review_snapshot_dir/after.untracked.paths"
+        ;;
+    esac
+  fi
+done
+test "$review_snapshot_mismatch" -eq 0
 ```
 
-Expected: the report contains the aggregate title and all five sections, and
-both Git-state comparisons succeed.
+Expected: the report contains the aggregate title and all five sections. The
+before/after `mktemp -d` artifacts for HEAD, NUL-delimited status, unstaged
+binary diff, staged binary diff, untracked NUL paths, and the path-level
+untracked content manifest all pass `cmp -s`. The SHA-256 artifact files are
+available as equality gates, but the raw artifacts remain available for a
+mismatch diagnostic that prints affected paths. Every snapshot variable,
+comparison, and cleanup trap is declared in this one Step; NUL data flows only
+through files and pipes, while the trap removes only its exact temporary
+directory. These temporary artifacts belong to the outer smoke harness, not to
+the inner `codex exec --sandbox read-only` skill contract.
 
 - [ ] **Step 4: Confirm the final branch state**
 

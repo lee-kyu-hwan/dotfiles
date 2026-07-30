@@ -134,20 +134,43 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
    - 주석이나 문서 변경에는 `comment-analyzer`를 적용한다.
    - 오류 처리 변경에는 `silent-failure-hunter`를 적용한다.
    - 타입 변경에는 `type-design-analyzer`를 적용한다.
-4. `parallel` 요청이 있으면 독립 리뷰어를 하위 에이전트로 동시 실행하고, 그렇지
-   않으면 순차 실행한다.
-5. 결과를 `Critical`, `Important`, `Suggestions`, `Strengths`로 중복 제거해
-   합친다. 모든 지적에는 가능한 경우 파일과 줄 번호를 포함한다.
-6. `code-simplifier`는 `simplify`가 명시됐고 사용자가 코드 수정을 요청한 경우에만
-   실행한다. 기본 `all`과 일반 리뷰는 `code-simplifier`를 제외하고 읽기 전용으로
-   동작한다.
+4. analysis-only reviewer 실행 직전에 read-only Git 명령으로 raw `HEAD`와
+   status, unstaged/staged binary diff, untracked path/content stream의 exact
+   SHA-256 fingerprint를 출력한다. complete diff stdout은 review context에
+   보존하지 않는다. 대신 unstaged/staged/untracked 변경을 NUL-safe Git path
+   enumeration으로 읽어 status와 safely escaped path를 기록한다. 모든
+   unstaged/staged tracked record에는 raw diff의 old/new Git mode를 포함한다.
+   staged record는 staged object ID도 포함한다. unstaged worktree signature는
+   regular file content SHA-256, newline을 추가하지 않은 exact symlink target
+   digest, checked-out gitlink worktree OID 중 해당 값을 사용하고, gitlink가
+   없거나 읽을 수 없으면 absent/unavailable marker를 남긴다. 나머지 상태에는
+   deletion/other file-type marker를 사용한다. 이 필드만 담은 bounded path-level
+   manifest는 Git이 보고한 path마다 metadata record 하나로 제한하고 diff hunk나
+   파일 본문을 포함하지 않는다. fingerprint와 manifest의 before 결과를 review
+   context에 label과 함께 보존한다. NUL stream은 변수나 파일에 저장하지 않고
+   pipeline에서 바로 처리하며 filesystem object를 만들거나 수정하지 않는다.
+5. `parallel` 요청이 있으면 독립적인 analysis-only reviewer만 하위 에이전트로 동시
+   실행하고, 그렇지 않으면 순차 실행한다.
+6. analysis-only reviewer 결과를 `Critical`, `Important`, `Suggestions`,
+   `Strengths`로 중복 제거해 합친다. 모든 지적에는 가능한 경우 파일과 줄 번호를
+   포함한다.
+7. aggregate가 끝나면 같은 command set의 after fingerprint와 bounded manifest를
+   review context에 보존한다. HEAD와 fingerprint를 먼저 비교하고, 불일치면
+   before/after path-level manifest를 대조하여 변경 경로와 변경 종류를 보고한다.
+   변경을 되돌리지 않고 mutation을 시작하지 않는다.
+8. `code-simplifier`는 `simplify`가 명시됐고 사용자가 코드 수정을 요청한 경우에만,
+   성공한 baseline 비교 뒤 별도 순차 mutation 단계에서 실행한다. 기본 `all`과 일반
+   리뷰는 `code-simplifier`를 제외하고 읽기 전용으로 동작하며, simplifier는 어떤
+   reviewer와도 병렬 실행하지 않는다.
 
 전문 리뷰어는 동일한 diff 범위와 프로젝트 지침을 전달받는다.
 
 ## 병렬 실행과 실패 처리
 
-- 서로 독립적인 전문 리뷰는 Codex 하위 에이전트로 병렬 실행할 수 있다.
+- 서로 독립적인 analysis-only 전문 리뷰는 Codex 하위 에이전트로 병렬 실행할 수 있다.
 - 사용할 수 있는 동시 실행 슬롯보다 리뷰어가 많으면 나머지는 다음 배치로 실행한다.
+- `code-simplifier`는 parallel 요청에서도 dispatch 대상이 아니며, analysis-only
+  reviewers의 완료·집계·baseline 보존 확인 뒤에만 단독 순차 mutation 단계로 실행한다.
 - 한 리뷰어가 실패해도 완료된 결과는 보존하고, 실패한 리뷰 종류와 원인을 최종
   요약에 표시한다.
 - Claude 원본 링크가 없거나 깨졌으면 임의의 내장 프롬프트로 대체하지 않는다.
@@ -171,6 +194,11 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
 각 계획 Step은 독립 셸에서 실행된다고 가정한다. 이전 Step에서 선언한 셸 변수나
 배열을 다음 Step에서 사용하지 않는다.
 
+Task 5의 outer smoke harness는 inner Codex 밖에서 Git invariance를 독립 검증하므로
+전용 temporary directory를 사용할 수 있다. 이는
+`codex exec --sandbox read-only` 내부 orchestrator의 baseline 계약이 아니며,
+inner skill은 review-context command output만 사용한다.
+
 배포 미리보기와 적용 명령에는 심링크 하나와 스킬 디렉터리 7개의 절대 경로를
 리터럴로 모두 적는다. 타깃이 비어 있는 `chezmoi diff`나 `chezmoi apply`는 절대
 실행하지 않는다. 새 머신에서 부모 디렉터리를 만들 수 있도록 적용 명령에는
@@ -187,10 +215,17 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
 - 종합 리뷰가 기본 `all`, 선택 리뷰, `parallel` 요청을 구분한다.
 - 종합 리뷰가 최소 두 전문 리뷰어 결과를 하나의 우선순위 보고서로 합친다.
 - 복구 메시지와 임의 프롬프트 대체 금지 규칙을 정적으로 검증한다.
-- 리뷰 전후의 `git status --porcelain`과 diff 내용이 동일해 리뷰 실행이 새 변경을
-  만들지 않았음을 확인한다.
+- analysis-only 리뷰 전후의 raw `HEAD`와 status, unstaged/staged binary diff,
+  untracked path/content stream의 exact fingerprint를 review context에 보존한다.
+  complete diff stdout은 보존하지 않고, safely escaped status/path와 staged object
+  ID, raw old/new Git mode, regular content SHA-256, exact symlink target digest,
+  gitlink worktree OID 또는 absent/unavailable/deletion/other type marker만 가진
+  bounded path-level manifest를 함께 보존한다. fingerprint가 다르면 before/after
+  manifest로 변경 경로와 종류를 보고한다. NUL 데이터는 변수나 파일에 저장하지
+  않고 pipeline에서 처리하며, inner baseline workflow는 filesystem write를
+  수행하지 않는다.
 - `simplify`를 명시하고 수정 권한을 준 실행에서만 `code-simplifier`가 변경할 수
-  있다.
+  있으며, 이 mutation은 성공한 baseline 비교 뒤에만 순차 실행한다.
 
 ## 롤백
 
