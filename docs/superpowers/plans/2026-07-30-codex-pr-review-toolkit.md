@@ -159,7 +159,7 @@ Analyze only; do not modify files.
 1. Resolve `~/.codex/pr-review-toolkit-claude/agents/comment-analyzer.md`.
 2. If it is missing or unreadable, stop and report: `Claude pr-review-toolkit source is unavailable. Install or update pr-review-toolkit@claude-plugins-official in Claude Code, then retry.`
 3. Read the entire upstream file before reviewing.
-4. Ignore Claude-only frontmatter as runtime configuration, but follow the body’s role, criteria, severity rules, and output format.
+4. Ignore Claude-only frontmatter as runtime configuration, but follow the body’s role, criteria, and output format.
 5. Review the exact diff, PR, commit range, or files supplied by the caller.
 6. Use `AGENTS.md` as project guidance when present; otherwise use `CLAUDE.md` or another repository instruction file that actually exists.
 7. Return findings with file and line references. Do not edit comments, documentation, or code.
@@ -398,7 +398,7 @@ Expected RED result: non-zero exit because the skill directory does not exist.
 
 Create `dot_codex/skills/pr-review-toolkit/SKILL.md`:
 
-```markdown
+````markdown
 ---
 name: pr-review-toolkit
 description: Use when the user asks for a comprehensive pull request, commit-range, or local-diff review across code quality, tests, comments, error handling, and type design.
@@ -432,41 +432,52 @@ Before reviewing:
 ## Scope
 
 1. Honor an explicit PR number, commit range, file list, or diff scope from the user.
-2. Without an explicit scope, inspect `git status` and `git diff`.
+2. Without an explicit scope, inspect
+   `git --no-optional-locks -c core.fsmonitor=false status` and
+   `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv`.
 3. Try `gh pr view` when PR context would help. If no PR exists or the command fails, continue with the local Git scope and report that fallback briefly.
 4. Read `AGENTS.md` when present. Otherwise read `CLAUDE.md` or another repository instruction file that actually exists.
-5. Immediately before analysis-only reviewer execution, run a read-only
-   baseline and retain these concise outputs in the review context under
-   distinct `before` labels:
+5. Immediately before entering the analysis phase, run a read-only baseline
+   and retain these concise outputs in the review context under distinct
+   `before` labels:
    - raw HEAD: `git rev-parse HEAD`;
    - NUL-safe exact status fingerprint:
-     `git status --porcelain=v1 -z | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z | shasum -a 256`;
    - exact unstaged diff fingerprint:
-     `git diff --binary | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --binary | shasum -a 256`;
    - exact staged diff fingerprint:
-     `git diff --cached --binary | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --binary | shasum -a 256`;
    - an exact untracked fingerprint made by streaming every original path,
-     file-type marker, and worktree content SHA-256 (or symlink target digest)
-     with NUL separators directly into `shasum -a 256`; and
+     type/mode metadata, and exactly one alternative: a regular content hash
+     (SHA-256), an exact symlink-target hash (SHA-256 of target bytes without
+     an added newline), or a deterministic other-type marker. Separate fields
+     with NUL bytes and stream them directly into `shasum -a 256`; and
    - bounded path-level manifests for unstaged, staged, and untracked changes.
-     Enumerate paths with NUL-safe Git commands such as `git diff --raw -z`,
-     `git diff --cached --raw -z`, and
-     `git ls-files --others --exclude-standard -z`. Parse rename/copy records
-     completely. Use neutral variables such as `review_changed_path`, never
-     zsh's reserved `path`. Safely escape every path and status with
-     `printf '%q'`. For every unstaged and staged tracked record, include the
-     raw diff's old and new Git modes. A staged record also includes its staged
-     object ID. An unstaged worktree state signature includes regular file
-     content SHA-256, the exact symlink target digest without an added newline,
-     or the checked-out gitlink worktree OID. If a gitlink is absent or cannot
-     be read, use an explicit absent or unavailable marker. Use an explicit
-     deletion or other file-type marker for every remaining state.
+     Enumerate paths with NUL-safe Git commands such as
+     `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z`,
+     `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z`,
+     and `git -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
+     Parse rename/copy records completely. Use neutral variables such as
+     `review_changed_path`, never zsh's reserved `path`. Safely escape every
+     path and status with `printf '%q'`. For every unstaged and staged tracked
+     record, include the raw diff's old and new Git modes. A staged record also
+     includes its staged object ID. An unstaged worktree state signature
+     includes regular file content SHA-256, the exact symlink target digest
+     without an added newline, or the checked-out gitlink worktree OID. If a
+     gitlink is absent or cannot be read, use an explicit absent or unavailable
+     marker. Use an explicit deletion or other file-type marker for every
+     remaining state.
    Each manifest is bounded to one metadata record per Git-reported path.
    Records contain only status, escaped path, type, and digest metadata; never
    include diff hunks or file contents. Complete status, diff, and untracked
    streams go directly to their fingerprint pipelines and are not retained in
    the review context. Do not store NUL streams in variables or files, and do
    not create or modify any filesystem object for baseline capture.
+   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status and every
+   diff command, and keep `--no-ext-diff --no-textconv` on every diff command.
+   These command-local controls prevent configured fsmonitor processes/hooks,
+   external diff commands, textconv commands, and optional index refresh
+   writes. Do not change repository config or untracked-cache settings.
 
 ## Aspect selection
 
@@ -506,12 +517,20 @@ Otherwise run reviewers sequentially. If sub-agent execution is unavailable,
 run the same roles sequentially and disclose the fallback. Never dispatch
 `code-simplifier` in parallel with any reviewer.
 
+The analysis phase may contain zero reviewers, including an explicitly
+authorized `simplify`-only request. The before baseline still always runs
+before entering this phase. When the phase is empty, skip reviewer dispatch and
+reviewer-report aggregation. The after baseline still always runs immediately
+after the empty phase, and its comparison must pass before the separate
+simplifier mutation phase.
+
 If one reviewer fails, preserve completed reports and identify the failed role
 and reason in the final summary.
 
 ## Aggregation
 
-Deduplicate overlapping findings and produce:
+When the analysis phase contains one or more reviewers, deduplicate overlapping
+findings and produce:
 
 ```markdown
 # PR Review Summary
@@ -533,25 +552,27 @@ Deduplicate overlapping findings and produce:
 ```
 
 Omit empty finding bullets, state `None` under empty severity sections, and do
-not invent positive observations.
+not invent positive observations. Do not produce this aggregate when the
+analysis phase is empty.
 
-After all analysis-only reviewers complete, aggregate their reports and run the
-same read-only command set again under distinct `after` labels. Compare HEAD
-and every exact fingerprint first. If any value differs, compare the retained
-before/after path-level manifests to report every affected path and whether
-HEAD, status, unstaged content, staged object, or untracked path/content
-changed. Do not revert user work or run `code-simplifier` after a failed
-baseline comparison. Keep both fingerprint and manifest output sets in the
-review context through the final report. This entire baseline workflow must
-perform no filesystem writes.
+After the analysis phase completes—and after aggregation when it contained
+reviewers—run the same read-only command set again under distinct `after`
+labels. Compare HEAD and every exact fingerprint first. If any value differs,
+compare the retained before/after path-level manifests to report every affected
+path and whether HEAD, status, unstaged content, staged object, or untracked
+path/content changed. Do not revert user work or run `code-simplifier` after a
+failed baseline comparison. Keep both fingerprint and manifest output sets in
+the review context through the final report. This entire baseline workflow
+must perform no filesystem writes.
 
 When `code-simplifier` is selected with explicit modification authority, run
-it only after the analysis-only reports have been aggregated and the baseline
-comparison has passed. Read its entire upstream `agents/code-simplifier.md`,
-pass it the same Git scope and project instructions, and preserve its upstream
-role, criteria, scoring, and output format. This is a separate sequential
-mutation phase; it may modify files and must never be parallel-dispatched.
-```
+it only after both baseline captures have run and their comparison has passed,
+whether the analysis phase had reviewers or not. Read its entire upstream
+`agents/code-simplifier.md`, pass it the same Git scope and project
+instructions, and preserve its upstream role, criteria, scoring, and output
+format. This is a separate sequential mutation phase; it may modify files and
+must never be parallel-dispatched.
+````
 
 - [ ] **Step 3: Validate the orchestrator**
 
@@ -570,12 +591,87 @@ Expected GREEN result: `Skill is valid!`.
 Run:
 
 ```bash
-rg -n \
-  'Default `all` never includes|explicitly authorizes code modification|Do not use an embedded|gh pr view|parallel sub-agents|AGENTS.md|analysis-only reviewers|Never dispatch|review context|NUL-safe exact|bounded path-level manifests|one metadata record per Git-reported path|review_changed_path|old and new Git modes|staged object ID|worktree state signature|regular file content SHA-256|exact symlink target digest|checked-out gitlink worktree OID|absent or unavailable marker|deletion or other file-type marker|never include diff hunks|affected path|no filesystem writes|comparison has passed' \
-  dot_codex/skills/pr-review-toolkit/SKILL.md
+review_required_orchestrator_rules=(
+  'Default `all` never includes'
+  'explicitly authorizes code modification'
+  'Do not use an embedded'
+  'gh pr view'
+  'parallel sub-agents'
+  'AGENTS.md'
+  'analysis-only reviewers'
+  'Never dispatch'
+  'review context'
+  'NUL-safe exact'
+  'git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z'
+  'git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --binary'
+  'git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --binary'
+  'git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z'
+  'git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z'
+  'git -c core.fsmonitor=false ls-files --others --exclude-standard -z'
+  'bounded path-level manifests'
+  'one metadata record per Git-reported path'
+  'regular content hash'
+  'exact symlink-target hash'
+  'deterministic other-type marker'
+  'review_changed_path'
+  'old and new Git modes'
+  'staged object ID|staged[[:space:]]+object ID'
+  'worktree state signature'
+  'regular file content SHA-256|regular file[[:space:]]+content SHA-256'
+  'exact symlink target digest'
+  'checked-out gitlink worktree OID'
+  'absent or unavailable marker|absent or unavailable[[:space:]]+marker'
+  'deletion or other file-type marker'
+  'never include diff hunks|never[[:space:]]+include diff hunks'
+  'affected path|affected[[:space:]]+path'
+  'no filesystem writes'
+  'analysis phase may contain zero reviewers'
+  'before baseline still always runs'
+  'skip reviewer dispatch and reviewer-report aggregation|skip reviewer dispatch and[[:space:]]+reviewer-report aggregation'
+  'after baseline still always runs'
+  'Do not produce this aggregate when the analysis phase is empty|Do not produce this aggregate when the[[:space:]]+analysis phase is empty'
+  'both baseline captures have run'
+  'whether the analysis phase had reviewers or not'
+  'comparison has passed'
+  'configured fsmonitor processes/hooks'
+  'external diff commands'
+  'textconv commands'
+  'Do not change repository config or untracked-cache settings'
+)
+review_missing_orchestrator_rule=0
+for review_required_orchestrator_rule in \
+  "${review_required_orchestrator_rules[@]}"
+do
+  review_required_orchestrator_rule_name=$review_required_orchestrator_rule
+  review_required_orchestrator_rule_found=0
+  if [[ "$review_required_orchestrator_rule" == *'|'* ]]
+  then
+    review_required_orchestrator_rule_name=${review_required_orchestrator_rule%%|*}
+    review_required_orchestrator_rule_pattern=${review_required_orchestrator_rule#*|}
+    rg -q -U -- \
+      "$review_required_orchestrator_rule_pattern" \
+      dot_codex/skills/pr-review-toolkit/SKILL.md ||
+      review_required_orchestrator_rule_found=$?
+  else
+    rg -q -F -- \
+      "$review_required_orchestrator_rule" \
+      dot_codex/skills/pr-review-toolkit/SKILL.md ||
+      review_required_orchestrator_rule_found=$?
+  fi
+  if test "$review_required_orchestrator_rule_found" -ne 0
+  then
+    print -ru2 -- \
+      "Missing orchestrator rule: $review_required_orchestrator_rule_name"
+    review_missing_orchestrator_rule=1
+  fi
+done
+if test "$review_missing_orchestrator_rule" -ne 0
+then
+  exit 1
+fi
 
 if rg -n \
-  'mktemp|snapshot (directory|file)|cleanup trap|retain their complete stdout|human-readable raw (unstaged|staged) diff|Keep the raw outputs|raw status, unstaged diff, staged diff' \
+  'mktemp|snapshot (directory|file)|cleanup trap|retain their complete stdout|human-readable raw (unstaged|staged) diff|Keep the raw outputs|raw status, unstaged diff, staged diff|git status --porcelain=v1 -z|git diff (--cached )?--binary|git diff (--cached )?--raw -z' \
   dot_codex/skills/pr-review-toolkit/SKILL.md
 then
   exit 1
@@ -585,7 +681,9 @@ fi
 Expected: all safety, routing, phase-separation, exact-fingerprint, and bounded
 path-diagnostic expressions match, then the negative gate exits 0 with no
 output. The inner read-only skill contains no filesystem-backed baseline
-requirement and does not retain complete diff stdout.
+requirement, does not retain complete diff stdout, and does not use a bare
+status or helper-enabled diff command. Every status/diff invocation uses
+command-local helper suppression without changing repository config.
 
 - [ ] **Step 5: Commit the orchestrator**
 
@@ -850,6 +948,23 @@ Run:
 
 ```bash
 set -e
+if ! review_python3=$(command -v python3)
+then
+  print -ru2 -- 'Task 5 smoke requires python3 on PATH.'
+  exit 1
+fi
+if ! "$review_python3" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)'
+then
+  print -ru2 -- 'Task 5 smoke requires Python 3.8 or newer.'
+  exit 1
+fi
+if ! "$review_python3" -c \
+  'import os; raise SystemExit(0 if hasattr(os, "O_NOFOLLOW") else 1)'
+then
+  print -ru2 -- 'Task 5 smoke requires Python os.O_NOFOLLOW support.'
+  exit 1
+fi
 review_snapshot_dir=$(mktemp -d -t pr-review-toolkit-snapshot)
 review_cleanup_snapshot() {
   test ! -e "$review_snapshot_dir" || rm -rf -- "$review_snapshot_dir"
@@ -859,22 +974,331 @@ trap review_cleanup_snapshot EXIT HUP INT TERM
 review_write_untracked_manifest() {
   review_paths_file=$1
   review_manifest_file=$2
-  while IFS= read -r -d '' review_untracked_path
-  do
-    printf '%s\0' "$review_untracked_path"
-    shasum -a 256 < "$review_untracked_path"
-  done < "$review_paths_file" > "$review_manifest_file"
+  "$review_python3" - \
+    "$review_paths_file" \
+    "$review_manifest_file" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+
+class SnapshotRace(RuntimeError):
+    pass
+
+
+class SnapshotReadError(RuntimeError):
+    pass
+
+
+def raise_required_read_error(original_path, path_type, operation, error):
+    error_number = error.errno if error.errno is not None else "unknown"
+    raise SnapshotReadError(
+        "required bytes unavailable"
+        + f" path={original_path!r}"
+        + f" type={path_type}"
+        + f" operation={operation}"
+        + f" errno={error_number}"
+    ) from error
+
+
+def stable_metadata(path_stat):
+    return (
+        path_stat.st_dev,
+        path_stat.st_ino,
+        stat.S_IFMT(path_stat.st_mode),
+        stat.S_IMODE(path_stat.st_mode),
+        path_stat.st_uid,
+        path_stat.st_gid,
+        path_stat.st_size,
+        path_stat.st_mtime_ns,
+        path_stat.st_ctime_ns,
+    )
+
+
+def require_same_metadata(before_stat, after_stat, phase):
+    if stable_metadata(before_stat) != stable_metadata(after_stat):
+        raise SnapshotRace("path metadata changed " + phase)
+
+
+def metadata_marker(kind, path_stat, include_stable_identity=False):
+    marker = (
+        kind
+        + ":mode="
+        + format(stat.S_IMODE(path_stat.st_mode), "04o")
+        + ":uid="
+        + str(path_stat.st_uid)
+        + ":gid="
+        + str(path_stat.st_gid)
+    )
+    if include_stable_identity:
+        marker += (
+            ":dev="
+            + str(path_stat.st_dev)
+            + ":ino="
+            + str(path_stat.st_ino)
+            + ":rdev="
+            + str(path_stat.st_rdev)
+            + ":size="
+            + str(path_stat.st_size)
+            + ":mtime_ns="
+            + str(path_stat.st_mtime_ns)
+            + ":ctime_ns="
+            + str(path_stat.st_ctime_ns)
+        )
+    return marker.encode("ascii")
+
+
+def hash_regular_fd(file_descriptor):
+    content_hash = hashlib.sha256()
+    while True:
+        chunk = os.read(file_descriptor, 1024 * 1024)
+        if not chunk:
+            return content_hash.hexdigest().encode("ascii")
+        content_hash.update(chunk)
+
+
+def other_kind(file_mode):
+    if stat.S_ISDIR(file_mode):
+        return "other-directory"
+    if stat.S_ISFIFO(file_mode):
+        return "other-fifo"
+    if stat.S_ISSOCK(file_mode):
+        return "other-socket"
+    if stat.S_ISCHR(file_mode):
+        return "other-character-device"
+    if stat.S_ISBLK(file_mode):
+        return "other-block-device"
+    return "other-unknown"
+
+
+paths_file = os.fsencode(sys.argv[1])
+manifest_file = os.fsencode(sys.argv[2])
+path_fields = open(paths_file, "rb").read().split(b"\0")
+open_flags = os.O_RDONLY | os.O_NOFOLLOW
+open_flags |= getattr(os, "O_NONBLOCK", 0)
+open_flags |= getattr(os, "O_CLOEXEC", 0)
+
+with open(manifest_file, "wb") as manifest:
+    for original_path in path_fields:
+        if not original_path:
+            continue
+        try:
+            path_stat = os.lstat(original_path)
+        except FileNotFoundError:
+            raise SnapshotRace("enumerated path disappeared before lstat")
+        except OSError as lstat_error:
+            raise_required_read_error(
+                original_path,
+                "unknown",
+                "initial-lstat",
+                lstat_error,
+            )
+        else:
+            if stat.S_ISREG(path_stat.st_mode):
+                try:
+                    file_descriptor = os.open(original_path, open_flags)
+                except OSError as open_error:
+                    try:
+                        post_error_stat = os.lstat(original_path)
+                    except FileNotFoundError:
+                        raise SnapshotRace("regular path disappeared before open")
+                    except OSError as lstat_error:
+                        raise_required_read_error(
+                            original_path,
+                            "regular",
+                            "failed-open-lstat",
+                            lstat_error,
+                        )
+                    require_same_metadata(
+                        path_stat,
+                        post_error_stat,
+                        "between lstat and failed open",
+                    )
+                    raise_required_read_error(
+                        original_path,
+                        "regular",
+                        "open",
+                        open_error,
+                    )
+                else:
+                    try:
+                        try:
+                            opened_stat = os.fstat(file_descriptor)
+                        except OSError as fstat_error:
+                            raise_required_read_error(
+                                original_path,
+                                "regular",
+                                "pre-hash-fstat",
+                                fstat_error,
+                            )
+                        require_same_metadata(
+                            path_stat,
+                            opened_stat,
+                            "between lstat and open",
+                        )
+                        try:
+                            digest = hash_regular_fd(file_descriptor)
+                        except OSError as read_error:
+                            raise_required_read_error(
+                                original_path,
+                                "regular",
+                                "read",
+                                read_error,
+                            )
+                        try:
+                            post_hash_stat = os.fstat(file_descriptor)
+                        except OSError as fstat_error:
+                            raise_required_read_error(
+                                original_path,
+                                "regular",
+                                "post-hash-fstat",
+                                fstat_error,
+                            )
+                        require_same_metadata(
+                            opened_stat,
+                            post_hash_stat,
+                            "while hashing regular content",
+                        )
+                    finally:
+                        try:
+                            os.close(file_descriptor)
+                        except OSError as close_error:
+                            raise_required_read_error(
+                                original_path,
+                                "regular",
+                                "close",
+                                close_error,
+                            )
+                    try:
+                        post_path_stat = os.lstat(original_path)
+                    except FileNotFoundError:
+                        raise SnapshotRace("regular path disappeared after hash")
+                    except OSError as lstat_error:
+                        raise_required_read_error(
+                            original_path,
+                            "regular",
+                            "post-hash-lstat",
+                            lstat_error,
+                        )
+                    require_same_metadata(
+                        post_hash_stat,
+                        post_path_stat,
+                        "between hash and final lstat",
+                    )
+                    type_marker = metadata_marker("regular", post_path_stat)
+            elif stat.S_ISLNK(path_stat.st_mode):
+                try:
+                    link_target = os.readlink(original_path)
+                except FileNotFoundError:
+                    raise SnapshotRace("symlink disappeared while reading target")
+                except OSError as readlink_error:
+                    try:
+                        post_error_stat = os.lstat(original_path)
+                    except FileNotFoundError:
+                        raise SnapshotRace(
+                            "symlink disappeared after target read failure"
+                        )
+                    except OSError as lstat_error:
+                        raise_required_read_error(
+                            original_path,
+                            "symlink",
+                            "failed-readlink-lstat",
+                            lstat_error,
+                        )
+                    require_same_metadata(
+                        path_stat,
+                        post_error_stat,
+                        "during failed symlink target read",
+                    )
+                    raise_required_read_error(
+                        original_path,
+                        "symlink",
+                        "readlink",
+                        readlink_error,
+                    )
+                else:
+                    try:
+                        post_link_stat = os.lstat(original_path)
+                    except FileNotFoundError:
+                        raise SnapshotRace(
+                            "symlink disappeared after reading target"
+                        )
+                    except OSError as lstat_error:
+                        raise_required_read_error(
+                            original_path,
+                            "symlink",
+                            "post-readlink-lstat",
+                            lstat_error,
+                        )
+                    require_same_metadata(
+                        path_stat,
+                        post_link_stat,
+                        "while reading symlink target",
+                    )
+                    digest = hashlib.sha256(link_target).hexdigest().encode(
+                        "ascii"
+                    )
+                    type_marker = metadata_marker("symlink", post_link_stat)
+            else:
+                try:
+                    post_other_stat = os.lstat(original_path)
+                except FileNotFoundError:
+                    raise SnapshotRace(
+                        "other path disappeared while recording metadata"
+                    )
+                except OSError as lstat_error:
+                    raise_required_read_error(
+                        original_path,
+                        "other",
+                        "post-record-lstat",
+                        lstat_error,
+                    )
+                require_same_metadata(
+                    path_stat,
+                    post_other_stat,
+                    "while recording other file type",
+                )
+                type_marker = metadata_marker(
+                    other_kind(post_other_stat.st_mode),
+                    post_other_stat,
+                    include_stable_identity=True,
+                )
+                digest = b"-"
+        manifest.write(
+            original_path
+            + b"\0"
+            + type_marker
+            + b"\0"
+            + digest
+            + b"\0"
+        )
+PY
+}
+
+review_write_untracked_manifest_checked() {
+  if ! review_write_untracked_manifest "$1" "$2"
+  then
+    print -ru2 -- \
+      'Task 5 smoke could not capture a stable untracked manifest.'
+    return 1
+  fi
 }
 
 review_capture_snapshot() {
   review_snapshot_prefix=$1
   git rev-parse HEAD > "$review_snapshot_dir/$review_snapshot_prefix.head"
-  git status --porcelain=v1 -z > "$review_snapshot_dir/$review_snapshot_prefix.status"
-  git diff --binary > "$review_snapshot_dir/$review_snapshot_prefix.unstaged.diff"
-  git diff --cached --binary > "$review_snapshot_dir/$review_snapshot_prefix.staged.diff"
-  git ls-files --others --exclude-standard -z \
+  git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z \
+    > "$review_snapshot_dir/$review_snapshot_prefix.status"
+  git --no-optional-locks -c core.fsmonitor=false \
+    diff --no-ext-diff --no-textconv --binary \
+    > "$review_snapshot_dir/$review_snapshot_prefix.unstaged.diff"
+  git --no-optional-locks -c core.fsmonitor=false \
+    diff --cached --no-ext-diff --no-textconv --binary \
+    > "$review_snapshot_dir/$review_snapshot_prefix.staged.diff"
+  git -c core.fsmonitor=false ls-files --others --exclude-standard -z \
     > "$review_snapshot_dir/$review_snapshot_prefix.untracked.paths"
-  review_write_untracked_manifest \
+  review_write_untracked_manifest_checked \
     "$review_snapshot_dir/$review_snapshot_prefix.untracked.paths" \
     "$review_snapshot_dir/$review_snapshot_prefix.untracked.manifest"
   for review_snapshot_artifact in \
@@ -892,6 +1316,48 @@ review_list_nul_paths() {
   do
     print -r -- "$review_untracked_path"
   done < "$review_paths_file"
+}
+
+review_diff_untracked_manifests() {
+  review_before_manifest=$1
+  review_after_manifest=$2
+  "$review_python3" - \
+    "$review_before_manifest" \
+    "$review_after_manifest" <<'PY'
+import os
+import sys
+
+
+def read_records(manifest_path):
+    fields = open(os.fsencode(manifest_path), "rb").read().split(b"\0")
+    if fields[-1] != b"":
+        raise ValueError(f"unterminated manifest: {manifest_path}")
+    fields.pop()
+    if len(fields) % 3:
+        raise ValueError(f"invalid manifest record: {manifest_path}")
+    return {
+        fields[index]: (fields[index + 1], fields[index + 2])
+        for index in range(0, len(fields), 3)
+    }
+
+
+before_records = read_records(sys.argv[1])
+after_records = read_records(sys.argv[2])
+absent_record = (b"absent:mode=-:uid=-:gid=-", b"-")
+for original_path in sorted(before_records.keys() | after_records.keys()):
+    before_record = before_records.get(original_path, absent_record)
+    after_record = after_records.get(original_path, absent_record)
+    if before_record == after_record:
+        continue
+    print(
+        "Untracked record changed:"
+        f" path={original_path!r}"
+        f" before={before_record[0].decode('ascii')}:"
+        f"{before_record[1].decode('ascii')}"
+        f" after={after_record[0].decode('ascii')}:"
+        f"{after_record[1].decode('ascii')}"
+    )
+PY
 }
 
 review_capture_snapshot before
@@ -933,15 +1399,21 @@ do
         tr '\0' '\n' < "$review_snapshot_dir/after.status"
         ;;
       unstaged.diff|staged.diff)
-        git diff --no-index -- \
+        git --no-optional-locks -c core.fsmonitor=false \
+          diff --no-ext-diff --no-textconv --no-index -- \
           "$review_snapshot_dir/before.$review_snapshot_artifact" \
           "$review_snapshot_dir/after.$review_snapshot_artifact" || true
         ;;
-      untracked.paths|untracked.manifest)
+      untracked.paths)
         print -r -- 'Before untracked paths:'
         review_list_nul_paths "$review_snapshot_dir/before.untracked.paths"
         print -r -- 'After untracked paths:'
         review_list_nul_paths "$review_snapshot_dir/after.untracked.paths"
+        ;;
+      untracked.manifest)
+        review_diff_untracked_manifests \
+          "$review_snapshot_dir/before.untracked.manifest" \
+          "$review_snapshot_dir/after.untracked.manifest"
         ;;
     esac
   fi
@@ -952,25 +1424,45 @@ test "$review_snapshot_mismatch" -eq 0
 Expected: the report contains the aggregate title and all five sections. The
 before/after `mktemp -d` artifacts for HEAD, NUL-delimited status, unstaged
 binary diff, staged binary diff, untracked NUL paths, and the path-level
-untracked content manifest all pass `cmp -s`. The SHA-256 artifact files are
-available as equality gates, but the raw artifacts remain available for a
-mismatch diagnostic that prints affected paths. Every snapshot variable,
-comparison, and cleanup trap is declared in this one Step; NUL data flows only
-through files and pipes, while the trap removes only its exact temporary
-directory. These temporary artifacts belong to the outer smoke harness, not to
-the inner `codex exec --sandbox read-only` skill contract.
+untracked content manifest all pass `cmp -s`. The Step resolves Python 3.8+ from
+`PATH`, requires `os.O_NOFOLLOW`, and uses that same executable for both
+manifest helpers. Each manifest record is
+`original-path NUL type-and-mode-marker NUL digest NUL`: regular files hash
+content with a manual chunk loop; symlinks hash their exact target bytes even
+when dangling; and other non-content entries use deterministic markers.
+Type markers include mode, uid, and gid so permission changes are visible;
+other-type markers also include stable device, inode, rdev, size, and timestamp
+metadata so same-mode replacements differ. Regular hashing uses `O_NOFOLLOW`,
+`fstat`, and before/after metadata checks; symlink and other records also
+validate post-read metadata. If required regular content or symlink target
+bytes cannot be read, the snapshot fails with a byte-safe path representation,
+type, operation, and errno; it never emits a digest-less stable content record.
+An enumerated missing path or any detected race also fails snapshot capture
+instead of emitting a misleading stable record.
+The SHA-256 artifact files are available as equality gates, but the raw
+artifacts remain available for a mismatch diagnostic. Path-set changes print
+the before/after path lists; manifest changes compare path-level records and
+print only affected paths, including content-only or mode-only changes. Every
+snapshot variable, comparison, and cleanup trap is declared in this one Step;
+NUL data flows only through files and pipes, while the trap removes only its
+exact temporary directory. The harness disables configured fsmonitor,
+external-diff, and textconv helpers for every status/diff capture and mismatch
+diagnostic without changing repository config. These temporary artifacts
+belong to the outer smoke harness, not to the inner
+`codex exec --sandbox read-only` skill contract.
 
 - [ ] **Step 4: Confirm the final branch state**
 
 Run:
 
 ```bash
-git status --short
+git --no-optional-locks -c core.fsmonitor=false status --short
 git log -6 --oneline
 ```
 
-Expected: `git status --short` is empty, and the three implementation commits
-from Tasks 1–3 appear above the design-and-plan correction commit.
+Expected: `git --no-optional-locks -c core.fsmonitor=false status --short` is
+empty, and the three implementation commits from Tasks 1–3 appear above the
+design-and-plan correction commit.
 
 ---
 

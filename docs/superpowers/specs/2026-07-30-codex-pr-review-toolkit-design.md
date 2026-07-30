@@ -127,16 +127,26 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
 
 1. 사용자 요청에서 `comments`, `tests`, `errors`, `types`, `code`, `simplify`,
    `all`, `parallel`을 해석한다. 기본값은 `all`이다.
-2. `git status`, `git diff`, 필요하면 `gh pr view`로 리뷰 범위를 결정한다.
+2. `git --no-optional-locks -c core.fsmonitor=false status`,
+   `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff
+   --no-textconv`, 필요하면 `gh pr view`로 리뷰 범위를 결정한다. status와 diff
+   조회가 optional index refresh, configured fsmonitor process/hook, external
+   diff, textconv를 실행하지 않도록 exact fingerprint와 path manifest에도 같은
+   command-local 옵션을 사용한다.
 3. 변경 내용에 따라 적용 가능한 리뷰를 고른다.
    - `code-reviewer`는 항상 적용한다.
    - 테스트 변경에는 `pr-test-analyzer`를 적용한다.
    - 주석이나 문서 변경에는 `comment-analyzer`를 적용한다.
    - 오류 처리 변경에는 `silent-failure-hunter`를 적용한다.
    - 타입 변경에는 `type-design-analyzer`를 적용한다.
-4. analysis-only reviewer 실행 직전에 read-only Git 명령으로 raw `HEAD`와
-   status, unstaged/staged binary diff, untracked path/content stream의 exact
-   SHA-256 fingerprint를 출력한다. complete diff stdout은 review context에
+4. analysis phase에 들어가기 직전에 read-only Git 명령으로 raw `HEAD`와
+   `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z`,
+   unstaged/staged binary diff, untracked path/content stream의 exact SHA-256
+   fingerprint를 출력한다. 모든 inner diff fingerprint와 raw path enumeration은
+   `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff
+   --no-textconv`를 공통 prefix로 사용하고 staged 명령에만 `--cached`를 추가한다.
+   따라서 configured fsmonitor, `diff.external`, textconv를 호출하지 않고
+   optional index refresh write도 막는다. complete diff stdout은 review context에
    보존하지 않는다. 대신 unstaged/staged/untracked 변경을 NUL-safe Git path
    enumeration으로 읽어 status와 safely escaped path를 기록한다. 모든
    unstaged/staged tracked record에는 raw diff의 old/new Git mode를 포함한다.
@@ -144,24 +154,35 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
    regular file content SHA-256, newline을 추가하지 않은 exact symlink target
    digest, checked-out gitlink worktree OID 중 해당 값을 사용하고, gitlink가
    없거나 읽을 수 없으면 absent/unavailable marker를 남긴다. 나머지 상태에는
-   deletion/other file-type marker를 사용한다. 이 필드만 담은 bounded path-level
-   manifest는 Git이 보고한 path마다 metadata record 하나로 제한하고 diff hunk나
-   파일 본문을 포함하지 않는다. fingerprint와 manifest의 before 결과를 review
-   context에 label과 함께 보존한다. NUL stream은 변수나 파일에 저장하지 않고
-   pipeline에서 바로 처리하며 filesystem object를 만들거나 수정하지 않는다.
-5. `parallel` 요청이 있으면 독립적인 analysis-only reviewer만 하위 에이전트로 동시
+   deletion/other file-type marker를 사용한다. untracked fingerprint의 각
+   original path에는 type/mode metadata와 정확히 하나의 대안을 넣는다. regular는
+   content SHA-256, symlink는 newline을 추가하지 않은 exact target bytes SHA-256,
+   그 밖의 type은 deterministic other-type marker를 사용한다. 이 필드만 담은
+   bounded path-level manifest는 Git이 보고한 path마다 metadata record 하나로
+   제한하고 diff hunk나 파일 본문을 포함하지 않는다. fingerprint와 manifest의
+   before 결과를 review context에 label과 함께 보존한다. NUL stream은 변수나
+   파일에 저장하지 않고 pipeline에서 바로 처리하며 filesystem object를 만들거나
+   수정하지 않는다. 이 경계를 위해 repository config나 untracked-cache setting은
+   변경하지 않는다.
+5. analysis phase는 `simplify`-only 요청처럼 analysis-only reviewer가 0명일 수
+   있다. 이 경우에도 before baseline은 항상 실행하며 reviewer dispatch와
+   reviewer-report aggregation만 건너뛴다. `parallel` 요청이 있고 reviewer가
+   하나 이상이면 독립적인 analysis-only reviewer만 하위 에이전트로 동시
    실행하고, 그렇지 않으면 순차 실행한다.
-6. analysis-only reviewer 결과를 `Critical`, `Important`, `Suggestions`,
-   `Strengths`로 중복 제거해 합친다. 모든 지적에는 가능한 경우 파일과 줄 번호를
-   포함한다.
-7. aggregate가 끝나면 같은 command set의 after fingerprint와 bounded manifest를
-   review context에 보존한다. HEAD와 fingerprint를 먼저 비교하고, 불일치면
-   before/after path-level manifest를 대조하여 변경 경로와 변경 종류를 보고한다.
-   변경을 되돌리지 않고 mutation을 시작하지 않는다.
+6. analysis-only reviewer가 하나 이상일 때만 결과를 `Critical`, `Important`,
+   `Suggestions`, `Strengths`로 중복 제거해 합친다. 모든 지적에는 가능한 경우
+   파일과 줄 번호를 포함한다. reviewer가 0명이면 aggregate를 만들지 않는다.
+7. analysis phase가 끝나면 reviewer 수와 관계없이 같은 command set의 after
+   fingerprint와 bounded manifest를 review context에 보존하고 before/after
+   비교를 반드시 수행한다. reviewer가 있었다면 aggregate 뒤에 수행한다. HEAD와
+   fingerprint를 먼저 비교하고, 불일치면 before/after path-level manifest를
+   대조하여 변경 경로와 변경 종류를 보고한다. 변경을 되돌리지 않고 mutation을
+   시작하지 않는다.
 8. `code-simplifier`는 `simplify`가 명시됐고 사용자가 코드 수정을 요청한 경우에만,
-   성공한 baseline 비교 뒤 별도 순차 mutation 단계에서 실행한다. 기본 `all`과 일반
-   리뷰는 `code-simplifier`를 제외하고 읽기 전용으로 동작하며, simplifier는 어떤
-   reviewer와도 병렬 실행하지 않는다.
+   before와 after baseline capture가 모두 끝나고 비교가 성공한 뒤에만 별도 순차
+   mutation 단계에서 실행한다. analysis-only reviewer가 0명이어도 이 순서를
+   생략하지 않는다. 기본 `all`과 일반 리뷰는 `code-simplifier`를 제외하고 읽기
+   전용으로 동작하며, simplifier는 어떤 reviewer와도 병렬 실행하지 않는다.
 
 전문 리뷰어는 동일한 diff 범위와 프로젝트 지침을 전달받는다.
 
@@ -170,7 +191,8 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
 - 서로 독립적인 analysis-only 전문 리뷰는 Codex 하위 에이전트로 병렬 실행할 수 있다.
 - 사용할 수 있는 동시 실행 슬롯보다 리뷰어가 많으면 나머지는 다음 배치로 실행한다.
 - `code-simplifier`는 parallel 요청에서도 dispatch 대상이 아니며, analysis-only
-  reviewers의 완료·집계·baseline 보존 확인 뒤에만 단독 순차 mutation 단계로 실행한다.
+  reviewer가 0명이어도 before capture, after capture, 성공한 비교를 모두 마친
+  뒤에만 단독 순차 mutation 단계로 실행한다.
 - 한 리뷰어가 실패해도 완료된 결과는 보존하고, 실패한 리뷰 종류와 원인을 최종
   요약에 표시한다.
 - Claude 원본 링크가 없거나 깨졌으면 임의의 내장 프롬프트로 대체하지 않는다.
@@ -197,7 +219,28 @@ Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 
 Task 5의 outer smoke harness는 inner Codex 밖에서 Git invariance를 독립 검증하므로
 전용 temporary directory를 사용할 수 있다. 이는
 `codex exec --sandbox read-only` 내부 orchestrator의 baseline 계약이 아니며,
-inner skill은 review-context command output만 사용한다.
+inner skill은 review-context command output만 사용한다. Outer harness의 status
+capture도 `git --no-optional-locks -c core.fsmonitor=false status
+--porcelain=v1 -z`를 사용하고, 모든 diff capture와 mismatch diagnostic은
+`--no-optional-locks -c core.fsmonitor=false`, `--no-ext-diff`, `--no-textconv`를
+사용해 optional index refresh write와 configured Git helper 실행을 막는다.
+Repository config와 untracked-cache setting은 바꾸지 않는다. Outer harness의
+untracked manifest는 `original-path NUL type-and-mode-marker NUL digest NUL`
+레코드로 구성한다. 동일 Step에서 `PATH`의 Python 3.8+를 확인하고 두 manifest
+helper가 같은 실행 파일을 사용한다. regular file은 `O_NOFOLLOW` open, initial
+`lstat`, fd `fstat`, manual chunk hash, post-hash `fstat`와 final `lstat` metadata
+비교를 거친다.
+Symlink도 target read 뒤 identity/type/mode metadata를 재검증하고, referent가 아니라
+newline을 추가하지 않은 exact target bytes를 해시하므로 dangling symlink도
+실패하지 않는다. type marker에는 mode/uid/gid를 넣고 other type도 세분화하며
+device/inode/rdev/size/timestamps를 추가해 같은 mode의 other object 교체도 구분한다.
+Regular content 또는 symlink target의 필수 bytes를 읽는 `open`, `read`, `readlink`
+등이 실패하면 digest 없는 stable record를 만들지 않는다. 대신 arbitrary path를
+decode하지 않은 bytes `repr`와 type, operation, errno를 포함해 snapshot을 실패시킨다.
+열거된 path가 `lstat` 시점에 사라졌거나 경로 교체나 hash 도중 metadata 변경을
+감지하면 snapshot을 명시적으로 실패시킨다.
+Manifest mismatch는 before/after record를 path별로 대조하여 path 집합이 그대로인
+content-only 또는 mode-only 변경도 실제로 달라진 path만 진단한다.
 
 배포 미리보기와 적용 명령에는 심링크 하나와 스킬 디렉터리 7개의 절대 경로를
 리터럴로 모두 적는다. 타깃이 비어 있는 `chezmoi diff`나 `chezmoi apply`는 절대
@@ -215,15 +258,33 @@ inner skill은 review-context command output만 사용한다.
 - 종합 리뷰가 기본 `all`, 선택 리뷰, `parallel` 요청을 구분한다.
 - 종합 리뷰가 최소 두 전문 리뷰어 결과를 하나의 우선순위 보고서로 합친다.
 - 복구 메시지와 임의 프롬프트 대체 금지 규칙을 정적으로 검증한다.
-- analysis-only 리뷰 전후의 raw `HEAD`와 status, unstaged/staged binary diff,
-  untracked path/content stream의 exact fingerprint를 review context에 보존한다.
+- analysis-only reviewer가 0명인 `simplify`-only 요청을 허용하되, reviewer
+  dispatch와 aggregate만 생략하고 before capture, after capture, 성공한 비교는
+  항상 수행한 뒤 simplifier mutation을 시작한다.
+- analysis phase 전후의 raw `HEAD`와
+  `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z`,
+  unstaged/staged binary diff, untracked path/content stream의 exact fingerprint를
+  review context에 보존한다. 모든 diff fingerprint와 raw path enumeration은
+  `--no-optional-locks -c core.fsmonitor=false`, `--no-ext-diff`,
+  `--no-textconv`를 사용한다. 정적 gate와 helper-configured fixture로 status/diff
+  command가 configured fsmonitor, external diff, textconv를 실행하지 않으며
+  normal/cached binary와 raw fingerprint가 반복 실행 간 동일한지 확인한다.
   complete diff stdout은 보존하지 않고, safely escaped status/path와 staged object
   ID, raw old/new Git mode, regular content SHA-256, exact symlink target digest,
   gitlink worktree OID 또는 absent/unavailable/deletion/other type marker만 가진
-  bounded path-level manifest를 함께 보존한다. fingerprint가 다르면 before/after
-  manifest로 변경 경로와 종류를 보고한다. NUL 데이터는 변수나 파일에 저장하지
-  않고 pipeline에서 처리하며, inner baseline workflow는 filesystem write를
-  수행하지 않는다.
+  bounded path-level manifest를 함께 보존한다. untracked fingerprint는 original
+  path와 type/mode metadata 뒤에 regular content hash, exact symlink-target hash,
+  deterministic other-type marker 중 정확히 하나를 사용한다. fingerprint가
+  다르면 before/after manifest로 변경 경로와 종류를 보고한다. NUL 데이터는
+  변수나 파일에 저장하지 않고 pipeline에서 처리하며, inner baseline workflow는
+  filesystem write를 수행하지 않는다. 이 경계는 command-local option으로
+  적용하며 repository config나 untracked-cache setting을 변경하지 않는다. Outer
+  smoke harness도 같은 Git helper 억제 옵션을 사용하고, `PATH`에서 검증한
+  Python을 일관되게 사용하며, regular content와 exact symlink target bytes를
+  race-aware 방식으로 구분해 해시하고 dangling symlink를 처리한다. Permission
+  metadata가 포함된 manifest record 비교로 content-only 또는 mode-only 변경의
+  정확한 path를 출력한다. 필수 content/target bytes를 읽을 수 없으면 bytes path
+  `repr`, type, operation, errno를 보고하고 snapshot을 실패시킨다.
 - `simplify`를 명시하고 수정 권한을 준 실행에서만 `code-simplifier`가 변경할 수
   있으며, 이 mutation은 성공한 baseline 비교 뒤에만 순차 실행한다.
 

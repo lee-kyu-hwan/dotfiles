@@ -31,41 +31,52 @@ Before reviewing:
 ## Scope
 
 1. Honor an explicit PR number, commit range, file list, or diff scope from the user.
-2. Without an explicit scope, inspect `git status` and `git diff`.
+2. Without an explicit scope, inspect
+   `git --no-optional-locks -c core.fsmonitor=false status` and
+   `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv`.
 3. Try `gh pr view` when PR context would help. If no PR exists or the command fails, continue with the local Git scope and report that fallback briefly.
 4. Read `AGENTS.md` when present. Otherwise read `CLAUDE.md` or another repository instruction file that actually exists.
-5. Immediately before analysis-only reviewer execution, run a read-only
-   baseline and retain these concise outputs in the review context under
-   distinct `before` labels:
+5. Immediately before entering the analysis phase, run a read-only baseline
+   and retain these concise outputs in the review context under distinct
+   `before` labels:
    - raw HEAD: `git rev-parse HEAD`;
    - NUL-safe exact status fingerprint:
-     `git status --porcelain=v1 -z | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false status --porcelain=v1 -z | shasum -a 256`;
    - exact unstaged diff fingerprint:
-     `git diff --binary | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --binary | shasum -a 256`;
    - exact staged diff fingerprint:
-     `git diff --cached --binary | shasum -a 256`;
+     `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --binary | shasum -a 256`;
    - an exact untracked fingerprint made by streaming every original path,
-     file-type marker, and worktree content SHA-256 (or symlink target digest)
-     with NUL separators directly into `shasum -a 256`; and
+     type/mode metadata, and exactly one alternative: a regular content hash
+     (SHA-256), an exact symlink-target hash (SHA-256 of target bytes without
+     an added newline), or a deterministic other-type marker. Separate fields
+     with NUL bytes and stream them directly into `shasum -a 256`; and
    - bounded path-level manifests for unstaged, staged, and untracked changes.
-     Enumerate paths with NUL-safe Git commands such as `git diff --raw -z`,
-     `git diff --cached --raw -z`, and
-     `git ls-files --others --exclude-standard -z`. Parse rename/copy records
-     completely. Use neutral variables such as `review_changed_path`, never
-     zsh's reserved `path`. Safely escape every path and status with
-     `printf '%q'`. For every unstaged and staged tracked record, include the
-     raw diff's old and new Git modes. A staged record also includes its staged
-     object ID. An unstaged worktree state signature includes regular file
-     content SHA-256, the exact symlink target digest without an added newline,
-     or the checked-out gitlink worktree OID. If a gitlink is absent or cannot
-     be read, use an explicit absent or unavailable marker. Use an explicit
-     deletion or other file-type marker for every remaining state.
+     Enumerate paths with NUL-safe Git commands such as
+     `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z`,
+     `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z`,
+     and `git -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
+     Parse rename/copy records completely. Use neutral variables such as
+     `review_changed_path`, never zsh's reserved `path`. Safely escape every
+     path and status with `printf '%q'`. For every unstaged and staged tracked
+     record, include the raw diff's old and new Git modes. A staged record also
+     includes its staged object ID. An unstaged worktree state signature
+     includes regular file content SHA-256, the exact symlink target digest
+     without an added newline, or the checked-out gitlink worktree OID. If a
+     gitlink is absent or cannot be read, use an explicit absent or unavailable
+     marker. Use an explicit deletion or other file-type marker for every
+     remaining state.
    Each manifest is bounded to one metadata record per Git-reported path.
    Records contain only status, escaped path, type, and digest metadata; never
    include diff hunks or file contents. Complete status, diff, and untracked
    streams go directly to their fingerprint pipelines and are not retained in
    the review context. Do not store NUL streams in variables or files, and do
    not create or modify any filesystem object for baseline capture.
+   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status and every
+   diff command, and keep `--no-ext-diff --no-textconv` on every diff command.
+   These command-local controls prevent configured fsmonitor processes/hooks,
+   external diff commands, textconv commands, and optional index refresh
+   writes. Do not change repository config or untracked-cache settings.
 
 ## Aspect selection
 
@@ -105,12 +116,20 @@ Otherwise run reviewers sequentially. If sub-agent execution is unavailable,
 run the same roles sequentially and disclose the fallback. Never dispatch
 `code-simplifier` in parallel with any reviewer.
 
+The analysis phase may contain zero reviewers, including an explicitly
+authorized `simplify`-only request. The before baseline still always runs
+before entering this phase. When the phase is empty, skip reviewer dispatch and
+reviewer-report aggregation. The after baseline still always runs immediately
+after the empty phase, and its comparison must pass before the separate
+simplifier mutation phase.
+
 If one reviewer fails, preserve completed reports and identify the failed role
 and reason in the final summary.
 
 ## Aggregation
 
-Deduplicate overlapping findings and produce:
+When the analysis phase contains one or more reviewers, deduplicate overlapping
+findings and produce:
 
 ```markdown
 # PR Review Summary
@@ -132,21 +151,23 @@ Deduplicate overlapping findings and produce:
 ```
 
 Omit empty finding bullets, state `None` under empty severity sections, and do
-not invent positive observations.
+not invent positive observations. Do not produce this aggregate when the
+analysis phase is empty.
 
-After all analysis-only reviewers complete, aggregate their reports and run the
-same read-only command set again under distinct `after` labels. Compare HEAD
-and every exact fingerprint first. If any value differs, compare the retained
-before/after path-level manifests to report every affected path and whether
-HEAD, status, unstaged content, staged object, or untracked path/content
-changed. Do not revert user work or run `code-simplifier` after a failed
-baseline comparison. Keep both fingerprint and manifest output sets in the
-review context through the final report. This entire baseline workflow must
-perform no filesystem writes.
+After the analysis phase completes—and after aggregation when it contained
+reviewers—run the same read-only command set again under distinct `after`
+labels. Compare HEAD and every exact fingerprint first. If any value differs,
+compare the retained before/after path-level manifests to report every affected
+path and whether HEAD, status, unstaged content, staged object, or untracked
+path/content changed. Do not revert user work or run `code-simplifier` after a
+failed baseline comparison. Keep both fingerprint and manifest output sets in
+the review context through the final report. This entire baseline workflow
+must perform no filesystem writes.
 
 When `code-simplifier` is selected with explicit modification authority, run
-it only after the analysis-only reports have been aggregated and the baseline
-comparison has passed. Read its entire upstream `agents/code-simplifier.md`,
-pass it the same Git scope and project instructions, and preserve its upstream
-role, criteria, scoring, and output format. This is a separate sequential
-mutation phase; it may modify files and must never be parallel-dispatched.
+it only after both baseline captures have run and their comparison has passed,
+whether the analysis phase had reviewers or not. Read its entire upstream
+`agents/code-simplifier.md`, pass it the same Git scope and project
+instructions, and preserve its upstream role, criteria, scoring, and output
+format. This is a separate sequential mutation phase; it may modify files and
+must never be parallel-dispatched.
