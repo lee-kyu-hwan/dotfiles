@@ -8,6 +8,12 @@ setup.sh
 .aws/sso/cache
 .aws/cli/cache
 
+# Codex가 런타임에 계속 다시 쓰는 파일. 값이 같아도 표현을 자기 포맷으로
+# 정규화하고(`20` → `20.0`, 여러 줄 배열 → 한 줄), trust_level·hooks.state·
+# marketplaces 타임스탬프를 자동으로 덧붙인다. 관리하면 영구 drift가 되므로
+# 제외한다. 사람이 정한 설정만 docs/codex-config-reference.toml에 기록해 둔다.
+.codex/config.toml
+
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
 .Brewfile

@@ -1,6 +1,6 @@
 ---
 name: github-work-log
-description: Use when writing a Korean work log, daily report, weekly summary, or date-range summary from GitHub activity using only a date argument and GitHub API data.
+description: Use when writing a Korean work log, report, or weekly summary for an explicit date or date range (YYYYMMDD, 오늘, 어제, 이번 주) from GitHub activity collected via API. For today's quick log saved to document/daily, use daily-work-log instead.
 argument-hint: "YYYYMMDD 또는 YYYYMMDD-YYYYMMDD"
 user-invocable: true
 allowed-tools: Bash
@@ -25,16 +25,22 @@ GitHub API 데이터를 유일한 활동 근거로 사용해 한글 업무 로�
 
 - `YYYYMMDD`: 하루 활동 (예: `20260626`)
 - `YYYYMMDD-YYYYMMDD`: 기간 활동 (예: `20260626-20260628`)
-- `오늘`, `어제`, `이번 주`: `Asia/Seoul` 기준 절대 날짜로 변환한 뒤 실행
+- `어제`, `이번 주`, 또는 GitHub 활동/API 기반 요약을 명시한 `오늘`: `Asia/Seoul` 기준 절대 날짜로
+  변환한 뒤 실행
+
+**daily-work-log와의 경계**: "오늘 업무 보고 작성해줘"처럼 GitHub 활동 언급 없이 당일 작업만
+요청하면 `daily-work-log`가 우선한다. 이 스킬은 과거 날짜·기간이 명시되었거나, 사용자가 GitHub
+댓글/리뷰/PR 활동 기반 요약임을 밝혔을 때 사용한다.
 
 기본값:
 
 - GitHub 사용자: `gh api user --jq .login` 결과
-- 저장소: `zambaguni/zambaguni-front`
+- 저장소: `zambaguni/zambaguni-front`, `zambaguni/zambaguni-mobile`
 - 시간대: `Asia/Seoul`
 
-다른 저장소를 사용하라고 사용자가 명시한 경우에만 `GITHUB_WORK_LOG_REPO=owner/repo` 환경
-변수를 사용한다.
+다른 저장소 집합을 사용하라고 사용자가 명시한 경우에만
+`GITHUB_WORK_LOG_REPOS=owner/repo,owner/repo` 환경 변수를 사용한다. 레거시 단일 저장소
+override인 `GITHUB_WORK_LOG_REPO=owner/repo`도 계속 지원된다.
 
 ---
 
@@ -61,11 +67,12 @@ GitHub API 데이터를 유일한 활동 근거로 사용해 한글 업무 로�
 스크립트 출력에는 다음 항목이 포함된다.
 
 - GraphQL `contributionsCollection` 기반 기여 요약
-- 생성한 PR
-- 머지된 PR
-- 리뷰한 PR
+- 생성한 PR / 머지된 PR / 리뷰한 PR
 - 생성한 이슈
-- 댓글로 참여한 이슈/PR 대화
+- 댓글로 참여한 이슈/PR 대화 (`searches.commented_conversations`)
+- 사용자가 작성한 이슈/PR 댓글 원문 (`searches.issue_comments`)
+- 사용자가 작성한 PR 인라인 리뷰 댓글 (`searches.pull_request_review_comments`)
+- 사용자가 제출한 PR 리뷰 기록 — 리뷰 상태·본문 포함 (`searches.pull_request_reviews`)
 - 커밋 검색 결과
 
 ---
@@ -85,6 +92,19 @@ GitHub API 데이터를 유일한 활동 근거로 사용해 한글 업무 로�
 - `fix: marker padding`
 - `PR #123 처리`
 - `리뷰 요청`
+
+---
+
+## 댓글·리뷰 근거
+
+토론/리뷰 업무를 요약할 때는 REST로 수집한 정확한 댓글·리뷰 데이터를 우선 사용한다:
+
+- `searches.issue_comments`: 기간 내 사용자가 작성한 이슈/PR 대화 댓글
+- `searches.pull_request_review_comments`: 기간 내 사용자가 작성한 PR 인라인 리뷰 댓글
+- `searches.pull_request_reviews`: `submitted_at` 기준으로 필터된 제출 리뷰 기록 (리뷰 상태·본문 포함)
+
+`searches.commented_conversations`는 대화 맥락의 보조 신호로만 쓴다. 목록의 모든 대화에
+기간 내 새 댓글이 달렸다는 증거로 쓰지 않는다.
 
 ---
 
@@ -136,5 +156,7 @@ GitHub API 데이터를 유일한 활동 근거로 사용해 한글 업무 로�
 
 ## 한계
 
-GitHub Search API의 댓글 검색은 개별 댓글 본문이 아니라 대화 단위 결과일 수 있다. 따라서 수집
-JSON은 업무 요약의 근거로만 사용하고 최종 문장은 업무 관점으로 재구성한다.
+GitHub Search는 날짜 범위에 맞는 PR·이슈·리뷰·댓글·커밋을 찾을 수 있지만, 일부 검색 결과는
+개별 활동이 아니라 대화 단위일 수 있다. 수집 JSON은 업무 요약의 근거로만 사용하고 최종 문장은
+업무 관점으로 재구성한다. "사용자가 무엇을 썼는가"는 검색 대화 매칭보다 정확한 댓글·리뷰
+필드(`issue_comments`, `pull_request_review_comments`, `pull_request_reviews`)가 더 신뢰할 수 있다.

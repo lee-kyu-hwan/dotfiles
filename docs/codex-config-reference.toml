@@ -1,0 +1,125 @@
+# ~/.codex/config.toml 참조 스냅샷 (적용되지 않음)
+#
+# 이 파일은 chezmoi가 배포하지 않는다. `.chezmoiignore`의 `docs/**`에 걸려 있고,
+# 실제 `~/.codex/config.toml`도 `.chezmoiignore`에서 제외했다.
+#
+# 왜 관리하지 않는가:
+#   Codex가 런타임에 이 파일을 계속 다시 쓴다. 값이 같아도 표현을 자기 포맷으로
+#   정규화하므로(`20` → `20.0`, 여러 줄 배열 → 한 줄) 소스에 어떤 형태로 넣어도
+#   Codex가 한 번 실행되면 즉시 chezmoi diff가 생긴다. 관리하면 영구 drift가 된다.
+#
+# 그래서 "사람이 정한 설정"만 여기 기록한다. 새 머신을 세팅할 때 이 값들을
+# `~/.codex/config.toml`에 다시 넣거나 Codex UI에서 설정하면 된다.
+#
+# 여기 담지 않은 것 — 새 머신에서 자동 재생성된다:
+#   [projects.*]     trust_level. 디렉토리를 신뢰할 때마다 Codex가 추가한다.
+#   [hooks.state.*]  hooks.json의 trusted_hash. 파일 내용이 바뀌면 재계산된다.
+#   [marketplaces.*] last_updated 타임스탬프 + 로컬 마켓플레이스 절대경로.
+#
+# 최종 확인: 2026-07-30
+
+notify = ["~/.local/bin/ai-agent-ghostty-notify", "Codex"]
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+service_tier = "default"
+
+[tui]
+status_line = ["model-with-reasoning", "current-dir", "model", "git-branch", "pull-request-number", "run-state", "five-hour-limit", "used-tokens", "fast-mode"]
+status_line_use_colors = true
+
+[sandbox_workspace_write]
+network_access = true
+
+[notice]
+fast_default_opt_out = true
+
+[features]
+hooks = true
+
+# ============================================================
+# MCP 서버
+# ============================================================
+
+[mcp_servers.context7]
+command = "npx"
+args = ["-y", "@upstash/context7-mcp"]
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["-y", "@playwright/mcp@latest"]
+startup_timeout_sec = 20
+tool_timeout_sec = 120
+default_tools_approval_mode = "approve"
+enabled_tools = [
+  "browser_navigate",
+  "browser_navigate_back",
+  "browser_snapshot",
+  "browser_click",
+  "browser_hover",
+  "browser_select_option",
+  "browser_type",
+  "browser_press_key",
+  "browser_fill_form",
+  "browser_take_screenshot",
+  "browser_wait_for",
+  "browser_console_messages",
+  "browser_tabs",
+  "browser_resize",
+  "browser_close",
+]
+
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+
+[mcp_servers.notion]
+url = "https://mcp.notion.com/mcp"
+
+[mcp_servers.notion.tools.notion-update-page]
+approval_mode = "approve"
+
+# ============================================================
+# 플러그인
+# ============================================================
+
+[plugins."superpowers@openai-curated"]
+enabled = true
+
+# no-more-tabs는 로컬 마켓플레이스(~/code/no-more-tabs)에서 온다.
+# 새 머신에서는 저장소를 먼저 클론하고 마켓플레이스를 등록해야 한다.
+[plugins."no-more-tabs@no-more-tabs-local"]
+enabled = true
+
+[plugins."no-more-tabs@no-more-tabs-local".mcp_servers.verify-price.tools.preflight]
+approval_mode = "approve"
+
+[plugins."no-more-tabs@no-more-tabs-local".mcp_servers.verify-price.tools.find_region_deals]
+approval_mode = "approve"
+
+[plugins."no-more-tabs@no-more-tabs-local".mcp_servers.verify-price.tools.check_recommendations]
+approval_mode = "approve"
+
+# ============================================================
+# GitHub 커넥터 승인 정책
+#
+# 쓰기 동작은 전부 승인을 받게 한다. 커넥터 ID는 계정마다 다르므로
+# 공개 저장소에 담지 않는다 — 새 머신에서 실제 ID로 바꿔야 한다.
+# 실제 값은 `grep '^\[apps\.' ~/.codex/config.toml`로 확인한다.
+# ============================================================
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.reply_to_review_comment"]
+approval_mode = "approve"
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.add_comment_to_issue"]
+approval_mode = "approve"
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.create_issue"]
+approval_mode = "approve"
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.create_pull_request"]
+approval_mode = "approve"
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.update_issue"]
+approval_mode = "approve"
+
+[apps.connector_REPLACE_WITH_ACTUAL_ID.tools."github.add_issue_labels"]
+approval_mode = "approve"

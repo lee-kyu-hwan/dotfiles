@@ -1,6 +1,6 @@
 ---
 name: github-work-log
-description: Use when writing a Korean work log, daily report, weekly summary, or date-range summary from GitHub activity using only a date argument and GitHub API data.
+description: Use when writing a Korean work log, report, or weekly summary for an explicit date or date range (YYYYMMDD, 오늘, 어제, 이번 주) from GitHub activity collected via API. For today's quick log saved to document/daily, use daily-work-log instead.
 ---
 
 # GitHub Work Log
@@ -16,8 +16,13 @@ Accept only one date argument:
 
 - `YYYYMMDD` for one day (e.g. `20260626`)
 - `YYYYMMDD-YYYYMMDD` for a range (e.g. `20260626-20260629`)
-- Korean relative dates like `오늘`, `어제`, `이번 주` only after resolving them to absolute dates
-  in `Asia/Seoul` and converting to `YYYYMMDD` or `YYYYMMDD-YYYYMMDD` format
+- Korean relative dates like `어제`, `이번 주`, or `오늘` when the request explicitly mentions
+  GitHub activity/API — resolve to absolute dates in `Asia/Seoul` and convert to `YYYYMMDD` or
+  `YYYYMMDD-YYYYMMDD` format
+
+**Boundary with daily-work-log**: a bare "오늘 업무 보고 작성해줘" with no GitHub activity mention
+defers to `daily-work-log`. Use this skill when a past date/range is given, or the user explicitly
+asks for a GitHub comment/review/PR-activity-based summary.
 
 Do not ask for repository, login, branch, or local git details unless the API collection fails.
 
