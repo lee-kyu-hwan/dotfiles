@@ -12,8 +12,12 @@ workmux로 worktree와 tmux 윈도우를 함께 제거한다.
 
 ## 파라미터
 
-- **args** (선택): worktree 이름 (디렉토리명, tmux 윈도우 이름에서 `wm-` prefix를 뗀 것)
+- **args** (선택): worktree 이름 = `workmux list`의 `PATH` 열 basename (= 디렉토리명).
+  **tmux 윈도우 이름에서 유추하지 않는다.** `workmux remove`와 `close`는 디렉토리명만
+  받는데, 윈도우 이름은 `--target-name`이나 브랜치명 슬러그에서 나와 디렉토리명과 다르다
+  (윈도우 `worktree-issue-window-name` ↔ 디렉토리 `fix-worktree-issue-window-name`).
 - args가 비어있으면 `workmux list`로 목록을 보여주고 사용자에게 선택을 요청한다.
+  제거할 worktree 안에서 실행할 때는 인자를 생략하면 현재 디렉토리가 대상이 된다.
 
 ## 실행 순서
 
