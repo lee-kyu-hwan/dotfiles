@@ -1,74 +1,140 @@
 #!/usr/bin/env bash
-# 메모리 요약. 인자 없으면 tmux status-right용 한 줄, --detail 이면 popup용 상세.
+# 시스템/에이전트 리소스 요약.
 #
-#   G:147M  C:3.3G×7  sw:3.6G
+#   (인자 없음)  status-right 용 짧은 한 줄
+#   --wide       status-format[1] 용 전체 폭 한 줄
+#   --detail     popup 용 상세 (prefix + Option+m)
 #
-# 왜 이 세 개인가:
-#   - Ghostty: ghostty#10258 reflow 누수의 카나리아. 74GB 사고의 당사자다.
-#     한 세션에 폭이 다른 클라이언트가 붙으면(window-size latest) 포커스가
-#     옮겨갈 때마다 스크롤백 reflow가 일어나고, 그 경로가 메모리를 해제하지
-#     않는다. 평소 150~250MB 대역을 벗어나면 신호다.
-#   - claude: 실측 인스턴스당 약 490MB로 단일 최대 소비자다. worktree 윈도우
-#     마다 띄우면 순식간에 GB 단위가 된다. 개수를 함께 보여 "안 쓰는
-#     worktree의 에이전트를 끌 시점"을 판단할 수 있게 한다.
-#   - 스왑: 실제 압박 신호. "여유율"은 쓰지 않는다 — memory_pressure는
-#     압축 메모리를 분모에서 제외해 실제보다 낙관적으로 나오고(54% vs 35%),
-#     vm_stat 기반 계산도 inactive를 여유로 볼지에 따라 크게 흔들린다.
-#     스왑 사용량은 정의가 하나뿐이고 체감 저하와 직결된다.
+# ============================================================
+# 지표 선택 근거
+# ============================================================
+# tmux 생태계의 고전 플러그인들(tmux-mem-cpu-load, tmux-cpu-mem-monitor)이
+# 공통으로 쓰는 조합은 "메모리 used/total + CPU + load average 3개"다. 그 관례를
+# 따르되 두 가지를 바꿨다.
 #
-# status-interval(5초)마다 실행되므로 빨라야 한다. ps 한 번 + sysctl 한 번만
-# 쓴다. memory_pressure(23ms)와 vm_stat은 위 이유로 쓰지 않는다.
+# 1. 즉시성 CPU% 대신 load average를 쓴다.
+#    macOS에서 즉시 CPU%를 얻으려면 top -l 1 이 필요한데 실측 675ms다.
+#    status-interval 5초마다 이걸 돌리는 건 과하다. sysctl -n vm.loadavg 는
+#    37ms이고, 고전 플러그인들도 load average를 함께 보여준다. 코어 수로
+#    나눈 포화도가 CPU%보다 오히려 해석하기 쉽다.
+#
+# 2. Ghostty RSS의 시간 변화량(Δ)을 추가했다. 어떤 플러그인도 안 하지만
+#    이 환경에서는 가장 중요한 값이다. ghostty#10258 reflow 누수를 겪어
+#    74GB까지 간 적이 있고, 절대값 "153M"만 보면 누수 중인지 알 수 없다.
+#    "153M ▲+2M/10m" 이어야 판단이 된다.
+#
+# 에이전트별 내역(claude/codex/MCP/nvim)은 이 환경 고유의 필요다. worktree
+# 윈도우마다 에이전트를 띄우면 claude 인스턴스당 약 490MB가 쌓인다. AI 에이전트
+# 모니터링 도구들(marmonitor, tmux-agent-sidebar, Termdock)도 같은 문제를 다루지만
+# 세션 상태·토큰·비용 중심이고 메모리는 부차적이라, 메모리는 직접 계산한다.
+#
+# ============================================================
+# 성능
+# ============================================================
+# status-interval(5초)마다 실행된다. ps 한 번 + sysctl 두 번 + vm_stat 한 번 +
+# 히스토리 파일 I/O. 실측 --wide 약 90ms. top(675ms)과
+# memory_pressure(23ms, 게다가 아래 이유로 부정확)는 쓰지 않는다.
 set -uo pipefail
 
-GHOSTTY_WARN_MB=1000   # 평소 150~250MB. 1GB를 넘으면 reflow 누수 의심
-SWAP_WARN_MB=4096      # 이 위로는 체감 저하가 시작된다
+GHOSTTY_WARN_MB=1000     # 평소 150~250MB. 1GB를 넘으면 reflow 누수 의심
+GHOSTTY_DELTA_WARN_MB=50 # 10분에 이만큼 늘면 누수 진행 중으로 본다
+SWAP_WARN_MB=4096
 SWAP_CAUTION_MB=2048
+MEM_WARN_PCT=85
+MEM_CAUTION_PCT=70
 
-# --- ps 한 번으로 집계 ---
-# comm 은 실행 파일 경로 전체가 나올 수 있다. Ghostty는 실제로
-# /Applications/Ghostty.app/Contents/MacOS/ghostty 로 나오므로 basename 으로
-# 비교해야 한다. $2=="ghostty" 로 비교하면 0이 나온다.
-#
-# comm 에는 공백이 든 경로도 온다(91개 프로세스: "Google Chrome.app/...",
-# "Software Update.app/..."). $2 만 보면 "Google" 로 잘리므로 첫 필드 이후
-# 전체를 경로로 취한다.
-collect() {
+HIST_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-mem-status"
+HIST_FILE="$HIST_DIR/ghostty.log"
+HIST_WINDOW=600          # Δ 계산 구간 (초). 10분.
+
+PAGE=16384               # macOS arm64 페이지 크기
+
+# ============================================================
+# 수집
+# ============================================================
+
+# ps 의 comm 은 실행 파일 경로 전체다. Ghostty는
+# /Applications/Ghostty.app/Contents/MacOS/ghostty 로 나오므로 $2=="ghostty" 로
+# 비교하면 0이 된다. 또 공백이 든 경로가 91개 있어(Google Chrome 등) $2 만
+# 보면 "Google" 로 잘린다. 첫 필드 이후 전체를 경로로 취하고 basename 을 쓴다.
+collect_procs() {
   ps -Ao rss=,comm= 2>/dev/null | awk '
     {
       rss  = $1
       path = substr($0, index($0, $2))
       n = split(path, seg, "/")
       name = seg[n]
+
       if      (name == "ghostty") g += rss
       else if (name == "claude")  { c += rss; cn++ }
       else if (name == "codex")   x += rss
       else if (name == "nvim")    v += rss
+      # MCP 서버는 이름이 제각각(mcp@latest, context7-mcp, ...)이라 경로로
+      # 식별한다. 합치면 GB 단위가 되므로 따로 보여줄 값어치가 있다.
+      if (path ~ /mcp/) m += rss
     }
-    END { printf "%d %d %d %d %d\n", g+0, c+0, cn+0, x+0, v+0 }
+    END { printf "%d %d %d %d %d %d\n", g+0, c+0, cn+0, x+0, v+0, m+0 }
   '
 }
 
 # vm_stat 에는 compressor 가 든 줄이 둘이다:
-#   "Pages stored in compressor"   = 압축 전 원본 크기 (26.9G — 이걸 쓰면 오해)
-#   "Pages occupied by compressor" = 실제 점유 물리 메모리 (7.9G — 이게 맞다)
-# 앞을 앵커로 고정하고 첫 매칭에서 빠져나온다.
-compressed() {
-  vm_stat 2>/dev/null | awk '
-    /^Pages occupied by compressor/ {
-      gsub(/\./, "", $5)
-      printf "%.1fG", $5 * 16384 / 1073741824
-      exit
-    }
+#   "Pages stored in compressor"   = 압축 전 원본 크기 (오해 유발)
+#   "Pages occupied by compressor" = 실제 점유 물리 메모리 (이게 맞다)
+# 앞을 앵커로 고정한다.
+#
+# 사용량은 active + wired + compressor 로 본다. Activity Monitor의 "사용된
+# 메모리"에 대응한다. "여유율"은 쓰지 않는다 — memory_pressure는 압축 메모리를
+# 분모에서 제외해 실제보다 낙관적으로 나온다(같은 시점 54% vs 35%).
+collect_vm() {
+  vm_stat 2>/dev/null | awk -v page="$PAGE" '
+    /^Pages active/                 { gsub(/\./,"",$3); act=$3 }
+    /^Pages wired down/             { gsub(/\./,"",$4); wired=$4 }
+    /^Pages occupied by compressor/ { gsub(/\./,"",$5); comp=$5 }
+    END { printf "%d %d\n", (act+wired+comp)*page/1024, comp*page/1024 }
   '
 }
 
-swap_used_mb() {
-  # total = 5120.00M  used = 3633.94M  free = 1486.06M  (encrypted)
+# total = 4096.00M  used = 3305.88M  free = 790.12M  (encrypted)
+collect_swap() {
   sysctl -n vm.swapusage 2>/dev/null | awk '{
-    for (i = 1; i <= NF; i++)
-      if ($i == "used") { sub(/M$/, "", $(i+2)); printf "%d\n", $(i+2); exit }
+    u = t = 0
+    for (i = 1; i <= NF; i++) {
+      if ($i == "used")  { v = $(i+2); sub(/M$/, "", v); u = v }
+      if ($i == "total") { v = $(i+2); sub(/M$/, "", v); t = v }
+    }
+    printf "%d %d\n", u, t
   }'
 }
+
+# Ghostty RSS 히스토리를 남겨 Δ를 계산한다. 이 파일이 누수 판단의 근거다.
+# 형식: "<epoch> <rss_kb>" 한 줄씩. HIST_WINDOW 밖은 버린다.
+# 출력: 구간 내 최고(最古) 샘플과의 차이(KB)와 경과 분. 히스토리가 없으면 빈 값.
+ghostty_delta() {
+  local now="$1" rss="$2"
+  local oldest_t oldest_rss
+
+  mkdir -p "$HIST_DIR" 2>/dev/null || return 0
+
+  if [ -f "$HIST_FILE" ]; then
+    read -r oldest_t oldest_rss < <(
+      awk -v now="$now" -v w="$HIST_WINDOW" '$1 >= now - w { print $1, $2; exit }' "$HIST_FILE"
+    )
+  fi
+
+  # append 후 구간 밖 잘라내기. 파일이 무한정 자라지 않게 한다.
+  printf '%s %s\n' "$now" "$rss" >> "$HIST_FILE"
+  awk -v now="$now" -v w="$HIST_WINDOW" '$1 >= now - w' "$HIST_FILE" > "$HIST_FILE.tmp" 2>/dev/null \
+    && mv "$HIST_FILE.tmp" "$HIST_FILE" 2>/dev/null
+
+  [ -z "${oldest_t:-}" ] && return 0
+  local span=$(( now - oldest_t ))
+  [ "$span" -lt 60 ] && return 0   # 1분 미만이면 노이즈다
+  printf '%d %d\n' "$(( rss - oldest_rss ))" "$(( span / 60 ))"
+}
+
+# ============================================================
+# 표시 보조
+# ============================================================
 
 human() {
   awk -v kb="$1" 'BEGIN {
@@ -77,40 +143,94 @@ human() {
   }'
 }
 
-read -r g_kb c_kb c_n x_kb v_kb < <(collect)
-sw_mb=$(swap_used_mb)
-: "${sw_mb:=0}"
+# 10칸 막대. tmux-mem-cpu-load 관례를 따른다.
+bar() {
+  awk -v pct="$1" 'BEGIN {
+    n = int(pct / 10 + 0.5); if (n > 10) n = 10; if (n < 0) n = 0
+    s = ""
+    for (i = 0; i < n; i++)  s = s "█"
+    for (i = n; i < 10; i++) s = s "░"
+    print s
+  }'
+}
+
+# 같은 세션에 폭이 다른 클라이언트가 붙어 있으면 reflow 누수 조건이 성립한다.
+# window-size latest 라서 포커스가 옮겨갈 때마다 그 세션의 모든 윈도우가 새 폭으로
+# 리사이즈되고, ghostty#10258 이 그 경로에서 메모리를 해제하지 않는다. 74GB 사고
+# 때가 정확히 이 상태였다(main 세션에 Orca 클라이언트 7개, 폭 134~319).
+# 세션이 다르면 윈도우가 독립적이라 진동하지 않으므로 경고하지 않는다.
+reflow_risk() {
+  tmux list-clients -F '#{client_session} #{client_width}' 2>/dev/null | awk '
+    { if (!(($1) in seen)) seen[$1] = $2
+      else if ($2 != seen[$1]) bad[$1] = seen[$1] "/" $2 }
+    END { for (s in bad) printf "%s %s ", s, bad[s] }
+  '
+}
 
 # ============================================================
-# --detail: popup 용 상세
+# 공통 수집 실행
+# ============================================================
+read -r g_kb c_kb c_n x_kb v_kb m_kb < <(collect_procs)
+read -r used_kb comp_kb < <(collect_vm)
+read -r sw_used_mb sw_tot_mb < <(collect_swap)
+tot_kb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 ))
+ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 1)
+read -r l1 l5 l15 < <(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{print $1, $2, $3}')
+plevel=$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null || echo 0)
+
+mem_pct=0
+[ "$tot_kb" -gt 0 ] && mem_pct=$(( used_kb * 100 / tot_kb ))
+
+# SECONDS/date 없이 epoch 획득 (date 호출 1회)
+now=$(date +%s)
+read -r g_delta_kb g_delta_min < <(ghostty_delta "$now" "$g_kb"; echo)
+
+# ============================================================
+# --detail : popup
 # ============================================================
 if [ "${1:-}" = "--detail" ]; then
-  printf '메모리 상세 — %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf '리소스 상세 — %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 
-  printf 'Ghostty      %8s   (평소 150~250M / %dM 넘으면 reflow 누수 의심)\n' \
-    "$(human "$g_kb")" "$GHOSTTY_WARN_MB"
-  printf 'claude       %8s   × %d개 (인스턴스당 평균 %s)\n' \
+  printf '메모리       %8s / %-8s %3d%%  %s\n' \
+    "$(human "$used_kb")" "$(human "$tot_kb")" "$mem_pct" "$(bar "$mem_pct")"
+  printf '  압축       %8s\n' "$(human "$comp_kb")"
+  printf '  스왑       %8s / %-8s\n' "${sw_used_mb}M" "${sw_tot_mb}M"
+  printf '  커널 압박  %8s   (1=정상 2=경고 4=위험)\n' "$plevel"
+  printf 'load        %8s %s %s   (%s코어 → 1분 포화도 %s%%)\n' \
+    "$l1" "$l5" "$l15" "$ncpu" "$(awk -v a="$l1" -v n="$ncpu" 'BEGIN{printf "%.0f", a*100/n}')"
+
+  printf '\nGhostty      %8s' "$(human "$g_kb")"
+  if [ -n "${g_delta_kb:-}" ]; then
+    printf '   최근 %s분 변화 %+dM' "$g_delta_min" "$(( g_delta_kb / 1024 ))"
+    [ "$(( g_delta_kb / 1024 ))" -ge "$GHOSTTY_DELTA_WARN_MB" ] && printf '  ← 누수 의심'
+  else
+    printf '   (Δ 측정 중 — 히스토리 축적 대기)'
+  fi
+  printf '\n             평소 150~250M. %dM 초과 또는 10분 %dM 증가면 reflow 누수 의심\n' \
+    "$GHOSTTY_WARN_MB" "$GHOSTTY_DELTA_WARN_MB"
+
+  printf '\nclaude       %8s   × %d개 (평균 %s)\n' \
     "$(human "$c_kb")" "$c_n" "$([ "$c_n" -gt 0 ] && human $((c_kb / c_n)) || echo -)"
   printf 'codex        %8s\n' "$(human "$x_kb")"
+  printf 'MCP 서버     %8s\n' "$(human "$m_kb")"
   printf 'nvim         %8s\n' "$(human "$v_kb")"
-  printf '스왑 사용     %8s   (%s)\n' "${sw_mb}M" "$(sysctl -n vm.swapusage 2>/dev/null)"
-  printf '압축 메모리   %8s\n' "$(compressed)"
-  printf '커널 압박     %8s   (1=정상 2=경고 4=위험)\n' \
-    "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
 
   printf '\n--- 프로세스 그룹 상위 10 ---\n'
   ps -Ao rss=,comm= 2>/dev/null | awk '
-    {
-      path = substr($0, index($0, $2))
-      n = split(path, seg, "/")
-      s[seg[n]] += $1
-    }
+    { path = substr($0, index($0, $2)); n = split(path, seg, "/"); s[seg[n]] += $1 }
     END { for (k in s) printf "%d\t%s\n", s[k], k }
   ' | sort -rn | head -10 | awk -F'\t' '{ printf "%9.1f MB  %s\n", $1/1024, $2 }'
 
-  printf '\n--- tmux 클라이언트 (같은 세션에 폭이 다른 클라이언트가 있으면 누수 위험) ---\n'
+  printf '\n--- tmux 클라이언트 ---\n'
   tmux list-clients -F '#{client_name}  세션=#{client_session}  #{client_width}x#{client_height}' 2>/dev/null \
     || echo '(tmux 밖)'
+  risk=$(reflow_risk)
+  if [ -n "$risk" ]; then
+    printf '⚠ 같은 세션에 폭이 다른 클라이언트: %s\n' "$risk"
+    printf '  window-size latest 라서 포커스 전환마다 reflow가 일어난다 (ghostty#10258).\n'
+  else
+    printf '✓ 세션마다 클라이언트 폭이 일정 — reflow 누수 조건 아님\n'
+  fi
 
   printf '\n아무 키나 누르면 닫힙니다.'
   read -rsn1
@@ -118,7 +238,73 @@ if [ "${1:-}" = "--detail" ]; then
 fi
 
 # ============================================================
-# 기본: status-right 한 줄
+# --wide : status-format[1] (전체 폭)
+# ============================================================
+if [ "${1:-}" = "--wide" ]; then
+  DIM='#[fg=colour240]'; FG='#[fg=colour248]'
+  RED='#[fg=colour196,bold]'; ORANGE='#[fg=colour214]'
+  out=""
+  add() { out="${out}${out:+ ${DIM}│${FG} }$1"; }
+
+  # --- 메모리 ---
+  if   [ "$mem_pct" -ge "$MEM_WARN_PCT" ];    then mc="$RED"
+  elif [ "$mem_pct" -ge "$MEM_CAUTION_PCT" ]; then mc="$ORANGE"
+  else mc=""; fi
+  add "MEM ${mc}$(human "$used_kb")/$(human "$tot_kb") ${mem_pct}%${FG} ${DIM}$(bar "$mem_pct")${FG}"
+
+  add "압축 $(human "$comp_kb")"
+
+  if   [ "$sw_used_mb" -ge "$SWAP_WARN_MB" ];    then sc="$RED"
+  elif [ "$sw_used_mb" -ge "$SWAP_CAUTION_MB" ]; then sc="$ORANGE"
+  else sc=""; fi
+  add "스왑 ${sc}$(human $((sw_used_mb * 1024)))/$(human $((sw_tot_mb * 1024)))${FG}"
+
+  case "$plevel" in
+    1) add "압박 정상" ;;
+    2) add "${ORANGE}압박 경고${FG}" ;;
+    4) add "${RED}압박 위험${FG}" ;;
+    *) add "압박 ?" ;;
+  esac
+
+  # --- load: 코어 수로 나눈 포화도가 해석하기 쉽다 ---
+  sat=$(awk -v a="$l1" -v n="$ncpu" 'BEGIN{printf "%.0f", a*100/n}')
+  if   [ "$sat" -ge 200 ]; then lc="$RED"
+  elif [ "$sat" -ge 100 ]; then lc="$ORANGE"
+  else lc=""; fi
+  # 1분 > 5분이면 상승 중
+  trend=$(awk -v a="$l1" -v b="$l5" 'BEGIN{ if (a > b*1.1) print "▲"; else if (a < b*0.9) print "▼"; else print "=" }')
+  add "LOAD ${lc}${l1}${FG} ${l5} ${l15} ${lc}${sat}%/${ncpu}코어 ${trend}${FG}"
+
+  # --- Ghostty: 절대값 + Δ (누수 카나리아) ---
+  if [ "$((g_kb / 1024))" -ge "$GHOSTTY_WARN_MB" ]; then gc="$RED"; else gc=""; fi
+  gtxt="Ghostty ${gc}$(human "$g_kb")${FG}"
+  if [ -n "${g_delta_kb:-}" ]; then
+    dmb=$(( g_delta_kb / 1024 ))
+    if [ "$dmb" -ge "$GHOSTTY_DELTA_WARN_MB" ]; then
+      gtxt="${gtxt} ${RED}▲+${dmb}M/${g_delta_min}m${FG}"
+    else
+      gtxt="${gtxt} ${DIM}$(printf '%+d' "$dmb")M/${g_delta_min}m${FG}"
+    fi
+  fi
+  add "$gtxt"
+
+  # --- 에이전트 내역 ---
+  agents=""
+  [ "$c_n" -gt 0 ]  && agents="claude $(human "$c_kb")×${c_n}"
+  [ "$x_kb" -gt 0 ] && agents="${agents}${agents:+  }codex $(human "$x_kb")"
+  [ "$m_kb" -gt 0 ] && agents="${agents}${agents:+  }MCP $(human "$m_kb")"
+  [ "$v_kb" -gt 0 ] && agents="${agents}${agents:+  }nvim $(human "$v_kb")"
+  [ -n "$agents" ] && add "$agents"
+
+  risk=$(reflow_risk)
+  [ -n "$risk" ] && add "${RED}⚠ reflow위험 ${risk}${FG}"
+
+  printf ' %s' "$out"
+  exit 0
+fi
+
+# ============================================================
+# 기본 : status-right (짧게)
 # ============================================================
 if [ "$((g_kb / 1024))" -ge "$GHOSTTY_WARN_MB" ]; then
   g_out="#[fg=colour196,bold]G:$(human "$g_kb")#[default]"
@@ -126,12 +312,12 @@ else
   g_out="G:$(human "$g_kb")"
 fi
 
-if [ "$sw_mb" -ge "$SWAP_WARN_MB" ]; then
-  sw_out="#[fg=colour196,bold]sw:$(human $((sw_mb * 1024)))#[default]"
-elif [ "$sw_mb" -ge "$SWAP_CAUTION_MB" ]; then
-  sw_out="#[fg=colour214]sw:$(human $((sw_mb * 1024)))#[default]"
+if [ "$sw_used_mb" -ge "$SWAP_WARN_MB" ]; then
+  sw_out="#[fg=colour196,bold]sw:$(human $((sw_used_mb * 1024)))#[default]"
+elif [ "$sw_used_mb" -ge "$SWAP_CAUTION_MB" ]; then
+  sw_out="#[fg=colour214]sw:$(human $((sw_used_mb * 1024)))#[default]"
 else
-  sw_out="sw:$(human $((sw_mb * 1024)))"
+  sw_out="sw:$(human $((sw_used_mb * 1024)))"
 fi
 
 if [ "$c_n" -gt 0 ]; then
