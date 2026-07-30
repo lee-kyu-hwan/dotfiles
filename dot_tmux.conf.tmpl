@@ -162,6 +162,15 @@ bind G run-shell "workmux last-done"     # 마지막으로 끝난 에이전트�
 bind Tab run-shell "workmux last-agent"  # 마지막 에이전트로 이동
 
 # ============================================================
+# 메모리 모니터링 (prefix + Option+m)
+#
+# 상태바에 요약이 상시 표시되고(status-right), 이 키로 상세를 popup으로 본다.
+# prefix M / prefix m 은 tmux 기본(select-pane -M/-m, 마크 pane)이 쓰므로
+# 건드리지 않고 M-m 을 쓴다. TPM(I/U/M-u/C-r/C-s)과도 겹치지 않는다.
+# ============================================================
+bind M-m display-popup -h 80% -w 80% -E "$HOME/.local/bin/tmux-mem-status --detail"
+
+# ============================================================
 # OSC 시퀀스 패스스루
 # ============================================================
 set -g allow-passthrough on
@@ -173,13 +182,24 @@ set -g allow-passthrough on
 # 스타일
 set -g status-style "bg=colour236,fg=colour248"
 set -g status-left-length 30
-set -g status-right-length 60
+set -g status-right-length 70
 
 # 왼쪽: 세션 이름
 set -g status-left "#[fg=colour16,bg=colour75,bold] #S #[fg=colour75,bg=colour236] "
 
-# 오른쪽: 날짜/시간
-set -g status-right "#[fg=colour248] %m/%d %H:%M "
+# 오른쪽: 메모리 요약 + 날짜/시간
+#
+#   G:143M  C:3.3G×7  sw:3.5G   07/30 10:23
+#   └ Ghostty  └ claude 합계×개수  └ 스왑 사용량
+#
+# Ghostty가 1GB를 넘거나 스왑이 4GB를 넘으면 빨강으로 바뀐다. Ghostty는
+# ghostty#10258 reflow 누수의 카나리아이고(74GB 사고), claude는 인스턴스당
+# 약 490MB로 단일 최대 소비자다. 상세는 prefix + Option+m 으로 본다.
+#
+# 주의: tmux-continuum이 런타임에 자기 저장 스크립트를 status-right 앞에
+# 덧붙인다(출력은 없다). 그래서 여기 값이 그대로 보이지 않고 앞에 #()가
+# 하나 더 붙어 있는 것이 정상이다.
+set -g status-right "#[fg=colour248]#($HOME/.local/bin/tmux-mem-status)#[fg=colour248]  %m/%d %H:%M "
 
 # 윈도우 탭: 비활성 (상태별 색상 분기)
 #   activity (출력 중)    = 초록 ● (진행 중)
