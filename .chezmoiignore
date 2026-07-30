@@ -22,3 +22,10 @@ setup.sh
 run_once_configure-keycastr.sh
 run_onchange_brew-bundle.sh
 {{ end }}
+
+{{ if eq .machine_type "server" }}
+# server: Claude Code 공식 플러그인 의존 항목 제외
+.codex/skills/pr-review-toolkit
+.codex/skills/pr-review-toolkit-*
+.codex/pr-review-toolkit-claude
+{{ end }}
