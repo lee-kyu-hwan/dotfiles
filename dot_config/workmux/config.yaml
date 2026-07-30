@@ -1,0 +1,34 @@
+# workmux 전역 설정
+# https://workmux.raine.dev
+#
+# 레이아웃: 좌 nvim(세로 전체) / 우상 claude / 우하 codex
+#
+# split 방향은 tmux와 같다 (horizontal=좌우, vertical=위아래).
+# Orca는 반대이므로 혼동하지 않도록 주의.
+#
+# nvim만 자동 실행한다. command를 생략한 pane은 빈 셸로 열리며,
+# claude·codex는 필요할 때 직접 시작한다 — 에이전트가 개당 400MB/55MB를
+# 쓰므로 worktree를 만들 때마다 띄우지 않는다.
+panes:
+  - command: nvim
+  - split: horizontal
+    focus: true
+  - split: vertical
+
+# 상태 아이콘을 tmux window-status-format에 자동 삽입하지 않는다.
+# .tmux.conf에 ⏸/● 커스텀 포맷이 이미 있어 덮이면 안 되므로, workmux가
+# @workmux_status 사용자 옵션만 export하게 두고 포맷에서 직접 참조한다.
+status_format: false
+
+# 새 worktree가 갈라져 나올 기준 브랜치.
+# 기본값은 "현재 체크아웃된 브랜치"라서 feature 브랜치에서 worktree를 만들면
+# 의도치 않게 stacked branch가 된다. auto는 main_branch(remote HEAD 자동 감지)를
+# 쓴다 — zambaguni-front는 origin/develop, dotfiles는 origin/main으로 해석된다.
+# 개별 재정의는 --base 플래그.
+base_branch: auto
+
+# Nerd Font 아이콘 사용 여부. workmux가 폰트를 감지해 런타임에 이 값을 설정
+# 파일에 직접 써넣는다. 소스에 명시하지 않으면 chezmoi apply마다 제거되고
+# workmux가 다시 써넣어 영구 drift(MM)가 된다.
+# Brewfile이 font-meslo-lg-nerd-font를 모든 머신에 설치하므로 true로 고정한다.
+nerdfont: true
