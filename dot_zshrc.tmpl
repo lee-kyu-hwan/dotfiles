@@ -137,11 +137,8 @@ fi
 # ============================================================
 # tmux 자동 연결 (재부팅 후에도 세션 복원)
 #
-# 주의: 이 로직을 바꾼 뒤에는 Ghostty를 Cmd+Q로 "완전 종료 후 재실행"
-# 해야 적용된다. Ghostty quick terminal은 surface를 재사용하므로
-# (Ctrl+` 토글은 보이기/숨기기만 하고 .zshrc를 다시 읽지 않음),
-# 이미 열려 있던 quick 창은 옛 로직대로 main 세션에 계속 붙어 있는다.
-# GHOSTTY_QUICK_TERMINAL 환경변수는 Ghostty 1.3.0+ 에서 quick terminal에 설정됨.
+# 이 로직은 새 대화형 셸부터 적용된다. 이미 실행 중인 pane은 현재 tmux
+# 연결을 유지하므로 Ghostty를 완전히 종료한 뒤 다시 실행해야 일괄 반영된다.
 #
 # ORCA_PANE_KEY 가드: Orca(ADE)는 pane마다 ORCA_WORKTREE_ID,
 # ORCA_AGENT_HOOK_{PORT,TOKEN} 등을 주입하고 탭·split·스크롤백·세션 복원을
@@ -154,13 +151,8 @@ fi
 # ============================================================
 if command -v tmux &>/dev/null && [[ -z "$TMUX" ]] && [[ $- == *i* ]] \
     && [[ -z "$ORCA_PANE_KEY" ]]; then
-    if [[ -n "$GHOSTTY_QUICK_TERMINAL" ]]; then
-        # Quick Terminal → quick 세션
-        exec tmux new-session -A -s quick -c ~/code
-    else
-        # 일반 터미널 → main 세션 (continuum이 자동 복원)
-        exec tmux new-session -A -s main
-    fi
+    # 모든 대화형 터미널 → main 세션 (continuum이 자동 복원)
+    exec tmux new-session -A -s main
 fi
 
 # ============================================================

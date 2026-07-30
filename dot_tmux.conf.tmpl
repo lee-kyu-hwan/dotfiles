@@ -152,9 +152,8 @@ bind = run-shell "$HOME/.local/bin/tmux-stack-layout"
 # ============================================================
 bind W display-popup -h 85% -w 90% -E "workmux dashboard"
 
-# prefix 없이 단일 조작으로도 띄운다. Option+F10/F11/F12 3연속 체계의 가운데다.
-#   M-F10 = Quick Terminal (Ghostty 전역), M-F12 = prefix
-# F10~F12는 macOS 기본이 미디어키라 fn을 함께 눌러야 한다 (fn+Option+F11).
+# prefix 없이 단일 조작으로도 띄운다. M-F11은 dashboard, M-F12는 prefix다.
+# F11/F12는 macOS 기본이 미디어키라 fn을 함께 눌러야 한다 (fn+Option+F11).
 # root 테이블이므로 이 키는 pane 안 앱에 전달되지 않는다 —
 # nvim(F키·Alt 매핑 0개)·readline·Ghostty 어느 쪽과도 충돌하지 않음을 확인했다.
 bind -n M-F11 display-popup -h 85% -w 90% -E "workmux dashboard"
@@ -205,7 +204,7 @@ set -g status-right "#[fg=colour248] %m/%d %H:%M "
 #  LOAD 13.69 15.74 9.82 114%/12코어 ▼ │ Ghostty 125M +2M/9m │
 #  claude 2.4G×6  codex 832M  MCP 1.7G  nvim 662M
 #
-# 표시 폭 약 172 칼럼. 좁은 quick 세션(179)에도 들어간다.
+# 표시 폭 약 172 칼럼. 179 칼럼의 좁은 터미널에도 들어간다.
 #
 # 화면 한 줄을 더 쓰는 대가로 첫 줄을 윈도우 목록에 온전히 내주고, 짧은
 # status-right에 억지로 밀어넣을 때보다 훨씬 많은 정보를 담는다.
