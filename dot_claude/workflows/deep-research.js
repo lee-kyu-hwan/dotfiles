@@ -341,7 +341,6 @@ const searchOutcomes = await parallel(
 // every round. Search completion order never enters this loop: searchOutcomes
 // and these queues retain the original scope order.
 const selectedSources = []
-const anglesWithValidURLs = new Set()
 const queues = searchOutcomes
   .filter(outcome => outcome.status === "ok")
   .map(outcome => ({
@@ -362,7 +361,6 @@ while (candidatesRemain) {
         invalidURLs.push({ ...source, angle: queue.outcome.angle.label })
         continue
       }
-      anglesWithValidURLs.add(queue.outcome.angle.label)
       if (seen.has(key)) {
         dupes.push({ ...source, angle: queue.outcome.angle.label, dupOf: seen.get(key) })
         continue
@@ -382,7 +380,6 @@ while (candidatesRemain) {
 const selectedAngles = new Set(selectedSources.map(item => item.angle.label))
 const anglesWithoutFetch = searchOutcomes.filter(outcome =>
   outcome.status === "ok" &&
-  anglesWithValidURLs.has(outcome.angle.label) &&
   !selectedAngles.has(outcome.angle.label)
 )
 
@@ -493,14 +490,13 @@ if (rankedClaims.length === 0) {
   // actually researched.
   const failedSearches = searchOutcomes.filter(outcome => outcome.status === "failed")
   const errored = completedFetches.filter(source => source.status === "failed").length
-  const fetchInfrastructureFailure = selectedSources.length > 0 && allSources.length === 0 && (
-    errored > 0 || fetchBudgetDropped.length === selectedSources.length
-  )
+  const fetchInfrastructureFailure = selectedSources.length > 0 &&
+    errored + fetchBudgetDropped.length === selectedSources.length
   let summary
   if (failedSearches.length === scope.angles.length) {
     summary = "All " + scope.angles.length + " search angles failed (likely rate-limiting or API errors). This is an infrastructure failure, not a research finding — retry."
   } else if (fetchInfrastructureFailure) {
-    summary = "No selected source could be fetched and " + errored + " fetches failed. Infrastructure failure, not a research finding — retry."
+    summary = "Every selected source fetch failed or was budget-dropped (" + errored + " failed, " + fetchBudgetDropped.length + " budget-dropped). Infrastructure failure, not a research finding — retry."
   } else {
     summary = "No claims extracted. " + allSources.length + " sources fetched" + (errored > 0 ? " (" + errored + " errored)" : "") + ", none yielded checkable claims. " + dupes.length + " URL dupes, " + budgetDropped.length + " budget-dropped."
   }

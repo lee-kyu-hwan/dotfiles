@@ -85,7 +85,7 @@ test("검색 실패와 결과 없음 상태를 구분하고 빈 ok 결과를 no_
   assert.equal(result.stats.sourcesSelected, 0)
 })
 
-test("fetch 실패·paywall·무관 상태를 보존해 인프라 실패와 skip을 집계한다", async () => {
+test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집계한다", async () => {
   const scope = makeScope(["fetch 실패", "paywall", "무관"])
   const fetchStatus = {
     "fetch 실패": { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: "timeout" },
@@ -115,12 +115,41 @@ test("fetch 실패·paywall·무관 상태를 보존해 인프라 실패와 skip
     },
   })
 
-  assert.equal(result.status, "infrastructure_failure")
+  assert.equal(result.status, "no_claims")
   assert.equal(result.stats.anglesSucceeded, 3)
   assert.equal(result.stats.sourcesSelected, 3)
   assert.equal(result.stats.sourcesFetched, 0)
   assert.equal(result.stats.fetchErrored, 1)
   assert.equal(result.stats.fetchSkipped, 2)
+})
+
+test("선택된 fetch가 모두 실패하면 infrastructure_failure를 반환한다", async () => {
+  const scope = makeScope(["실패-1", "실패-2", "실패-3"])
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ prompt, options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        const angleIndex = scope.angles.findIndex(candidate =>
+          prompt.includes("## Web Searcher: " + candidate.label)
+        )
+        return {
+          status: "ok",
+          results: [searchResult("https://failure-" + angleIndex + ".example/source")],
+        }
+      }
+      if (options.phase === "Fetch") {
+        return { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: "timeout" }
+      }
+      throw new Error("unexpected agent call: " + options.label)
+    },
+  })
+
+  assert.equal(result.status, "infrastructure_failure")
+  assert.equal(result.stats.sourcesSelected, 3)
+  assert.equal(result.stats.sourcesFetched, 0)
+  assert.equal(result.stats.fetchErrored, 3)
+  assert.equal(result.stats.fetchSkipped, 0)
 })
 
 test("6개 검색 각도에서 라운드로빈으로 정확히 15개를 선택해 모든 각도를 포함한다", async () => {
@@ -196,7 +225,7 @@ test("같은 경로의 서로 다른 query URL은 별도 fetch 후보로 유지�
 })
 
 test("http(s)가 아닌 검색 URL은 fetch 전에 제외한다", async () => {
-  const scope = makeScope(["유효성", "보조-1", "보조-2"])
+  const scope = makeScope(["유효성", "잘못된 URL만", "보조"])
   const { result, calls } = await runWorkflow({
     args: "테스트 질문",
     respond: async ({ prompt, options }) => {
@@ -214,6 +243,12 @@ test("http(s)가 아닌 검색 URL은 fetch 전에 제외한다", async () => {
             ],
           }
         }
+        if (prompt.includes("## Web Searcher: 잘못된 URL만")) {
+          return {
+            status: "ok",
+            results: [searchResult("mailto:invalid-only@example.com")],
+          }
+        }
         return { status: "no_results", results: [] }
       }
       if (options.phase === "Fetch") {
@@ -224,6 +259,7 @@ test("http(s)가 아닌 검색 URL은 fetch 전에 제외한다", async () => {
   })
 
   assert.equal(calls.filter(call => call.options.phase === "Fetch").length, 1)
-  assert.equal(result.stats.invalidUrlDropped, 4)
+  assert.equal(result.stats.invalidUrlDropped, 5)
   assert.equal(result.stats.sourcesSelected, 1)
+  assert.equal(result.stats.anglesWithoutFetch, 1)
 })
