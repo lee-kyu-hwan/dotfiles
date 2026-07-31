@@ -96,6 +96,60 @@ const isRecoverableAgentError = error => {
     .some(value => RECOVERABLE_AGENT_ERROR_TYPES.has(value))
 }
 
+// Claude Workflow parallel() returns null for a rejected task instead of
+// propagating its Error. A plain-data sentinel survives that boundary (and any
+// nested parallel boundary) without relying on Error object serialization.
+const PARALLEL_TASK_FAILURE = "__deepResearchParallelTaskFailureV1__"
+const sanitizeFailureMessage = value => {
+  let text
+  try {
+    text = String(value ?? "parallel task failed")
+  } catch {
+    text = "parallel task failed"
+  }
+  return text.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").slice(0, 500) || "parallel task failed"
+}
+const sanitizeFailureToken = (value, fallback) =>
+  sanitizeFailureMessage(value || fallback)
+    .replace(/[^A-Za-z0-9_.:-]/g, "_")
+    .slice(0, 80) || fallback
+const makeParallelTaskFailure = (kind, error) => {
+  const constructorName =
+    typeof error?.constructor?.name === "string" ? error.constructor.name : ""
+  const serializedName = typeof error?.name === "string" ? error.name : ""
+  return {
+    [PARALLEL_TASK_FAILURE]: true,
+    kind: sanitizeFailureToken(kind, "parallel-task"),
+    name: sanitizeFailureToken(
+      constructorName && constructorName !== "Object" ? constructorName : serializedName,
+      "Error"
+    ),
+    message: sanitizeFailureMessage(error?.message ?? error),
+  }
+}
+const isParallelTaskFailure = value =>
+  Boolean(value && typeof value === "object" && value[PARALLEL_TASK_FAILURE] === true)
+const findParallelTaskFailure = results => {
+  if (isParallelTaskFailure(results)) return results
+  if (!Array.isArray(results)) return null
+  return results.find(isParallelTaskFailure) || null
+}
+const guardParallelTask = (kind, task) => async () => {
+  try {
+    return await task()
+  } catch (error) {
+    return makeParallelTaskFailure(kind, error)
+  }
+}
+const throwParallelTaskFailure = results => {
+  const failure = findParallelTaskFailure(results)
+  if (!failure) return
+  const error = new Error(failure.message)
+  error.name = failure.name
+  error.kind = failure.kind
+  throw error
+}
+
 const EMPTY_STATS = {
   anglesPlanned: 0,
   anglesSucceeded: 0,
@@ -392,8 +446,8 @@ const VERIFY_PROMPT = (claim, v) =>
 // Promise.all/parallel preserves input order even when agents finish out of
 // order. Selection starts only after every search settles, so completion timing
 // cannot decide which angle consumes the fetch budget.
-const searchOutcomes = await parallel(
-  scope.angles.map(angle => async () => {
+const searchTaskResults = await parallel(
+  scope.angles.map(angle => guardParallelTask("search", async () => {
     let response
     try {
       response = await callAgent(SEARCH_PROMPT(angle), {
@@ -404,6 +458,7 @@ const searchOutcomes = await parallel(
         effort: "low",
       })
     } catch (e) {
+      if (!isRecoverableAgentError(e)) throw e
       response = { status: "failed", results: [], errorReason: e?.message || String(e) }
     }
 
@@ -424,7 +479,16 @@ const searchOutcomes = await parallel(
       log(quotedLabel(angle.label) + ": " + results.length + " results")
     }
     return { angle, status, results: status === "ok" ? results : [], errorReason: response.errorReason }
-  })
+  }))
+)
+throwParallelTaskFailure(searchTaskResults)
+const searchOutcomes = scope.angles.map((angle, index) =>
+  searchTaskResults?.[index] || {
+    angle,
+    status: "failed",
+    results: [],
+    errorReason: "parallel search returned no result",
+  }
 )
 
 // Sort within each angle, then take at most one novel valid URL per angle on
@@ -473,8 +537,8 @@ const anglesWithoutFetch = searchOutcomes.filter(outcome =>
   !selectedAngles.has(outcome.angle.label)
 )
 
-const fetchResults = await parallel(
-  selectedSources.map(({ source, angle }) => async () => {
+const fetchTaskResults = await parallel(
+  selectedSources.map(({ source, angle }) => guardParallelTask("fetch", async () => {
     // A bare fetch:<host> label asserts the real fetch host, so emit it only
     // for an unchanged, complete, strict-ASCII hostname.
     const capturedHost = String(source.url).match(URL_HOST_PATTERN)?.[1] ?? ""
@@ -502,6 +566,7 @@ const fetchResults = await parallel(
         fetchBudgetDropped.push(dropped)
         return null
       }
+      if (!isRecoverableAgentError(e)) throw e
       ext = { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: e?.message || String(e) }
     }
 
@@ -540,8 +605,10 @@ const fetchResults = await parallel(
         publishDate: ext.publishDate,
       })),
     }
-  })
+  }))
 )
+throwParallelTaskFailure(fetchTaskResults)
+const fetchResults = Array.isArray(fetchTaskResults) ? fetchTaskResults : []
 
 const completedFetches = fetchResults.filter(Boolean)
 const allSources = completedFetches
@@ -632,9 +699,9 @@ const adjudicate = (claim, verdicts = []) => {
 }
 
 const panelResults = await parallel(
-  rankedClaims.map(claim => () =>
-    parallel(
-      Array.from({ length: VOTES_PER_CLAIM }, (_, v) => async () => {
+  rankedClaims.map(claim => guardParallelTask("verifier-panel", async () => {
+    const verdicts = await parallel(
+      Array.from({ length: VOTES_PER_CLAIM }, (_, v) => guardParallelTask("verifier-vote", async () => {
         // Verification is this harness's entire point, so these agents inherit the
         // session model and effort instead of pinning a cheap tier. The prompt
         // requires an explicit supported/refuted/unverified outcome, so use the
@@ -654,12 +721,15 @@ const panelResults = await parallel(
           if (isRecoverableAgentError(error)) return null
           throw error
         }
-      })
-    ).then(verdicts => {
-      return adjudicate(claim, verdicts)
-    })
-  )
+      }))
+    )
+    // Preserve an inner vote sentinel unchanged through the outer panel task.
+    // Missing/null vote arrays remain an unverified panel by design.
+    const voteFailure = findParallelTaskFailure(verdicts)
+    return voteFailure || adjudicate(claim, verdicts)
+  }))
 )
+throwParallelTaskFailure(panelResults)
 
 // Outer parallel execution may itself omit a panel. Rejoin by opaque claimId
 // rather than result position so every ranked claim reaches adjudication.

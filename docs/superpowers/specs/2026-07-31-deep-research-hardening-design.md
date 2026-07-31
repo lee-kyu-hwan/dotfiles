@@ -165,10 +165,17 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 ## 오류 처리
 
 - Scope agent의 budget/API 오류는 `infrastructure_failure`로 반환한다.
-- Search agent의 null·명시적 실패·예상한 rejection은 angle 실패로 기록한다.
-- Fetch agent의 예상한 budget 오류만 `budgetDropped`로 바꾼다.
-- Fetch 결과 변환 중 발생한 `TypeError` 같은 프로그래밍 오류는 catch하지
-  않고 전파한다.
+- Claude Workflow의 실제 `parallel()`은 모든 task가 settle할 때까지 기다린 뒤
+  rejection을 throw하지 않고 해당 위치의 `null`로 정규화한다. 따라서 병렬
+  task의 비복구 오류는 raw `Error`에 의존하지 않고, 제어 문자를 제거하고
+  길이를 제한한 `kind`·`name`·`message` plain-data sentinel로 반환한다.
+  Search·Fetch·Verifier의 각 barrier가 sentinel을 검사해 barrier 밖에서 새
+  `Error`로 복원·throw한다.
+- Search agent의 null·명시적 실패·재시도 가능한 rejection은 angle 실패로
+  기록한다. 비재시도 오류와 task 내부 변환 오류는 sentinel로 전파한다.
+- Fetch agent의 예상한 budget 오류만 `budgetDropped`로 바꾸고, 그 밖의
+  재시도 가능 rejection은 fetch 실패로 기록한다. 결과 변환 중 발생한
+  `TypeError` 같은 프로그래밍 오류와 비재시도 오류는 sentinel로 전파한다.
 - Verifier 호출은 `APIConnectionError`, `APIConnectionTimeoutError`,
   `RetryableError`, `RateLimitError`, `InternalServerError`,
   `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
@@ -183,7 +190,8 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
   constructor와 HTTP 400~499(408·409·429 제외) 판정은 retryable 이름·flag·
   type/code보다 우선한다.
 - claim 단위 병렬 결과가 null이어도 원 claim을 보존해 unverified panel을
-  만든다.
+  만든다. 내부 verifier vote sentinel은 내부 barrier에서 판정 결과로
+  변환하지 않고 외부 panel barrier까지 그대로 전달한 뒤 throw한다.
 - Synthesis throw, null, provenance 검증 실패는 `synthesis_failed` salvage를
   반환한다.
 
@@ -194,7 +202,10 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 
 `tests/deep-research.test.mjs`에서 Node 내장 `node:test`와 `assert`만 사용한다.
 프로덕션 워크플로를 `AsyncFunction`으로 감싸고 `agent`, `parallel`,
-`pipeline`, `phase`, `log`, `args`를 결정적 stub으로 주입한다.
+`pipeline`, `phase`, `log`, `args`를 결정적 stub으로 주입한다. 기본
+`parallel` stub은 `Promise.allSettled()`로 모든 thunk를 실행하고 rejection을
+`null`로 바꿔 실제 Claude Workflow 런타임 의미론을 재현한다. 특정 누락
+panel을 만드는 테스트의 `parallelOverride` 동작은 그대로 유지한다.
 
 `tests/**`는 `.chezmoiignore`에 추가해 홈 디렉터리에 배포하지 않는다.
 
@@ -212,6 +223,8 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 10. delimiter·C0/C1·bidi·긴 host를 포함한 입력이 label/log를 위조하지 못함
 11. synthesis budget 오류가 confirmed claim을 보존
 12. 모든 반환 경로의 stats와 sources shape 일관성
+13. search·fetch·verifier의 비복구 task 오류가 null로 숨지 않고 barrier
+    밖으로 전파되며, 누락 결과는 기존 실패/unverified 의미를 유지
 
 검증 명령:
 

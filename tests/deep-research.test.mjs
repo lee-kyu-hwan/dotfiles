@@ -67,7 +67,15 @@ const runWorkflow = async ({ args, respond, parallelOverride }) => {
     calls.push(call)
     return respond(call, calls.length - 1)
   }
-  const defaultParallel = async tasks => Promise.all(tasks.map(task => task()))
+  // Real Claude Workflow parallel() waits for every task and normalizes each
+  // rejection to null. Keep this default faithful so tests cannot accidentally
+  // rely on Promise.all rejection propagation.
+  const defaultParallel = async tasks => {
+    const settled = await Promise.allSettled(
+      tasks.map(task => Promise.resolve().then(task))
+    )
+    return settled.map(result => result.status === "fulfilled" ? result.value : null)
+  }
   let parallelCall = 0
   const parallel = async tasks => {
     const callIndex = parallelCall++
@@ -488,6 +496,25 @@ test("검색 실패와 결과 없음 상태를 구분하고 빈 ok 결과를 no_
   assert.equal(result.stats.sourcesSelected, 0)
 })
 
+test("search 병렬 task의 비복구 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
+  await assert.rejects(
+    runWorkflow({
+      args: "테스트 질문",
+      respond: async ({ prompt, options }) => {
+        if (options.label === "scope") return makeScope(["fatal", "없음-1", "없음-2"])
+        if (prompt.includes("## Web Searcher: fatal")) {
+          throw new TypeError("search\ntransform\u0000bug")
+        }
+        return { status: "no_results", results: [] }
+      },
+    }),
+    error =>
+      error?.name === "TypeError" &&
+      error?.message === "search transform bug" &&
+      error?.kind === "search",
+  )
+})
+
 test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집계한다", async () => {
   const scope = makeScope(["fetch 실패", "paywall", "무관"])
   const fetchStatus = {
@@ -529,6 +556,37 @@ test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집
     ["failed", "paywalled", "irrelevant"]
   )
   result.sources.forEach(assertSourceContract)
+})
+
+test("fetch 병렬 task의 claim 변환 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
+  await assert.rejects(
+    runWorkflow({
+      args: "테스트 질문",
+      respond: async ({ prompt, options }) => {
+        if (options.label === "scope") return makeScope(["핵심", "보조-1", "보조-2"])
+        if (options.phase === "Search") {
+          return prompt.includes("## Web Searcher: 핵심")
+            ? {
+                status: "ok",
+                results: [searchResult("https://malformed.example/report")],
+              }
+            : { status: "no_results", results: [] }
+        }
+        if (options.phase === "Fetch") {
+          return {
+            status: "ok",
+            sourceQuality: "primary",
+            claims: {},
+          }
+        }
+        throw new Error("unexpected agent call: " + options.label)
+      },
+    }),
+    error =>
+      error?.name === "TypeError" &&
+      /map/.test(error?.message) &&
+      error?.kind === "fetch",
+  )
 })
 
 test("선택된 fetch가 모두 실패하면 infrastructure_failure를 반환한다", async () => {
@@ -843,7 +901,17 @@ test("verifier의 프로그래밍 오류와 비재시도 API 오류는 전파한
             return baseResponder(call)
           },
         }),
-        error => error === injectedError,
+        error => {
+          assert.notStrictEqual(error, injectedError)
+          return error?.name === (
+            injectedError.constructor?.name &&
+            injectedError.constructor.name !== "Object"
+              ? injectedError.constructor.name
+              : injectedError.name || "Error"
+          ) &&
+          error?.message === injectedError.message &&
+          error?.kind === "verifier-vote"
+        },
       )
     })
   }

@@ -4,7 +4,7 @@
 
 **Goal:** `deep-research`가 실패를 연구 결론으로 위장하지 않고, confirmed claim의 실제 출처·투표만 최종 finding으로 반환하도록 강화한다.
 
-**Architecture:** 배포 제약 때문에 워크플로는 단일 JavaScript 파일로 유지한다. 검색 전체를 fan-out/fan-in한 뒤 결정적 round-robin으로 fetch 후보를 선택하고, 각 단계는 명시적 상태를 반환한다. 합성 모델은 confirmed claim ID만 그룹화하며 최종 finding의 claim·source·vote·quote는 코드가 원본에서 재구성한다.
+**Architecture:** 배포 제약 때문에 워크플로는 단일 JavaScript 파일로 유지한다. 검색 전체를 fan-out/fan-in한 뒤 결정적 round-robin으로 fetch 후보를 선택하고, 각 단계는 명시적 상태를 반환한다. 합성 모델은 confirmed claim ID만 그룹화하며 최종 finding의 claim·source·vote·quote는 코드가 원본에서 재구성한다. 실제 Claude Workflow `parallel()`이 task rejection을 `null`로 정규화하므로, 병렬 task의 비복구 오류는 직렬화 가능한 sentinel로 barrier를 통과시킨 뒤 바깥에서 다시 throw한다.
 
 **Tech Stack:** Claude Workflow bare ECMAScript, JSON Schema, Node.js `node:test`, `AsyncFunction`, chezmoi
 
@@ -62,7 +62,14 @@ const runWorkflow = async ({ args, respond }) => {
     calls.push(call)
     return respond(call, calls.length - 1)
   }
-  const parallel = async tasks => Promise.all(tasks.map(task => task()))
+  const parallel = async tasks => {
+    const settled = await Promise.allSettled(
+      tasks.map(task => Promise.resolve().then(task))
+    )
+    return settled.map(result =>
+      result.status === "fulfilled" ? result.value : null
+    )
+  }
   const pipeline = async () => {
     throw new Error("pipeline must not be used after the search barrier refactor")
   }
@@ -626,6 +633,14 @@ const voted = rankedClaims.map(claim =>
 프로그래밍 오류 constructor와 HTTP 400~499(408·409·429 제외)는 충돌하는
 retryable 이름·flag·type/code보다 먼저 비복구 대상으로 판정한다.
 
+실제 `parallel()`은 위 비복구 throw도 `null`로 바꾸므로 search·fetch·각
+verifier vote thunk를 `guardParallelTask(kind, thunk)`로 감싼다. guard는
+raw `Error`를 반환하지 않고 제어 문자와 길이를 제한한 `kind`·`name`·
+`message` plain-data sentinel을 반환한다. 각 barrier 직후 sentinel을 찾아
+새 `Error`로 복원한다. 중첩 verifier에서는 내부 vote sentinel을 adjudication
+하지 않고 외부 panel 결과까지 그대로 전달해 외부 barrier에서 throw한다.
+sentinel이 아닌 누락/null vote와 panel은 기존대로 unverified로 보존한다.
+
 - [ ] **Step 4: 2표 판정 테스트 추가**
 
 ```js
@@ -1101,3 +1116,21 @@ Expected: clean. 검증 중 문서 오타만 수정했다면 해당 파일만 �
 git add dot_agents/skills/deep-research/SKILL.md docs/superpowers
 git commit -m "docs: deep-research 검증 결과를 반영한다"
 ```
+
+### 리뷰 후 런타임 의미론 보정: parallel rejection sentinel
+
+**Files:**
+- Modify: `tests/deep-research.test.mjs`
+- Modify: `dot_claude/workflows/deep-research.js`
+- Modify: `docs/superpowers/specs/2026-07-31-deep-research-hardening-design.md`
+- Modify: `docs/superpowers/plans/2026-07-31-deep-research-hardening.md`
+
+1. 기본 테스트 하네스를 all-settled/rejection-to-null 의미론으로 바꾸고,
+   기존 verifier 비복구 오류 테스트와 malformed fetch claim 변환 테스트가
+   실패하는 RED를 확인한다.
+2. search·fetch·nested verifier task를 plain-data sentinel guard로 감싸고
+   각 barrier 뒤에서만 sentinel을 복원·throw한다.
+3. 재시도 가능 agent 오류, budget drop, 실제 누락/null 결과의 기존
+   상태·stats·quorum 동작을 유지한다.
+4. focused/full 테스트, wrapped syntax, skill validator,
+   `git diff --check`를 다시 실행한다.
