@@ -4,6 +4,56 @@ import test from "node:test"
 
 const WORKFLOW_PATH = new URL("../dot_claude/workflows/deep-research.js", import.meta.url)
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+const RESULT_FIELDS = [
+  "confirmed",
+  "findings",
+  "question",
+  "refuted",
+  "sources",
+  "stats",
+  "status",
+  "summary",
+  "unverified",
+]
+const STATS_FIELDS = [
+  "afterSynthesis",
+  "agentCalls",
+  "anglesFailed",
+  "anglesNoResults",
+  "anglesPlanned",
+  "anglesSucceeded",
+  "anglesWithoutFetch",
+  "budgetDropped",
+  "claimsExtracted",
+  "claimsVerified",
+  "confirmed",
+  "fetchErrored",
+  "fetchSkipped",
+  "invalidUrlDropped",
+  "killed",
+  "sourcesFetched",
+  "sourcesSelected",
+  "unverified",
+  "urlDupes",
+  "verifierErrored",
+]
+const SOURCE_FIELDS = [
+  "angle",
+  "claimCount",
+  "fetchStatus",
+  "publishDate",
+  "quality",
+  "title",
+  "url",
+]
+const RESULT_STATUSES = new Set([
+  "ok",
+  "invalid_input",
+  "infrastructure_failure",
+  "no_claims",
+  "inconclusive",
+  "synthesis_failed",
+])
 
 const loadWorkflow = async () => {
   const source = (await readFile(WORKFLOW_PATH, "utf8")).replace(/^export const meta/m, "const meta")
@@ -68,6 +118,28 @@ const synthesisReport = claimIds => ({
   caveats: "Synthesis caveats",
   openQuestions: ["What remains?"],
 })
+
+const assertResultContract = result => {
+  for (const field of RESULT_FIELDS) {
+    assert.ok(Object.hasOwn(result, field), "result must expose " + field)
+  }
+  assert.ok(RESULT_STATUSES.has(result.status), "unexpected result status: " + result.status)
+  assert.deepEqual(Object.keys(result.stats).sort(), STATS_FIELDS)
+  for (const [field, value] of Object.entries(result.stats)) {
+    assert.equal(typeof value, "number", "stats." + field + " must be numeric")
+  }
+}
+
+const assertSourceContract = source => {
+  assert.deepEqual(Object.keys(source).sort(), SOURCE_FIELDS)
+  assert.equal(typeof source.url, "string")
+  assert.equal(typeof source.title, "string")
+  assert.equal(typeof source.quality, "string")
+  assert.equal(typeof source.angle, "string")
+  assert.equal(typeof source.claimCount, "number")
+  assert.equal(typeof source.publishDate, "string")
+  assert.equal(typeof source.fetchStatus, "string")
+}
 
 const makeSingleClaimResponder = ({
   verdicts,
@@ -167,6 +239,164 @@ test("빈 입력은 공통 result shape의 invalid_input을 반환한다", async
   assert.deepEqual(calls, [])
 })
 
+test("invalid_input과 no_claims는 동일한 공통 result 및 numeric stats 계약을 따른다", async () => {
+  const invalid = await runWorkflow({
+    args: "",
+    respond: async () => {
+      throw new Error("agent must not be called for invalid input")
+    },
+  })
+  const noClaims = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ options }) =>
+      options.label === "scope"
+        ? makeScope(["없음-1", "없음-2", "없음-3"])
+        : { status: "no_results", results: [] },
+  })
+
+  assert.equal(invalid.result.status, "invalid_input")
+  assert.equal(noClaims.result.status, "no_claims")
+  assert.deepEqual(
+    Object.keys(invalid.result.stats).sort(),
+    Object.keys(noClaims.result.stats).sort()
+  )
+  assertResultContract(invalid.result)
+  assertResultContract(noClaims.result)
+})
+
+test("Scope throw와 null은 재시도 가능한 구조화된 infrastructure_failure를 반환한다", async t => {
+  const cases = [
+    {
+      name: "throw",
+      respond: async () => {
+        throw new Error("scope service unavailable")
+      },
+    },
+    {
+      name: "null",
+      respond: async () => null,
+    },
+  ]
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const { result, calls } = await runWorkflow({
+        args: "테스트 질문",
+        respond: fixture.respond,
+      })
+
+      assert.equal(result.status, "infrastructure_failure")
+      assert.match(result.summary, /Scope/)
+      assert.match(result.summary, /retry/i)
+      assert.deepEqual(result.findings, [])
+      assert.deepEqual(result.sources, [])
+      assert.equal(result.stats.agentCalls, 1)
+      assert.equal(calls.length, 1)
+      assertResultContract(result)
+    })
+  }
+})
+
+test("no_claims, inconclusive, synthesis_failed, ok의 source는 동일한 완전한 shape을 유지한다", async t => {
+  const cases = [
+    {
+      name: "no_claims",
+      expectedStatus: "no_claims",
+      expectedFetchStatus: "irrelevant",
+      respond: async ({ prompt, options }) => {
+        if (options.label === "scope") return makeScope(["핵심", "보조-1", "보조-2"])
+        if (options.phase === "Search") {
+          return prompt.includes("## Web Searcher: 핵심")
+            ? {
+                status: "ok",
+                results: [{
+                  ...searchResult("https://irrelevant.example/report"),
+                  title: "",
+                }],
+              }
+            : { status: "no_results", results: [] }
+        }
+        if (options.phase === "Fetch") {
+          return {
+            status: "irrelevant",
+            claims: [],
+            errorReason: "off topic",
+          }
+        }
+        throw new Error("unexpected agent call: " + options.label)
+      },
+    },
+    {
+      name: "inconclusive",
+      expectedStatus: "inconclusive",
+      expectedFetchStatus: "ok",
+      respond: makeSingleClaimResponder({
+        verdicts: [
+          verifierResult("refuted"),
+          verifierResult("refuted"),
+          verifierResult("supported"),
+        ],
+      }),
+    },
+    {
+      name: "synthesis_failed",
+      expectedStatus: "synthesis_failed",
+      expectedFetchStatus: "ok",
+      respond: makeSingleClaimResponder({
+        verdicts: [
+          verifierResult("supported"),
+          verifierResult("supported"),
+          verifierResult("supported"),
+        ],
+        synthesis: null,
+      }),
+    },
+    {
+      name: "ok",
+      expectedStatus: "ok",
+      expectedFetchStatus: "ok",
+      respond: makeSingleClaimResponder({
+        verdicts: [
+          verifierResult("supported"),
+          verifierResult("supported"),
+          verifierResult("supported"),
+        ],
+      }),
+    },
+  ]
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const { result, calls } = await runWorkflow({
+        args: "테스트 질문",
+        respond: fixture.respond,
+      })
+
+      assert.equal(result.status, fixture.expectedStatus)
+      assertResultContract(result)
+      assert.equal(result.stats.agentCalls, calls.length)
+      assert.equal(result.sources.length, 1)
+      assertSourceContract(result.sources[0])
+      assert.equal(result.sources[0].fetchStatus, fixture.expectedFetchStatus)
+      if (fixture.name === "no_claims") {
+        assert.deepEqual(result.sources[0], {
+          url: "https://irrelevant.example/report",
+          title: "",
+          quality: "unreliable",
+          angle: "핵심",
+          claimCount: 0,
+          publishDate: "",
+          fetchStatus: "irrelevant",
+        })
+      }
+      if (fixture.name === "synthesis_failed") {
+        assert.equal(result.confirmed[0].sourceTitle, "https://primary.example/report")
+        assert.equal(result.confirmed[0].quote, "핵심 주장을 뒷받침하는 원문")
+      }
+    })
+  }
+})
+
 test("검색 실패와 결과 없음 상태를 구분하고 빈 ok 결과를 no_results로 정규화한다", async () => {
   const scope = makeScope(["실패", "없음", "빈 성공"])
   const { result } = await runWorkflow({
@@ -226,6 +456,11 @@ test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집
   assert.equal(result.stats.sourcesFetched, 0)
   assert.equal(result.stats.fetchErrored, 1)
   assert.equal(result.stats.fetchSkipped, 2)
+  assert.deepEqual(
+    result.sources.map(source => source.fetchStatus),
+    ["failed", "paywalled", "irrelevant"]
+  )
+  result.sources.forEach(assertSourceContract)
 })
 
 test("선택된 fetch가 모두 실패하면 infrastructure_failure를 반환한다", async () => {

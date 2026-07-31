@@ -1,14 +1,12 @@
 ---
 name: deep-research
-description: Use when the user wants a deep, multi-source, fact-checked research report on any topic (triggers like "딥 리서치", "deep research", "웹조사해서 정리", "리서치 보고서"). Runs the deep-research workflow — decompose into search angles, search, extract falsifiable claims, adversarially verify, synthesize a cited report. For a quick single-fact lookup, just search directly instead.
+description: Use when the user wants a deep, multi-source, fact-checked research report (triggers like "딥 리서치", "deep research", "웹조사해서 정리", "리서치 보고서"). For a quick single-fact lookup, search directly instead.
 ---
 
 # Deep Research
 
-파이프라인은 `dot_claude/workflows/deep-research.js` 워크플로가 실행한다. 이 스킬은
-앞단(질문 다듬기)과 뒷단(결과 전달)만 담당한다. **절차를 여기서 다시 서술하지 않는다** —
-두 곳에 적으면 수치가 어긋난다. 실제 앵글 수·fetch 상한·검증 임계값은 워크플로 상단의
-상수가 유일한 기준이다.
+`dot_claude/workflows/deep-research.js`가 파이프라인을 실행한다. 이 스킬은 질문 다듬기와
+결과 전달만 담당한다. 앵글 수·fetch 상한·검증 임계값은 워크플로 상단 상수가 기준이다.
 
 ## Step 0 — 스코프 확인 (실행 전)
 
@@ -24,31 +22,44 @@ Workflow({ name: "deep-research", args: "<다듬은 질문>" })
 ```
 
 되묻기로 얻은 답을 질문 문장에 녹여 넘긴다. `args`는 문자열이어야 하며, 비어 있으면
-워크플로가 즉시 에러를 반환한다.
-
-워크플로가 하는 일: 질문을 검색 앵글로 분해 → 앵글별 병렬 검색 → URL 중복 제거 후
-소스 fetch·주장 추출 → 주장별 3표 적대적 검증 → **확정된 주장만** 종합해 인용이 붙은
-보고서.
+워크플로가 즉시 `invalid_input`을 반환한다.
 
 ## Step 2 — 결과 전달
 
 반환값을 사용자 언어(기본 한국어)로 전달한다. 소스 제목과 인용문은 원문 언어를 유지한다.
 
+먼저 `status`에 따라 행동한다.
+
+| 상태 | 호출자 행동 |
+| --- | --- |
+| `ok` | `findings`를 전달하고 아래 커버리지·실패 통계를 함께 확인한다 |
+| `invalid_input` | 결론을 만들지 말고 연구 질문을 요청한다 |
+| `infrastructure_failure` | **연구 결론이 아니다.** 실패 범위를 밝히고 재시도를 권한다 |
+| `no_claims` | 확인 가능한 주장을 추출하지 못했음을 소스·커버리지 한계와 함께 밝힌다 |
+| `inconclusive` | 확정 주장이 없음을 밝히고 `refuted`와 `unverified`를 구분한다 |
+| `synthesis_failed` | 그룹화 실패를 밝히고 `confirmed`에 보존된 검증 주장·인용을 병합하지 않은 채 전달한다 |
+
+검증은 주장마다 최대 3표를 사용한다. `supported`가 2표 이상이어야 확정된다. 유효 투표가
+3표보다 적으면 해당 항목의 `erroredVotes`와 `stats.verifierErrored`/`summary`의 실패
+맥락을 함께 밝힌다. `votes[].vote`(예: `3-0`, `2-1`, `1-1 (1 errored)`)에서 `2-1`은
+의견이 갈린 결과이므로 만장일치처럼 서술하지 않는다.
+
+최종 finding의 `claims`, `sources`, `sourceDetails`, `quotes`, `votes`, `evidence`는 자유
+합성 문구가 아니라 확정된 원 주장과 검증 결과에서 재구성된다. 출처 제목은
+`sourceDetails[].title`, 원문 인용은 `quotes[].quote`에서 읽는다.
+
 `stats`를 함께 확인하고, 다음이 0이 아니면 **반드시 사용자에게 밝힌다.**
 
 | 필드 | 뜻 |
 | --- | --- |
+| `anglesNoResults` | 검색은 완료했지만 유용한 결과가 없던 앵글 수 |
 | `anglesFailed` | 검색이 죽은 앵글 수. 커버리지가 계획(`anglesPlanned`)보다 좁다 |
+| `anglesWithoutFetch` | 검색 결과는 있었지만 fetch 슬롯을 받지 못한 앵글 수 |
+| `fetchSkipped` | 무관하거나 paywall이라 건너뛴 소스 수 |
 | `fetchErrored` | fetch가 실패한 소스 수 |
-| `budgetDropped` | 토큰 예산·fetch 상한으로 건너뛴 소스 |
+| `budgetDropped` | fetch 상한 또는 실행 예산 때문에 제외된 후보 수 |
 | `unverified` | 검증기가 실패해 판정하지 못한 주장. **"반박됨"과 다르다** |
-| `killed` | 적대적 검증에서 반박된 주장. `refuted[]`에 이유가 담긴다 |
-
-각 finding의 `vote`(예 `3-0`, `2-1`)를 그대로 전달한다. `2-1`은 검증단이 갈린 것이므로
-만장일치처럼 서술하지 않는다.
-
-`summary`가 인프라 실패(rate limit, API 에러, 전체 앵글 실패)를 말하면 그것을 리서치
-결론으로 전달하지 않는다. 재시도를 제안한다.
+| `killed` | 반박된 주장 수. `refuted[]`의 주장·투표·이유를 숨기지 않는다 |
 
 ## Hard rules
 

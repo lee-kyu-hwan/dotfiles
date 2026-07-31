@@ -55,6 +55,8 @@ const makeResult = ({
   question = "",
   summary = "",
   error,
+  caveats,
+  openQuestions,
   findings = [],
   confirmed = [],
   refuted = [],
@@ -66,12 +68,24 @@ const makeResult = ({
   question,
   summary,
   ...(error ? { error } : {}),
+  ...(caveats !== undefined ? { caveats } : {}),
+  ...(openQuestions !== undefined ? { openQuestions } : {}),
   findings,
   confirmed,
   refuted,
   unverified,
   sources,
   stats: { ...EMPTY_STATS, ...stats, agentCalls },
+})
+
+const toSource = source => ({
+  url: source.url || "",
+  title: source.title || "",
+  quality: source.sourceQuality || "unreliable",
+  angle: source.angle || "",
+  claimCount: source.claims?.length || 0,
+  publishDate: source.publishDate || "",
+  fetchStatus: source.fetchStatus || source.status || "failed",
 })
 
 // ─── Schemas ───
@@ -151,7 +165,7 @@ const QUESTION = (typeof args === "string" && args.trim()) || ""
 if (!QUESTION) {
   return makeResult({ status: "invalid_input", error: "No research question provided." })
 }
-const scope = await callAgent(
+const SCOPE_PROMPT =
   "Decompose this research question into complementary search angles.\n\n" +
   "## Question\n" + QUESTION + "\n\n" +
   "## Task\n" +
@@ -160,11 +174,25 @@ const scope = await callAgent(
   "- For medical: anatomy · common causes · serious differentials · authoritative refs · red flags\n" +
   "- For tech: state-of-art · benchmarks · limitations · industry adoption · cost/tradeoffs\n\n" +
   "Make queries specific enough to surface high-signal results. Avoid redundancy.\n" +
-  "Return: the question (verbatim or lightly normalized), a 1-2 sentence decomposition strategy, and the angles.\n\nStructured output only.",
-  { label: "scope", schema: SCOPE_SCHEMA }
-)
+  "Return: the question (verbatim or lightly normalized), a 1-2 sentence decomposition strategy, and the angles.\n\nStructured output only."
+let scope
+try {
+  // Catch only the awaited agent operation. Any later transform failure is a
+  // programming error and must remain visible.
+  scope = await callAgent(SCOPE_PROMPT, { label: "scope", schema: SCOPE_SCHEMA })
+} catch {
+  return makeResult({
+    status: "infrastructure_failure",
+    question: QUESTION,
+    summary: "Scope agent failed. This is an infrastructure failure, not a research conclusion — retry.",
+  })
+}
 if (!scope) {
-  return { error: "Scope agent returned no result — cannot decompose the research question." }
+  return makeResult({
+    status: "infrastructure_failure",
+    question: QUESTION,
+    summary: "Scope agent returned no result. This is an infrastructure failure, not a research conclusion — retry.",
+  })
 }
 // ─── Deterministic URL parsing and safe progress labels ───
 // The workflow sandbox is a bare ECMAScript realm — no URL global — so
@@ -420,6 +448,7 @@ const fetchResults = await parallel(
         title: source.title,
         angle: angle.label,
         status,
+        fetchStatus: status,
         sourceQuality: ext.sourceQuality || "unreliable",
         claims: [],
       }
@@ -430,6 +459,7 @@ const fetchResults = await parallel(
       title: source.title,
       angle: angle.label,
       status,
+      fetchStatus: status,
       sourceQuality: ext.sourceQuality,
       publishDate: ext.publishDate,
       claims: ext.claims.map(c => ({
@@ -444,8 +474,9 @@ const fetchResults = await parallel(
 )
 
 const completedFetches = fetchResults.filter(Boolean)
-const allSources = completedFetches.filter(source => source.status === "ok")
-const allClaims = allSources
+const allSources = completedFetches
+const fetchedSources = allSources.filter(source => source.fetchStatus === "ok")
+const allClaims = fetchedSources
   .flatMap(s => s.claims)
   .map((claim, index) => ({ ...claim, claimId: "c" + index }))
 const impRank = { central: 0, supporting: 1, tangential: 2 }
@@ -454,31 +485,30 @@ const qualRank = { primary: 0, secondary: 1, blog: 2, forum: 3, unreliable: 4 }
 // and the early-return branch calls toRefuted — a later const would be in its TDZ.
 const confRank = { high: 0, medium: 1, low: 2 }
 
-// Every return path shares this shape, so a run that ends early reports the same
-// fields as a full one. It also splits planned from achieved coverage: reporting
-// scope.angles.length alone claimed 5 angles even when 4 searchers died.
+// Complete phase stats split planned from achieved coverage. makeResult adds
+// the authoritative callAgent counter after every branch has finished.
 const baseStats = extra => ({
+  ...EMPTY_STATS,
   anglesPlanned: scope.angles.length,
   anglesSucceeded: searchOutcomes.filter(outcome => outcome.status === "ok").length,
   anglesNoResults: searchOutcomes.filter(outcome => outcome.status === "no_results").length,
   anglesFailed: searchOutcomes.filter(outcome => outcome.status === "failed").length,
   anglesWithoutFetch: anglesWithoutFetch.length,
   sourcesSelected: selectedSources.length,
-  sourcesFetched: allSources.length,
-  fetchSkipped: completedFetches.filter(source => source.status === "irrelevant" || source.status === "paywalled").length,
-  fetchErrored: completedFetches.filter(source => source.status === "failed").length,
+  sourcesFetched: fetchedSources.length,
+  fetchSkipped: allSources.filter(source => source.fetchStatus === "irrelevant" || source.fetchStatus === "paywalled").length,
+  fetchErrored: allSources.filter(source => source.fetchStatus === "failed").length,
   urlDupes: dupes.length,
   invalidUrlDropped: invalidURLs.length,
   budgetDropped: budgetDropped.length,
   ...extra,
-  agentCalls,
 })
 
 const rankedClaims = [...allClaims]
   .sort((a, b) => (impRank[a.importance] - impRank[b.importance]) || (qualRank[a.sourceQuality] - qualRank[b.sourceQuality]))
   .slice(0, MAX_VERIFY_CLAIMS)
 
-log("Fetched " + allSources.length + " sources → " + allClaims.length + " claims → verifying top " + rankedClaims.length)
+log("Fetched " + fetchedSources.length + " sources → " + allClaims.length + " claims → verifying top " + rankedClaims.length)
 
 if (rankedClaims.length === 0) {
   // Separate "nothing is out there" from "the pipeline broke". The verify stage
@@ -486,7 +516,7 @@ if (rankedClaims.length === 0) {
   // failure as "no claims found" invites abandoning a question that was never
   // actually researched.
   const failedSearches = searchOutcomes.filter(outcome => outcome.status === "failed")
-  const errored = completedFetches.filter(source => source.status === "failed").length
+  const errored = allSources.filter(source => source.fetchStatus === "failed").length
   const fetchInfrastructureFailure = selectedSources.length > 0 &&
     errored + fetchBudgetDropped.length === selectedSources.length
   let summary
@@ -495,7 +525,7 @@ if (rankedClaims.length === 0) {
   } else if (fetchInfrastructureFailure) {
     summary = "Every selected source fetch failed or was budget-dropped (" + errored + " failed, " + fetchBudgetDropped.length + " budget-dropped). Infrastructure failure, not a research finding — retry."
   } else {
-    summary = "No claims extracted. " + allSources.length + " sources fetched" + (errored > 0 ? " (" + errored + " errored)" : "") + ", none yielded checkable claims. " + dupes.length + " URL dupes, " + budgetDropped.length + " budget-dropped."
+    summary = "No claims extracted. " + fetchedSources.length + " sources fetched" + (errored > 0 ? " (" + errored + " errored)" : "") + ", none yielded checkable claims. " + dupes.length + " URL dupes, " + budgetDropped.length + " budget-dropped."
   }
   if (failedSearches.length > 0 && failedSearches.length < scope.angles.length) {
     summary += " Angles that failed: " + failedSearches.map(outcome => stripLabelChars(outcome.angle.label)).join(", ") + "."
@@ -504,7 +534,7 @@ if (rankedClaims.length === 0) {
     status: failedSearches.length === scope.angles.length || fetchInfrastructureFailure ? "infrastructure_failure" : "no_claims",
     question: QUESTION,
     summary,
-    sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, publishDate: s.publishDate })),
+    sources: allSources.map(toSource),
     stats: baseStats({ claimsExtracted: 0, claimsVerified: 0 }),
   })
 }
@@ -612,7 +642,7 @@ if (confirmed.length === 0) {
     summary,
     refuted: killed.map(toRefuted),
     unverified: unverified.map(toUnverified),
-    sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, claimCount: s.claims.length, publishDate: s.publishDate })),
+    sources: allSources.map(toSource),
     stats: baseStats({
       claimsExtracted: allClaims.length,
       claimsVerified: rankedClaims.length,
@@ -769,18 +799,19 @@ const validateReport = report => {
 }
 
 // Salvage shape, shared by both failure exits below.
-const salvage = reason => ({
+const salvage = reason => makeResult({
   status: "synthesis_failed",
   question: QUESTION,
   summary: reason + " — returning " + confirmed.length + " verified claims unmerged.",
   findings: [],
   confirmed: confirmed.map(c => ({
-    claim: c.claim, source: c.sourceUrl, quote: c.quote, publishDate: c.publishDate,
+    claim: c.claim, source: c.sourceUrl, sourceTitle: c.sourceTitle,
+    quote: c.quote, publishDate: c.publishDate,
     vote: c.vote, erroredVotes: c.erroredVotes,
   })),
   refuted: killed.map(toRefuted),
   unverified: unverified.map(toUnverified),
-  sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, claimCount: s.claims.length, publishDate: s.publishDate })),
+  sources: allSources.map(toSource),
   stats: baseStats({
     claimsExtracted: allClaims.length, claimsVerified: rankedClaims.length,
     confirmed: confirmed.length, killed: killed.length, unverified: unverified.length,
@@ -789,10 +820,8 @@ const salvage = reason => ({
   }),
 })
 
-// Budget exhaustion makes callAgent() THROW, not return null, and this is a top-level
-// await outside parallel/pipeline — nothing catches it. An uncaught throw here
-// rejects the whole workflow and discards every result above it (up to ~119
-// agents of work) along with the salvage path that exists to prevent that loss.
+// Synthesis is a top-level agent call, so its throw/null cases are converted to
+// a structured salvage result that preserves verified work.
 let report
 try {
   report = await callAgent(
@@ -828,7 +857,7 @@ try {
   return salvage("Synthesis failed (" + stripLabelChars(e?.name || "invalid result") + ")")
 }
 
-return {
+return makeResult({
   status: "ok",
   question: QUESTION,
   summary: "Confirmed claims (" + confirmed.length + "): " +
@@ -838,12 +867,12 @@ return {
   caveats: "Refuted claims: " + killed.length +
     ". Unverified claims: " + unverified.length +
     ". Failures: " + searchOutcomes.filter(outcome => outcome.status === "failed").length +
-    " search, " + (completedFetches.filter(source => source.status === "failed").length + fetchBudgetDropped.length) +
+    " search, " + (allSources.filter(source => source.fetchStatus === "failed").length + fetchBudgetDropped.length) +
     " fetch, " + verifierErrored + " verifier votes.",
   openQuestions: [],
   refuted: killed.map(toRefuted),
   unverified: unverified.map(toUnverified),
-  sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, angle: s.angle, claimCount: s.claims.length, publishDate: s.publishDate })),
+  sources: allSources.map(toSource),
   stats: baseStats({
     claimsExtracted: allClaims.length,
     claimsVerified: rankedClaims.length,
@@ -853,4 +882,4 @@ return {
     verifierErrored,
     afterSynthesis: findings.length,
   }),
-}
+})
