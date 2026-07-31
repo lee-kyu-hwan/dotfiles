@@ -27,6 +27,51 @@ const callAgent = (prompt, options) => {
   return agent(prompt, options)
 }
 
+const RECOVERABLE_AGENT_ERROR_NAMES = new Set([
+  "APIConnectionError",
+  "APIConnectionTimeoutError",
+  "RetryableError",
+  "RateLimitError",
+  "InternalServerError",
+  "WorkflowBudgetExceededError",
+])
+const NON_RECOVERABLE_AGENT_ERROR_NAMES = new Set([
+  "TypeError",
+  "ReferenceError",
+  "SyntaxError",
+  "RangeError",
+  "BadRequestError",
+  "AuthenticationError",
+  "PermissionDeniedError",
+  "NotFoundError",
+  "UnprocessableEntityError",
+])
+const RECOVERABLE_AGENT_ERROR_TYPES = new Set([
+  "rate_limit_error",
+  "overloaded_error",
+  "api_error",
+  "connection_error",
+  "timeout_error",
+  "budget_exceeded",
+])
+const isRecoverableAgentError = error => {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return false
+  const status = error.status
+  if (NON_RECOVERABLE_AGENT_ERROR_NAMES.has(error.name)) return false
+  if (status === 400 || status === 401 || status === 403) return false
+  if (RECOVERABLE_AGENT_ERROR_NAMES.has(error.name) || error.retryable === true) return true
+  if (
+    typeof status === "number" &&
+    (status === 408 || status === 409 || status === 429 || (status >= 500 && status <= 599))
+  ) {
+    return true
+  }
+  const body = error.error && typeof error.error === "object" ? error.error : {}
+  const nested = body.error && typeof body.error === "object" ? body.error : {}
+  return [error.type, error.code, body.type, body.code, nested.type, nested.code]
+    .some(value => RECOVERABLE_AGENT_ERROR_TYPES.has(value))
+}
+
 const EMPTY_STATS = {
   anglesPlanned: 0,
   anglesSucceeded: 0,
@@ -571,16 +616,19 @@ const panelResults = await parallel(
         // requires an explicit supported/refuted/unverified outcome, so use the
         // strongest available verifier for merit-based adjudication and reliable
         // separation of infrastructure failures.
+        const verifyPrompt = VERIFY_PROMPT(claim, v)
+        const verifyOptions = {
+          // claim.claim is model-extracted web page text: untrusted, same as a
+          // fetch label. Route it through quotedLabel rather than raw slice.
+          label: "v" + v + ":" + quotedLabel(claim.claim),
+          phase: "Verify",
+          schema: VERDICT_SCHEMA,
+        }
         try {
-          return await callAgent(VERIFY_PROMPT(claim, v), {
-            // claim.claim is model-extracted web page text: untrusted, same as a
-            // fetch label. Route it through quotedLabel rather than raw slice.
-            label: "v" + v + ":" + quotedLabel(claim.claim),
-            phase: "Verify",
-            schema: VERDICT_SCHEMA,
-          })
-        } catch {
-          return null
+          return await callAgent(verifyPrompt, verifyOptions)
+        } catch (error) {
+          if (isRecoverableAgentError(error)) return null
+          throw error
         }
       })
     ).then(verdicts => {

@@ -169,7 +169,15 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 - Fetch agent의 예상한 budget 오류만 `budgetDropped`로 바꾼다.
 - Fetch 결과 변환 중 발생한 `TypeError` 같은 프로그래밍 오류는 catch하지
   않고 전파한다.
-- Verifier가 도구 실패를 보고하면 `unverified` 표로 처리한다.
+- Verifier 호출은 `APIConnectionError`, `APIConnectionTimeoutError`,
+  `RetryableError`, `RateLimitError`, `InternalServerError`,
+  `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
+  408·409·429·5xx, 알려진 재시도 가능 API error type/code만
+  `unverified` 표로 처리한다. SDK를 import할 수 없는 워크플로 sandbox에서는
+  이름·status·type/code를 명시적으로 duck-type 판별한다.
+- Verifier의 prompt와 호출 options는 `try` 밖에서 만든다. 일반 `Error`,
+  `TypeError`·`ReferenceError`·`SyntaxError`·`RangeError`와 인증·권한·잘못된
+  요청 같은 비재시도 오류는 숨기지 않고 전파한다.
 - claim 단위 병렬 결과가 null이어도 원 claim을 보존해 unverified panel을
   만든다.
 - Synthesis throw, null, provenance 검증 실패는 `synthesis_failed` salvage를

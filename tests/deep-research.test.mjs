@@ -108,6 +108,9 @@ const verifierResult = (outcome, evidence = outcome + " evidence") => ({
   confidence: "high",
 })
 
+const agentError = (name, properties = {}) =>
+  Object.assign(new Error(name + " fixture"), { name }, properties)
+
 const synthesisReport = claimIds => ({
   summary: "Synthesis summary",
   findings: [{
@@ -659,7 +662,7 @@ test("supported-refuted-null 패널은 1-1 (1 errored) unverified로 보존한�
   assert.equal(result.unverified[0].erroredVotes, 1)
 })
 
-test("개별 verifier 예외는 나머지 투표를 잃지 않고 unverified로 보존한다", async () => {
+test("개별 verifier 연결 오류는 나머지 투표를 잃지 않고 unverified로 보존한다", async () => {
   const baseResponder = makeSingleClaimResponder({
     verdicts: [
       verifierResult("supported"),
@@ -671,7 +674,7 @@ test("개별 verifier 예외는 나머지 투표를 잃지 않고 unverified로 
     args: "테스트 질문",
     respond: async call => {
       if (call.options.phase === "Verify" && call.options.label.startsWith("v2:")) {
-        throw new Error("verifier service unavailable")
+        throw agentError("APIConnectionError")
       }
       return baseResponder(call)
     },
@@ -689,6 +692,95 @@ test("개별 verifier 예외는 나머지 투표를 잃지 않고 unverified로 
   assert.equal(result.stats.verifierErrored, 1)
   assert.equal(result.unverified[0].vote, "1-1 (1 errored)")
   assert.equal(result.unverified[0].erroredVotes, 1)
+})
+
+test("명시적인 verifier 인프라 오류만 unverified 표로 복구한다", async t => {
+  const recoverableErrors = [
+    ["workflow budget", agentError("WorkflowBudgetExceededError")],
+    ["API connection", agentError("APIConnectionError")],
+    ["API connection timeout", agentError("APIConnectionTimeoutError")],
+    ["SDK retryable", agentError("RetryableError")],
+    ["rate limit class", agentError("RateLimitError")],
+    ["internal server class", agentError("InternalServerError")],
+    ["retryable flag", agentError("AgentError", { retryable: true })],
+    ["HTTP 408", agentError("APIError", { status: 408 })],
+    ["HTTP 409", agentError("APIError", { status: 409 })],
+    ["HTTP 429", agentError("APIError", { status: 429 })],
+    ["HTTP 5xx", agentError("APIError", { status: 503 })],
+    ["API error type", agentError("APIError", { type: "overloaded_error" })],
+    ["API error code", agentError("APIError", { code: "timeout_error" })],
+  ]
+
+  for (const [label, injectedError] of recoverableErrors) {
+    await t.test(label, async () => {
+      const baseResponder = makeSingleClaimResponder({
+        verdicts: [
+          verifierResult("supported"),
+          verifierResult("refuted"),
+          verifierResult("supported"),
+        ],
+      })
+      const { result } = await runWorkflow({
+        args: "테스트 질문",
+        respond: async call => {
+          if (call.options.phase === "Verify" && call.options.label.startsWith("v2:")) {
+            throw injectedError
+          }
+          return baseResponder(call)
+        },
+      })
+
+      assert.equal(result.status, "inconclusive")
+      assert.equal(result.stats.verifierErrored, 1)
+      assert.equal(result.unverified[0].vote, "1-1 (1 errored)")
+    })
+  }
+})
+
+test("verifier의 프로그래밍 오류와 비재시도 API 오류는 전파한다", async t => {
+  const fatalErrors = [
+    ["generic Error", new Error("generic verifier bug")],
+    ["TypeError", new TypeError("verifier type bug")],
+    ["ReferenceError", new ReferenceError("verifier reference bug")],
+    ["SyntaxError", new SyntaxError("verifier syntax bug")],
+    ["RangeError", new RangeError("verifier range bug")],
+    ["bad request class", agentError("BadRequestError", { status: 400 })],
+    ["bad request status", agentError("APIError", {
+      status: 400,
+      retryable: true,
+      type: "api_error",
+    })],
+    ["authentication class", agentError("AuthenticationError", { status: 401 })],
+    ["permission class", agentError("PermissionDeniedError", { status: 403 })],
+    ["not found status", agentError("APIError", { status: 404 })],
+    ["unprocessable status", agentError("APIError", { status: 422 })],
+    ["invalid request type", agentError("APIError", { type: "invalid_request_error" })],
+  ]
+
+  for (const [label, injectedError] of fatalErrors) {
+    await t.test(label, async () => {
+      const baseResponder = makeSingleClaimResponder({
+        verdicts: [
+          verifierResult("supported"),
+          verifierResult("refuted"),
+          verifierResult("supported"),
+        ],
+      })
+
+      await assert.rejects(
+        runWorkflow({
+          args: "테스트 질문",
+          respond: async call => {
+            if (call.options.phase === "Verify" && call.options.label.startsWith("v2:")) {
+              throw injectedError
+            }
+            return baseResponder(call)
+          },
+        }),
+        error => error === injectedError,
+      )
+    })
+  }
 })
 
 test("inner verifier panel의 null은 0-0 (3 errored) unverified로 정규화한다", async () => {

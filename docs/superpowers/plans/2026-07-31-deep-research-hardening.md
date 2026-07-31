@@ -616,6 +616,13 @@ const voted = rankedClaims.map(claim =>
 )
 ```
 
+각 verifier thunk는 prompt와 options를 `try` 밖에서 구성한다. `agent()` await의
+예외만 `isRecoverableAgentError()`로 분류해 SDK 연결·타임아웃·rate limit·서버
+오류, 워크플로 budget 오류, 명시적 retryable 신호, HTTP
+408·409·429·5xx를 `null` 표로 바꾼다. 일반 프로그래밍 오류와 인증·권한·잘못된
+요청 오류는 다시 throw한다. 워크플로 sandbox에서는 SDK를 import할 수 없으므로
+공식 오류 이름과 `status`, `type`/`code`를 좁게 duck-type 판별한다.
+
 - [ ] **Step 4: 2표 판정 테스트 추가**
 
 ```js
