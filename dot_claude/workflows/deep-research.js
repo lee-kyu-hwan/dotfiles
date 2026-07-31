@@ -450,6 +450,7 @@ const fetchResults = await parallel(
         status,
         fetchStatus: status,
         sourceQuality: ext.sourceQuality || "unreliable",
+        publishDate: ext.publishDate,
         claims: [],
       }
     }

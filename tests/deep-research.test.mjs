@@ -397,6 +397,39 @@ test("no_claims, inconclusive, synthesis_failed, ok의 source는 동일한 완�
   }
 })
 
+test("비정상 fetch가 제공한 발행일을 최종 source에 보존한다", async () => {
+  const scope = makeScope(["핵심", "보조-1", "보조-2"])
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ prompt, options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        return prompt.includes("## Web Searcher: 핵심")
+          ? {
+              status: "ok",
+              results: [searchResult("https://paywalled.example/report")],
+            }
+          : { status: "no_results", results: [] }
+      }
+      if (options.phase === "Fetch") {
+        return {
+          status: "paywalled",
+          sourceQuality: "secondary",
+          publishDate: "2026-06-15",
+          claims: [],
+          errorReason: "subscription required",
+        }
+      }
+      throw new Error("unexpected agent call: " + options.label)
+    },
+  })
+
+  assert.equal(result.status, "no_claims")
+  assert.equal(result.sources.length, 1)
+  assert.equal(result.sources[0].fetchStatus, "paywalled")
+  assert.equal(result.sources[0].publishDate, "2026-06-15")
+})
+
 test("검색 실패와 결과 없음 상태를 구분하고 빈 ok 결과를 no_results로 정규화한다", async () => {
   const scope = makeScope(["실패", "없음", "빈 성공"])
   const { result } = await runWorkflow({
