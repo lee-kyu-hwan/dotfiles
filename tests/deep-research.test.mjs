@@ -793,6 +793,15 @@ test("verifier의 프로그래밍 오류와 비재시도 API 오류는 전파한
     ["RangeError with conflicting recovery tags", conflictingProgrammingError(
       new RangeError("verifier range bug"),
     )],
+    ["EvalError with conflicting recovery tags", conflictingProgrammingError(
+      new EvalError("verifier eval bug"),
+    )],
+    ["URIError with conflicting recovery tags", conflictingProgrammingError(
+      new URIError("verifier URI bug"),
+    )],
+    ["AggregateError with conflicting recovery tags", conflictingProgrammingError(
+      new AggregateError([], "verifier aggregate bug"),
+    )],
     ["bad request constructor with conflicts", Object.assign(
       new BadRequestError("bad request"),
       { retryable: true, status: 503, type: "api_error" },

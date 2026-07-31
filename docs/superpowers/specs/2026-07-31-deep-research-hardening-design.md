@@ -177,8 +177,9 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
   실제 `Error` subclass의 `constructor.name`과 직렬화된 오류의 안전한
   `name`·status·type/code shape를 함께 duck-type 판별한다.
 - Verifier의 prompt와 호출 options는 `try` 밖에서 만든다. 일반 `Error`,
-  `TypeError`·`ReferenceError`·`SyntaxError`·`RangeError`와 인증·권한·잘못된
-  요청 같은 비재시도 오류는 숨기지 않고 전파한다. 내장 프로그래밍 오류
+  `TypeError`·`ReferenceError`·`SyntaxError`·`RangeError`·`EvalError`·
+  `URIError`·`AggregateError`와 인증·권한·잘못된 요청 같은 비재시도 오류는
+  숨기지 않고 전파한다. 내장 프로그래밍 오류
   constructor와 HTTP 400~499(408·409·429 제외) 판정은 retryable 이름·flag·
   type/code보다 우선한다.
 - claim 단위 병렬 결과가 null이어도 원 claim을 보존해 unverified panel을
