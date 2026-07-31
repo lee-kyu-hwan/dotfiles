@@ -476,6 +476,7 @@ const baseStats = extra => ({
   invalidUrlDropped: invalidURLs.length,
   budgetDropped: budgetDropped.length,
   ...extra,
+  agentCalls,
 })
 
 const rankedClaims = [...allClaims]
@@ -541,9 +542,9 @@ const panelResults = await parallel(
       Array.from({ length: VOTES_PER_CLAIM }, (_, v) => () =>
         // Verification is this harness's entire point, so these agents inherit the
         // session model and effort instead of pinning a cheap tier. The prompt
-        // says "default to refuted if uncertain", so a weak verifier skews toward
-        // over-refuting — that silently deletes sound findings and can empty the
-        // whole report via the confirmed.length === 0 branch below.
+        // requires an explicit supported/refuted/unverified outcome, so use the
+        // strongest available verifier for merit-based adjudication and reliable
+        // separation of infrastructure failures.
         callAgent(VERIFY_PROMPT(claim, v), {
           // claim.claim is model-extracted web page text: untrusted, same as a
           // fetch label. Route it through quotedLabel rather than raw slice.
@@ -561,7 +562,7 @@ const panelResults = await parallel(
 // Outer parallel execution may itself omit a panel. Rejoin by opaque claimId
 // rather than result position so every ranked claim reaches adjudication.
 const panelsByClaimId = new Map(
-  panelResults.filter(Boolean).map(panel => [panel.claimId, panel])
+  (panelResults || []).filter(Boolean).map(panel => [panel.claimId, panel])
 )
 const voted = rankedClaims.map(claim =>
   panelsByClaimId.get(claim.claimId) || adjudicate(claim, [])
@@ -711,8 +712,5 @@ return {
     unverified: unverified.length,
     verifierErrored,
     afterSynthesis: report.findings.length,
-    // Agents actually spawned: scope + searchers + fetches that returned + votes
-    // cast (errored votes included — they were spawned) + this synthesis.
-    agentCalls: 1 + scope.angles.length + allSources.length + (voted.length * VOTES_PER_CLAIM) + 1,
   }),
 }

@@ -60,6 +60,11 @@ const verifierResult = (outcome, evidence = outcome + " evidence") => ({
 
 const makeSingleClaimResponder = ({
   verdicts,
+  claims = [{
+    claim: "핵심 주장은 검증 가능하다.",
+    quote: "핵심 주장을 뒷받침하는 원문",
+    importance: "central",
+  }],
   synthesis = { summary: "ok", findings: [], caveats: "", openQuestions: [] },
 }) => {
   const scope = makeScope(["핵심", "보조-1", "보조-2"])
@@ -76,11 +81,7 @@ const makeSingleClaimResponder = ({
         status: "ok",
         sourceQuality: "primary",
         publishDate: "2026-07-01",
-        claims: [{
-          claim: "핵심 주장은 검증 가능하다.",
-          quote: "핵심 주장을 뒷받침하는 원문",
-          importance: "central",
-        }],
+        claims,
       }
     }
     if (options.phase === "Verify") {
@@ -385,7 +386,7 @@ test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한�
       ],
     }),
     parallelOverride: async (tasks, run, callIndex) =>
-      callIndex === 2 ? [null] : run(tasks),
+      callIndex === 2 ? null : run(tasks),
   })
 
   assert.equal(result.status, "inconclusive")
@@ -398,4 +399,42 @@ test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한�
   assert.ok(logs.some(message => message.includes("0-0 (3 errored) ?")))
   assert.equal(calls.filter(call => call.options.phase === "Verify").length, 0)
   assert.equal(calls.filter(call => call.options.label === "synthesize").length, 0)
+})
+
+test("confirmed와 누락 panel 혼합은 실제 agent 호출 수와 claim partition을 유지한다", async () => {
+  const claims = [
+    {
+      claim: "첫 번째 핵심 주장은 검증 가능하다.",
+      quote: "첫 번째 주장을 뒷받침하는 원문",
+      importance: "central",
+    },
+    {
+      claim: "두 번째 핵심 주장은 검증 가능하다.",
+      quote: "두 번째 주장을 뒷받침하는 원문",
+      importance: "central",
+    },
+  ]
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      claims,
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("supported"),
+      ],
+    }),
+    parallelOverride: async (tasks, run, callIndex) =>
+      callIndex === 2 ? [await tasks[0](), null] : run(tasks),
+  })
+
+  assert.equal(result.stats.agentCalls, calls.length)
+  assert.equal(result.stats.claimsVerified, 2)
+  assert.equal(result.stats.confirmed, 1)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(
+    result.stats.confirmed + result.stats.killed + result.stats.unverified,
+    result.stats.claimsVerified
+  )
 })
