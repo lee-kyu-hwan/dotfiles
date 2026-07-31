@@ -10,14 +10,21 @@ const loadWorkflow = async () => {
   return new AsyncFunction("args", "agent", "parallel", "pipeline", "phase", "log", source)
 }
 
-const runWorkflow = async ({ args, respond }) => {
+const runWorkflow = async ({ args, respond, parallelOverride }) => {
   const calls = [], logs = [], phases = []
   const agent = async (prompt, options = {}) => {
     const call = { prompt, options }
     calls.push(call)
     return respond(call, calls.length - 1)
   }
-  const parallel = async tasks => Promise.all(tasks.map(task => task()))
+  const defaultParallel = async tasks => Promise.all(tasks.map(task => task()))
+  let parallelCall = 0
+  const parallel = async tasks => {
+    const callIndex = parallelCall++
+    return parallelOverride
+      ? parallelOverride(tasks, defaultParallel, callIndex)
+      : defaultParallel(tasks)
+  }
   const pipeline = async () => {
     throw new Error("pipeline must not be used after the search barrier refactor")
   }
@@ -44,6 +51,46 @@ const searchResult = (url, relevance = "high") => ({
   snippet: "relevant",
   relevance,
 })
+
+const verifierResult = (outcome, evidence = outcome + " evidence") => ({
+  outcome,
+  evidence,
+  confidence: "high",
+})
+
+const makeSingleClaimResponder = ({
+  verdicts,
+  synthesis = { summary: "ok", findings: [], caveats: "", openQuestions: [] },
+}) => {
+  const scope = makeScope(["핵심", "보조-1", "보조-2"])
+  const sourceUrl = "https://primary.example/report"
+  return async ({ prompt, options }) => {
+    if (options.label === "scope") return scope
+    if (options.phase === "Search") {
+      return prompt.includes("## Web Searcher: 핵심")
+        ? { status: "ok", results: [searchResult(sourceUrl)] }
+        : { status: "no_results", results: [] }
+    }
+    if (options.phase === "Fetch") {
+      return {
+        status: "ok",
+        sourceQuality: "primary",
+        publishDate: "2026-07-01",
+        claims: [{
+          claim: "핵심 주장은 검증 가능하다.",
+          quote: "핵심 주장을 뒷받침하는 원문",
+          importance: "central",
+        }],
+      }
+    }
+    if (options.phase === "Verify") {
+      const voter = Number(options.label.match(/^v(\d+):/)?.[1])
+      return verdicts[voter]
+    }
+    if (options.label === "synthesize") return synthesis
+    throw new Error("unexpected agent call: " + options.label)
+  }
+}
 
 test("빈 입력은 공통 result shape의 invalid_input을 반환한다", async () => {
   const { result, calls } = await runWorkflow({
@@ -262,4 +309,93 @@ test("http(s)가 아닌 검색 URL은 fetch 전에 제외한다", async () => {
   assert.equal(result.stats.invalidUrlDropped, 5)
   assert.equal(result.stats.sourcesSelected, 1)
   assert.equal(result.stats.anglesWithoutFetch, 1)
+})
+
+test("supported-refuted-null 패널은 1-1 (1 errored) unverified로 보존한다", async () => {
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("refuted"),
+        null,
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(result.stats.verifierErrored, 1)
+  assert.equal(result.unverified[0].vote, "1-1 (1 errored)")
+  assert.equal(result.unverified[0].erroredVotes, 1)
+})
+
+test("supported 두 표와 unverified 한 표는 claim을 확인하고 합성한다", async () => {
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("unverified", "rate limited"),
+      ],
+    }),
+  })
+
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 1)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 0)
+  assert.equal(result.stats.verifierErrored, 1)
+  assert.equal(calls.filter(call => call.options.label === "synthesize").length, 1)
+})
+
+test("refuted 두 표와 supported 한 표는 1-2로 기각하고 합성하지 않는다", async () => {
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("refuted", "specific contradiction"),
+        verifierResult("refuted", "primary counterevidence"),
+        verifierResult("supported"),
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.killed, 1)
+  assert.equal(result.stats.unverified, 0)
+  assert.equal(result.refuted[0].vote, "1-2")
+  assert.equal(calls.filter(call => call.options.label === "synthesize").length, 0)
+})
+
+test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한다", async () => {
+  const { result, calls, logs } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("supported"),
+      ],
+    }),
+    parallelOverride: async (tasks, run, callIndex) =>
+      callIndex === 2 ? [null] : run(tasks),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(result.stats.verifierErrored, 3)
+  assert.equal(result.unverified[0].vote, "0-0 (3 errored)")
+  assert.ok(logs.some(message => message.includes("0-0 (3 errored) ?")))
+  assert.equal(calls.filter(call => call.options.phase === "Verify").length, 0)
+  assert.equal(calls.filter(call => call.options.label === "synthesize").length, 0)
 })
