@@ -167,8 +167,9 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 - Scope agent의 budget/API 오류는 `infrastructure_failure`로 반환한다.
 - Claude Workflow의 실제 `parallel()`은 모든 task가 settle할 때까지 기다린 뒤
   rejection을 throw하지 않고 해당 위치의 `null`로 정규화한다. 따라서 병렬
-  task의 비복구 오류는 raw `Error`에 의존하지 않고, 제어 문자를 제거하고
-  길이를 제한한 `kind`·`name`·`message` plain-data sentinel로 반환한다.
+  task의 비복구 오류는 raw `Error`에 의존하지 않고, C0/C1·bidi/format 제어
+  문자를 제거하고 길이를 제한한 `kind`·`name`·`message` plain-data
+  sentinel로 반환한다.
   Search·Fetch·Verifier의 각 barrier가 sentinel을 검사해 barrier 밖에서 새
   `Error`로 복원·throw한다.
 - Search agent의 null·명시적 실패·재시도 가능한 rejection은 angle 실패로
@@ -176,6 +177,11 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 - Fetch agent의 예상한 budget 오류만 `budgetDropped`로 바꾸고, 그 밖의
   재시도 가능 rejection은 fetch 실패로 기록한다. 결과 변환 중 발생한
   `TypeError` 같은 프로그래밍 오류와 비재시도 오류는 sentinel로 전파한다.
+  fetch barrier 결과의 각 슬롯은 선택한 source의 원래 index로 다시 결합한다.
+  기록된 `WorkflowBudgetExceededError` index의 `null`만 budget drop으로
+  유지하고, 그 밖의 누락/null 슬롯은 URL·title·angle을 보존한 명시적
+  `failed` source로 복원한다. 따라서 모든 fetch 슬롯이 누락되면
+  `infrastructure_failure`가 된다.
 - Verifier 호출은 `APIConnectionError`, `APIConnectionTimeoutError`,
   `RetryableError`, `RateLimitError`, `InternalServerError`,
   `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
@@ -225,6 +231,8 @@ panel을 만드는 테스트의 `parallelOverride` 동작은 그대로 유지한
 12. 모든 반환 경로의 stats와 sources shape 일관성
 13. search·fetch·verifier의 비복구 task 오류가 null로 숨지 않고 barrier
     밖으로 전파되며, 누락 결과는 기존 실패/unverified 의미를 유지
+14. fetch slot 누락과 의도적 budget drop을 구분하고, 복원 오류의
+    name·kind·message가 안전한 문자와 길이 제한을 지킴
 
 검증 명령:
 

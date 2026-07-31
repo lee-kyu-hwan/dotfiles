@@ -107,7 +107,9 @@ const sanitizeFailureMessage = value => {
   } catch {
     text = "parallel task failed"
   }
-  return text.replace(/[\u0000-\u001F\u007F-\u009F]/g, " ").slice(0, 500) || "parallel task failed"
+  return text
+    .replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g, " ")
+    .slice(0, 500) || "parallel task failed"
 }
 const sanitizeFailureToken = (value, fallback) =>
   sanitizeFailureMessage(value || fallback)
@@ -380,6 +382,7 @@ const dupes = []
 const budgetDropped = []
 const invalidURLs = []
 const fetchBudgetDropped = []
+const fetchBudgetDroppedIndexes = new Set()
 const relRank = { high: 0, medium: 1, low: 2 }
 
 // ─── Prompts ───
@@ -538,7 +541,7 @@ const anglesWithoutFetch = searchOutcomes.filter(outcome =>
 )
 
 const fetchTaskResults = await parallel(
-  selectedSources.map(({ source, angle }) => guardParallelTask("fetch", async () => {
+  selectedSources.map(({ source, angle }, fetchIndex) => guardParallelTask("fetch", async () => {
     // A bare fetch:<host> label asserts the real fetch host, so emit it only
     // for an unchanged, complete, strict-ASCII hostname.
     const capturedHost = String(source.url).match(URL_HOST_PATTERN)?.[1] ?? ""
@@ -560,10 +563,14 @@ const fetchTaskResults = await parallel(
         effort: "low",
       })
     } catch (e) {
-      if (e?.name === "WorkflowBudgetExceededError") {
+      if (
+        e?.name === "WorkflowBudgetExceededError" ||
+        e?.constructor?.name === "WorkflowBudgetExceededError"
+      ) {
         const dropped = { url: source.url, angle: angle.label }
         budgetDropped.push(dropped)
         fetchBudgetDropped.push(dropped)
+        fetchBudgetDroppedIndexes.add(fetchIndex)
         return null
       }
       if (!isRecoverableAgentError(e)) throw e
@@ -608,7 +615,24 @@ const fetchTaskResults = await parallel(
   }))
 )
 throwParallelTaskFailure(fetchTaskResults)
-const fetchResults = Array.isArray(fetchTaskResults) ? fetchTaskResults : []
+const fetchTaskArray = Array.isArray(fetchTaskResults) ? fetchTaskResults : []
+const fetchResults = selectedSources.map(({ source, angle }, fetchIndex) => {
+  const result = fetchTaskArray[fetchIndex]
+  if (result) return result
+  // A budget exception deliberately returns null and has already been counted.
+  // Any other missing slot means parallel lost the selected task result.
+  if (fetchBudgetDroppedIndexes.has(fetchIndex)) return null
+  return {
+    url: source.url,
+    title: source.title,
+    angle: angle.label,
+    status: "failed",
+    fetchStatus: "failed",
+    sourceQuality: "unreliable",
+    publishDate: "",
+    claims: [],
+  }
+})
 
 const completedFetches = fetchResults.filter(Boolean)
 const allSources = completedFetches

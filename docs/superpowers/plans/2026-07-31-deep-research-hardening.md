@@ -635,11 +635,12 @@ retryable 이름·flag·type/code보다 먼저 비복구 대상으로 판정한�
 
 실제 `parallel()`은 위 비복구 throw도 `null`로 바꾸므로 search·fetch·각
 verifier vote thunk를 `guardParallelTask(kind, thunk)`로 감싼다. guard는
-raw `Error`를 반환하지 않고 제어 문자와 길이를 제한한 `kind`·`name`·
-`message` plain-data sentinel을 반환한다. 각 barrier 직후 sentinel을 찾아
-새 `Error`로 복원한다. 중첩 verifier에서는 내부 vote sentinel을 adjudication
-하지 않고 외부 panel 결과까지 그대로 전달해 외부 barrier에서 throw한다.
-sentinel이 아닌 누락/null vote와 panel은 기존대로 unverified로 보존한다.
+raw `Error`를 반환하지 않고 C0/C1·bidi/format 제어 문자와 길이를 제한한
+`kind`·`name`·`message` plain-data sentinel을 반환한다. 각 barrier 직후
+sentinel을 찾아 새 `Error`로 복원한다. 중첩 verifier에서는 내부 vote
+sentinel을 adjudication하지 않고 외부 panel 결과까지 그대로 전달해 외부
+barrier에서 throw한다. sentinel이 아닌 누락/null vote와 panel은 기존대로
+unverified로 보존한다.
 
 - [ ] **Step 4: 2표 판정 테스트 추가**
 
@@ -1134,3 +1135,7 @@ git commit -m "docs: deep-research 검증 결과를 반영한다"
    상태·stats·quorum 동작을 유지한다.
 4. focused/full 테스트, wrapped syntax, skill validator,
    `git diff --check`를 다시 실행한다.
+5. fetch barrier는 선택 source index와 결과 slot을 다시 결합한다. task가
+   기록한 `WorkflowBudgetExceededError` index의 null은 기존 budget drop으로
+   남기고, 다른 누락/null slot은 source metadata를 보존한 `failed` fetch로
+   복원한다. 한 개/전체 slot 누락과 누락·budget·성공 혼합을 테스트한다.

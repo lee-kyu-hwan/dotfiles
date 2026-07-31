@@ -515,6 +515,36 @@ test("search 병렬 task의 비복구 오류는 null로 숨기지 않고 barrier
   )
 })
 
+test("복원한 병렬 task 오류는 raw 객체가 아니며 제어문자와 길이를 제한한다", async () => {
+  const injectedError = {
+    name: "Unsafe Error/이름\u202e",
+    message: "first\nsecond\u0000\u202e" + "x".repeat(700),
+  }
+
+  await assert.rejects(
+    runWorkflow({
+      args: "테스트 질문",
+      respond: async ({ prompt, options }) => {
+        if (options.label === "scope") return makeScope(["fatal", "없음-1", "없음-2"])
+        if (prompt.includes("## Web Searcher: fatal")) throw injectedError
+        return { status: "no_results", results: [] }
+      },
+    }),
+    error => {
+      assert.ok(error instanceof Error)
+      assert.notStrictEqual(error, injectedError)
+      assert.match(error.name, /^[A-Za-z0-9_.:-]{1,80}$/)
+      assert.equal(error.kind, "search")
+      assert.ok(error.message.length <= 500)
+      assert.doesNotMatch(
+        error.message,
+        /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/
+      )
+      return true
+    },
+  )
+})
+
 test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집계한다", async () => {
   const scope = makeScope(["fetch 실패", "paywall", "무관"])
   const fetchStatus = {
@@ -556,6 +586,108 @@ test("fetch 실패·paywall·무관 혼합은 no_claims로 상태와 skip을 집
     ["failed", "paywalled", "irrelevant"]
   )
   result.sources.forEach(assertSourceContract)
+})
+
+test("누락된 fetch 병렬 슬롯은 선택한 source의 명시적 실패로 복원한다", async () => {
+  const scope = makeScope(["누락-1", "누락-2", "누락-3"])
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ prompt, options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        const index = scope.angles.findIndex(angle =>
+          prompt.includes("## Web Searcher: " + angle.label)
+        )
+        return {
+          status: "ok",
+          results: [searchResult("https://missing-" + index + ".example/report")],
+        }
+      }
+      throw new Error("fetch task must be omitted before the agent call")
+    },
+    parallelOverride: async (tasks, run, callIndex) =>
+      callIndex === 1 ? tasks.map(() => null) : run(tasks),
+  })
+
+  assert.equal(result.status, "infrastructure_failure")
+  assert.equal(result.stats.sourcesSelected, 3)
+  assert.equal(result.stats.sourcesFetched, 0)
+  assert.equal(result.stats.fetchErrored, 3)
+  assert.equal(result.stats.budgetDropped, 0)
+  assert.equal(calls.filter(call => call.options.phase === "Fetch").length, 0)
+  assert.deepEqual(
+    result.sources,
+    scope.angles.map((angle, index) => ({
+      url: "https://missing-" + index + ".example/report",
+      title: "https://missing-" + index + ".example/report",
+      quality: "unreliable",
+      angle: angle.label,
+      claimCount: 0,
+      publishDate: "",
+      fetchStatus: "failed",
+    }))
+  )
+})
+
+test("누락·budget drop·성공 fetch 슬롯을 서로 다른 상태로 보존한다", async () => {
+  const scope = makeScope(["누락", "budget", "성공"])
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ prompt, options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        const index = scope.angles.findIndex(angle =>
+          prompt.includes("## Web Searcher: " + angle.label)
+        )
+        return {
+          status: "ok",
+          results: [searchResult("https://mixed-" + index + ".example/report")],
+        }
+      }
+      if (options.phase === "Fetch") {
+        if (prompt.includes('"angle":"budget"')) {
+          throw new WorkflowBudgetExceededError("budget")
+        }
+        return {
+          status: "ok",
+          sourceQuality: "primary",
+          publishDate: "2026-07-31",
+          claims: [],
+        }
+      }
+      throw new Error("unexpected agent call: " + options.label)
+    },
+    parallelOverride: async (tasks, run, callIndex) => {
+      const results = await run(tasks)
+      if (callIndex === 1) results[0] = null
+      return results
+    },
+  })
+
+  assert.equal(result.status, "no_claims")
+  assert.equal(result.stats.sourcesSelected, 3)
+  assert.equal(result.stats.sourcesFetched, 1)
+  assert.equal(result.stats.fetchErrored, 1)
+  assert.equal(result.stats.budgetDropped, 1)
+  assert.deepEqual(
+    result.sources.map(source => ({
+      url: source.url,
+      fetchStatus: source.fetchStatus,
+      publishDate: source.publishDate,
+    })),
+    [
+      {
+        url: "https://mixed-0.example/report",
+        fetchStatus: "failed",
+        publishDate: "",
+      },
+      {
+        url: "https://mixed-2.example/report",
+        fetchStatus: "ok",
+        publishDate: "2026-07-31",
+      },
+    ]
+  )
 })
 
 test("fetch 병렬 task의 claim 변환 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
