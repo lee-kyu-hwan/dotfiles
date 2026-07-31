@@ -5,7 +5,7 @@ description: Use when the user wants a deep, multi-source, fact-checked research
 
 # Deep Research
 
-`dot_claude/workflows/deep-research.js`가 파이프라인을 실행한다. 이 스킬은 질문 다듬기와
+`~/.claude/workflows/deep-research.js`가 파이프라인을 실행한다. 이 스킬은 질문 다듬기와
 결과 전달만 담당한다. 앵글 수·fetch 상한·검증 임계값은 워크플로 상단 상수가 기준이다.
 
 ## Step 0 — 스코프 확인 (실행 전)
@@ -41,8 +41,9 @@ Workflow({ name: "deep-research", args: "<다듬은 질문>" })
 
 검증은 주장마다 최대 3표를 사용한다. `supported`가 2표 이상이어야 확정된다. 유효 투표가
 3표보다 적으면 해당 항목의 `erroredVotes`와 `stats.verifierErrored`/`summary`의 실패
-맥락을 함께 밝힌다. `votes[].vote`(예: `3-0`, `2-1`, `1-1 (1 errored)`)에서 `2-1`은
-의견이 갈린 결과이므로 만장일치처럼 서술하지 않는다.
+맥락을 함께 밝힌다. `votes[].vote`(예: `3-0`, `2-1`, `2-0 (1 errored)`)에서 `2-1`은
+의견이 갈린 결과이므로 만장일치처럼 서술하지 않는다. `unverified[]`와 `refuted[]`의
+`reason`은 검증기가 남긴 실패·반박 사유다.
 
 최종 finding의 `claims`, `sources`, `sourceDetails`, `quotes`, `votes`, `evidence`는 자유
 합성 문구가 아니라 확정된 원 주장과 검증 결과에서 재구성된다. 출처 제목은
@@ -57,9 +58,13 @@ Workflow({ name: "deep-research", args: "<다듬은 질문>" })
 | `anglesWithoutFetch` | 검색 결과는 있었지만 fetch 슬롯을 받지 못한 앵글 수 |
 | `fetchSkipped` | 무관하거나 paywall이라 건너뛴 소스 수 |
 | `fetchErrored` | fetch가 실패한 소스 수 |
-| `budgetDropped` | fetch 상한 또는 실행 예산 때문에 제외된 후보 수 |
+| `budgetDropped` | fetch 상한 또는 실행 예산 때문에 제외된 후보 수. fetch 단계에서 잘린 소스는 `sources[]`에 `fetchStatus: "budget_dropped"`로 남는다 |
 | `unverified` | 검증기가 실패해 판정하지 못한 주장. **"반박됨"과 다르다** |
 | `killed` | 반박된 주장 수. `refuted[]`의 주장·투표·이유를 숨기지 않는다 |
+
+`claimsVerified`가 `claimsExtracted`보다 작으면 검증 상한에서 잘린 나머지 주장이
+`unranked[]`에 남는다. 확정도 반박도 아니므로 finding으로 쓰지 말고, 중요해 보이면
+재실행을 권한다.
 
 ## Hard rules
 

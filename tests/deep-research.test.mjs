@@ -13,6 +13,7 @@ const RESULT_FIELDS = [
   "stats",
   "status",
   "summary",
+  "unranked",
   "unverified",
 ]
 const STATS_FIELDS = [
@@ -393,6 +394,19 @@ test("Scope의 malformed angles는 크래시 없이 infrastructure_failure를 �
       assertResultContract(result)
     })
   }
+})
+
+test("LINE/PARAGRAPH SEPARATOR는 진행 라벨에서 제거된다", async () => {
+  const { logs } = await runWorkflow({
+    args: "질문\u2028앞\u2029뒤",
+    respond: async ({ options }) =>
+      options.label === "scope"
+        ? makeScope(["없음-1", "없음-2", "없음-3"])
+        : { status: "no_results", results: [] },
+  })
+
+  assert.ok(logs.some(message => message.includes("질문앞뒤")))
+  assert.ok(logs.every(message => !/[\u2028\u2029]/.test(message)))
 })
 
 test("malformed angle 항목은 드롭을 기록하고 유효한 각도로 계속 진행한다", async () => {
@@ -807,6 +821,11 @@ test("누락·budget drop·성공 fetch 슬롯을 서로 다른 상태로 보존
         publishDate: "",
       },
       {
+        url: "https://mixed-1.example/report",
+        fetchStatus: "budget_dropped",
+        publishDate: "",
+      },
+      {
         url: "https://mixed-2.example/report",
         fetchStatus: "ok",
         publishDate: "2026-07-31",
@@ -956,7 +975,11 @@ test("실제 constructor와 직렬화된 plain-object budget 오류만 fetch dro
       assert.equal(result.stats.sourcesFetched, 0)
       assert.equal(result.stats.fetchErrored, 0)
       assert.equal(result.stats.budgetDropped, 1)
-      assert.deepEqual(result.sources, [])
+      // Budget-dropped sources stay enumerable in the audit trail.
+      assert.equal(result.sources.length, 1)
+      assert.equal(result.sources[0].fetchStatus, "budget_dropped")
+      assert.equal(result.sources[0].claimCount, 0)
+      result.sources.forEach(assertSourceContract)
     })
   }
 })
@@ -1107,6 +1130,44 @@ test("6개 검색 각도에서 라운드로빈으로 정확히 15개를 선택�
   assert.equal(result.stats.sourcesSelected, 15)
   assert.equal(result.stats.anglesWithoutFetch, 0)
   assert.equal(result.stats.budgetDropped, 21)
+})
+
+test("검증 상한을 넘긴 주장은 중요도 랭킹으로 잘리고 unranked에 남는다", async () => {
+  const claims = Array.from({ length: 30 }, (_, index) => ({
+    claim: "주장-" + index,
+    quote: "인용-" + index,
+    importance: index < 25 ? "central" : "tangential",
+  }))
+  const { result, calls, logs } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      claims,
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("supported"),
+      ],
+      synthesis: synthesisReport(Array.from({ length: 25 }, (_, index) => "c" + index)),
+    }),
+  })
+
+  assert.equal(result.status, "ok")
+  assert.equal(result.stats.claimsExtracted, 30)
+  assert.equal(result.stats.claimsVerified, 25)
+  assert.equal(result.stats.confirmed, 25)
+  // central claims outrank tangential ones; the 5 tangential claims are cut.
+  assert.equal(calls.filter(call => call.options.phase === "Verify").length, 75)
+  assert.deepEqual(
+    result.unranked,
+    Array.from({ length: 5 }, (_, index) => ({
+      claim: "주장-" + (25 + index),
+      source: "https://primary.example/report",
+      importance: "tangential",
+    }))
+  )
+  assert.ok(logs.some(message =>
+    message.includes("verification cap: 5 lower-ranked claims will not be verified")
+  ))
 })
 
 test("같은 경로의 서로 다른 query URL은 별도 fetch 후보로 유지한다", async () => {
@@ -1708,7 +1769,7 @@ test("합성 grouping만 받아 원본 provenance와 narrative를 결정적으�
   synthesis.findings[0].sources = ["https://attacker.example/fake"]
   synthesis.findings[0].vote = "99-0"
 
-  const { result, calls } = await runWorkflow({
+  const { result, calls, phases } = await runWorkflow({
     args: "테스트 질문",
     respond: makeSingleClaimResponder({
       claims: [claim],
@@ -1726,6 +1787,7 @@ test("합성 grouping만 받아 원본 provenance와 narrative를 결정적으�
   })
 
   assert.equal(result.status, "ok")
+  assert.deepEqual(phases, ["Scope", "Search", "Fetch", "Verify", "Synthesize"])
   assert.equal(
     result.summary,
     "Confirmed claims (1): Verified fact. Grouped into 1 finding."
@@ -1734,7 +1796,7 @@ test("합성 grouping만 받아 원본 provenance와 narrative를 결정적으�
     result.caveats,
     "Refuted claims: 0. Unverified claims: 0. Failures: 0 search, 0 fetch, 0 verifier votes."
   )
-  assert.deepEqual(result.openQuestions, [])
+  assert.ok(!Object.hasOwn(result, "openQuestions"))
   assert.deepEqual(result.findings, [{
     title: "Verified fact",
     confidence: "medium",
@@ -2104,10 +2166,41 @@ test("웹 제어 문자열은 JSON 데이터로 격리되고 non-confirmed 원�
     assert.ok(!synthCall.prompt.includes(JSON.stringify(excluded)))
   }
   assert.ok(synthCall.prompt.includes("1 refuted and 1 unverified"))
-  assert.ok(!synthCall.prompt.includes("writing caveats"))
+  // Lock the schema lock-down instruction: synthesis may author nothing but
+  // claimId grouping.
+  assert.ok(synthCall.prompt.includes(
+    "Do not write titles, confidence, summaries, caveats, questions, claims, URLs, votes, or any other prose or provenance."
+  ))
 
   const dangerousForLogs = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/
   assert.ok(logs.every(message => !dangerousForLogs.test(message)))
+})
+
+test("ok 결과의 caveats는 실패한 검색 앵글을 라벨로 명시한다", async () => {
+  const baseResponder = makeSingleClaimResponder({
+    verdicts: [
+      verifierResult("supported"),
+      verifierResult("supported"),
+      verifierResult("supported"),
+    ],
+  })
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async call => {
+      if (
+        call.options.phase === "Search" &&
+        call.prompt.includes("## Web Searcher: 보조-1")
+      ) {
+        return { status: "failed", results: [], errorReason: "rate limited" }
+      }
+      return baseResponder(call)
+    },
+  })
+
+  assert.equal(result.status, "ok")
+  assert.ok(result.caveats.includes("Failures: 1 search"))
+  // WHICH coverage axis died, not just how many.
+  assert.ok(result.caveats.includes("Failed angles: 보조-1."))
 })
 
 test("발행일이 없더라도 verify와 synthesis JSON은 publishDate를 null로 명시한다", async () => {

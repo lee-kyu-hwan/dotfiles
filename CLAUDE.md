@@ -39,6 +39,12 @@ chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push 
 - `dot_config/앱/` → `$HOME/.config/앱/`으로 배치
 - `.tmpl` 확장자 → Go 템플릿으로 처리 후 배치
 
+### Claude 스킬·워크플로우 위치
+
+- `dot_agents/skills/` → `~/.agents/skills/` — 에이전트 공용 스킬 (Claude Code 외 도구도 읽음)
+- `dot_claude/skills/` → `~/.claude/skills/` — Claude Code 전용 스킬
+- `dot_claude/workflows/` → `~/.claude/workflows/` — Claude Code 워크플로우 스크립트
+
 ### 분기 시스템
 
 - **OS 분기**: `{{ if eq .chezmoi.os "darwin" }}` — `dot_tmux.conf.tmpl`, `dot_zshrc.tmpl`에서 사용

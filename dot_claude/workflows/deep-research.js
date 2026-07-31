@@ -7,7 +7,7 @@ export const meta = {
     { title: "Search", detail: "One WebSearch agent per angle, in parallel", model: "haiku" },
     { title: "Fetch", detail: "URL-dedup, fetch up to 15 sources, extract falsifiable claims", model: "haiku" },
     { title: "Verify", detail: "3-vote adversarial verification on top 25 claims (2 refutes kill)" },
-    { title: "Synthesize", detail: "Merge semantic dupes, rank by confidence, cite sources" },
+    { title: "Synthesize", detail: "Merge semantic dupes, derive confidence from provenance, cite sources" },
   ],
 }
 
@@ -18,6 +18,8 @@ export const meta = {
 const VOTES_PER_CLAIM = 3
 const REFUTATIONS_REQUIRED = 2
 const SUPPORTS_REQUIRED = 2
+const MIN_ANGLES = 3
+const MAX_ANGLES = 6
 const MAX_FETCH = 15
 const MAX_VERIFY_CLAIMS = 25
 
@@ -285,11 +287,11 @@ const makeResult = ({
   summary = "",
   error,
   caveats,
-  openQuestions,
   findings = [],
   confirmed = [],
   refuted = [],
   unverified = [],
+  unranked = [],
   sources = [],
   stats = {},
 }) => ({
@@ -298,11 +300,11 @@ const makeResult = ({
   summary,
   ...(error ? { error } : {}),
   ...(caveats !== undefined ? { caveats } : {}),
-  ...(openQuestions !== undefined ? { openQuestions } : {}),
   findings,
   confirmed,
   refuted,
   unverified,
+  unranked,
   sources,
   stats: { ...EMPTY_STATS, ...stats, agentCalls },
 })
@@ -323,7 +325,7 @@ const SCOPE_SCHEMA = {
   properties: {
     question: { type: "string" },
     summary: { type: "string" },
-    angles: { type: "array", minItems: 3, maxItems: 6, items: {
+    angles: { type: "array", minItems: MIN_ANGLES, maxItems: MAX_ANGLES, items: {
       type: "object", required: ["label", "query"],
       properties: {
         label: { type: "string" },
@@ -398,7 +400,7 @@ const SCOPE_PROMPT =
   "Decompose this research question into complementary search angles.\n\n" +
   "## Question\n" + QUESTION + "\n\n" +
   "## Task\n" +
-  "Generate 5 distinct web search queries that together cover the question from different angles. Pick angles that suit the question's domain. Examples:\n" +
+  "Generate " + MIN_ANGLES + "-" + MAX_ANGLES + " distinct web search queries (aim for 5) that together cover the question from different angles. Pick angles that suit the question's domain. Examples:\n" +
   "- broad/primary  · academic/technical  · recent news  · contrarian/skeptical  · practitioner/implementation\n" +
   "- For medical: anatomy · common causes · serious differentials · authoritative refs · red flags\n" +
   "- For tech: state-of-art · benchmarks · limitations · industry adoption · cost/tradeoffs\n\n" +
@@ -485,8 +487,9 @@ const normalizedURL = value => {
 // terminal control sequences or invisible reordering chars. LABEL_STRIP
 // deletes what must never render — C0/C1 controls (incl. ESC/CSI, the ANSI
 // introducers), Unicode bidi overrides/isolates and zero-width format chars
-// (U+200B-200F, U+202A-202E, U+2066-2069, U+FEFF — they visually reorder or
-// hide label text), and the WHOLE double-quote lookalike family (ASCII " plus
+// (U+200B-200F, U+2028-202E incl. LINE/PARAGRAPH SEPARATOR, U+2066-2069,
+// U+FEFF — they visually reorder, break lines, or hide label text), and the
+// WHOLE double-quote lookalike family (ASCII " plus
 // U+201C-201F, U+2033, U+2036, U+275D, U+275E, U+301D, U+301E, U+FF02 — any of
 // which would visually close the quoted fallback early and forge host-shaped
 // text after it). STRICT_HOST is the strict registrable-hostname charset a
@@ -494,7 +497,7 @@ const normalizedURL = value => {
 // capture: dedup keys are never rendered, and stripping there could collide
 // distinct URLs.
 const LABEL_CAP = 40
-const LABEL_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff\u0022\u201c-\u201f\u2033\u2036\u275d\u275e\u301d\u301e\uff02]/g
+const LABEL_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff\u0022\u201c-\u201f\u2033\u2036\u275d\u275e\u301d\u301e\uff02]/g
 const STRICT_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 const stripLabelChars = s => String(s).replace(LABEL_STRIP, "")
 const untrustedJSON = value => JSON.stringify(value)
@@ -581,6 +584,7 @@ const VERIFY_PROMPT = (claim, v) =>
 // Promise.all/parallel preserves input order even when agents finish out of
 // order. Selection starts only after every search settles, so completion timing
 // cannot decide which angle consumes the fetch budget.
+phase("Search")
 const searchTaskResults = await parallel(
   scope.angles.map(angle => guardParallelTask("search", async () => {
     let response
@@ -621,14 +625,19 @@ const searchTaskSlots = unwrapParallelTaskResults(
   scope.angles.length,
   "search"
 )
-const searchOutcomes = scope.angles.map((angle, index) =>
-  (searchTaskSlots[index].present && searchTaskSlots[index].value) || {
+const searchOutcomes = scope.angles.map((angle, index) => {
+  const slot = searchTaskSlots[index]
+  if (slot.present && slot.value) return slot.value
+  // parallel() lost this slot without an envelope — restore an explicit
+  // failure record and say so in the progress log, not just in stats.
+  log("search slot lost: " + quotedLabel(angle.label))
+  return {
     angle,
     status: "failed",
     results: [],
     errorReason: "parallel search returned no result",
   }
-)
+})
 
 // Sort within each angle, then take at most one novel valid URL per angle on
 // every round. Search completion order never enters this loop: searchOutcomes
@@ -670,12 +679,16 @@ while (candidatesRemain) {
   }
 }
 
-const selectedAngles = new Set(selectedSources.map(item => item.angle.label))
+// Angle objects flow from scope.angles through searchOutcomes to
+// selectedSources by reference, so identity is the collision-free key here —
+// SCOPE_SCHEMA does not guarantee label uniqueness.
+const selectedAngles = new Set(selectedSources.map(item => item.angle))
 const anglesWithoutFetch = searchOutcomes.filter(outcome =>
   outcome.status === "ok" &&
-  !selectedAngles.has(outcome.angle.label)
+  !selectedAngles.has(outcome.angle)
 )
 
+phase("Fetch")
 const fetchTaskResults = await parallel(
   selectedSources.map(({ source, angle }, fetchIndex) => guardParallelTask("fetch", async () => {
     // A bare fetch:<host> label asserts the real fetch host, so emit it only
@@ -704,6 +717,7 @@ const fetchTaskResults = await parallel(
         budgetDropped.push(dropped)
         fetchBudgetDropped.push(dropped)
         fetchBudgetDroppedIndexes.add(fetchIndex)
+        log("fetch budget-dropped: " + quotedLabel(source.url))
         return null
       }
       if (hasWorkflowBudgetExceededIdentity(e)) throw e
@@ -764,9 +778,23 @@ const fetchTaskSlots = unwrapParallelTaskResults(
 const fetchResults = selectedSources.map(({ source, angle }, fetchIndex) => {
   const slot = fetchTaskSlots[fetchIndex]
   if (slot.present && slot.value) return slot.value
-  // A budget exception deliberately returns null and has already been counted.
+  // A budget exception deliberately returned null and was already counted, but
+  // the source stays visible in the sources[] audit trail as budget_dropped
+  // rather than silently vanishing from the result.
+  if (fetchBudgetDroppedIndexes.has(fetchIndex)) {
+    return {
+      url: source.url,
+      title: source.title,
+      angle: angle.label,
+      status: "budget_dropped",
+      fetchStatus: "budget_dropped",
+      sourceQuality: "unreliable",
+      publishDate: "",
+      claims: [],
+    }
+  }
   // Any other missing slot means parallel lost the selected task result.
-  if (fetchBudgetDroppedIndexes.has(fetchIndex)) return null
+  log("fetch slot lost: " + quotedLabel(source.url))
   return {
     url: source.url,
     title: source.title,
@@ -810,11 +838,22 @@ const baseStats = extra => ({
   ...extra,
 })
 
-const rankedClaims = [...allClaims]
+const sortedClaims = [...allClaims]
   .sort((a, b) => (impRank[a.importance] - impRank[b.importance]) || (qualRank[a.sourceQuality] - qualRank[b.sourceQuality]))
-  .slice(0, MAX_VERIFY_CLAIMS)
+const rankedClaims = sortedClaims.slice(0, MAX_VERIFY_CLAIMS)
+// Claims cut by the verification cap are neither confirmed nor refuted; keep
+// them enumerable in the result (and announced in the log) instead of leaving
+// only the claimsExtracted−claimsVerified arithmetic as their trace.
+const unranked = sortedClaims.slice(MAX_VERIFY_CLAIMS).map(claim => ({
+  claim: claim.claim,
+  source: claim.sourceUrl,
+  importance: claim.importance,
+}))
 
 log("Fetched " + fetchedSources.length + " sources → " + allClaims.length + " claims → verifying top " + rankedClaims.length)
+if (unranked.length > 0) {
+  log("verification cap: " + unranked.length + " lower-ranked claims will not be verified")
+}
 
 if (rankedClaims.length === 0) {
   // Separate "nothing is out there" from "the pipeline broke". The verify stage
@@ -931,9 +970,10 @@ const unverified = voted.filter(c => !c.survives && !c.isRefuted)
 const verifierErrored = voted.reduce((sum, claim) => sum + claim.erroredVotes, 0)
 log("Verify done: " + voted.length + " claims → " + confirmed.length + " confirmed, " + killed.length + " refuted, " + unverified.length + " unverified")
 
-// Carry the refuting verdict's reasoning. Confirmed claims surface their evidence
-// (see block below); refuted ones did not, so the "Refuted claims" section told
-// neither the user nor the synthesizer WHY a claim died.
+// Carry the refuting verdict's reasoning into the user-facing refuted[] items,
+// mirroring how confirmed claims surface their supporting evidence. Refuted
+// raw text stays out of the synthesis prompt entirely (see the synthesis
+// block); this exists so the USER can see why a claim died.
 const toRefuted = c => {
   const why = c.verdicts.filter(v => v.outcome === "refuted").sort((a, b) => confRank[a.confidence] - confRank[b.confidence])[0]
   return {
@@ -979,6 +1019,7 @@ if (confirmed.length === 0) {
       summary: "Verification never ran: all " + (voted.length * VOTES_PER_CLAIM) +
         " verifier votes were lost to agent errors or missing panels. This is an infrastructure failure, not a research conclusion — retry.",
       unverified: unverified.map(toUnverified),
+      unranked,
       sources: allSources.map(toSource),
       stats: baseStats({
         claimsExtracted: allClaims.length,
@@ -1006,6 +1047,7 @@ if (confirmed.length === 0) {
     summary,
     refuted: killed.map(toRefuted),
     unverified: unverified.map(toUnverified),
+    unranked,
     sources: allSources.map(toSource),
     stats: baseStats({
       claimsExtracted: allClaims.length,
@@ -1175,6 +1217,7 @@ const salvage = reason => makeResult({
   })),
   refuted: killed.map(toRefuted),
   unverified: unverified.map(toUnverified),
+  unranked,
   sources: allSources.map(toSource),
   stats: baseStats({
     claimsExtracted: allClaims.length, claimsVerified: rankedClaims.length,
@@ -1221,6 +1264,12 @@ try {
   return salvage("Synthesis failed (" + stripLabelChars(e?.name || "invalid result") + ")")
 }
 
+// Name the dead angles, not just their count — the caller needs to know WHICH
+// axis of coverage is missing to judge whether the findings still answer the
+// question.
+const failedAngleLabels = searchOutcomes
+  .filter(outcome => outcome.status === "failed")
+  .map(outcome => stripLabelChars(outcome.angle.label))
 return makeResult({
   status: "ok",
   question: QUESTION,
@@ -1230,12 +1279,13 @@ return makeResult({
   findings,
   caveats: "Refuted claims: " + killed.length +
     ". Unverified claims: " + unverified.length +
-    ". Failures: " + searchOutcomes.filter(outcome => outcome.status === "failed").length +
+    ". Failures: " + failedAngleLabels.length +
     " search, " + (allSources.filter(source => source.fetchStatus === "failed").length + fetchBudgetDropped.length) +
-    " fetch, " + verifierErrored + " verifier votes.",
-  openQuestions: [],
+    " fetch, " + verifierErrored + " verifier votes." +
+    (failedAngleLabels.length > 0 ? " Failed angles: " + failedAngleLabels.join(", ") + "." : ""),
   refuted: killed.map(toRefuted),
   unverified: unverified.map(toUnverified),
+  unranked,
   sources: allSources.map(toSource),
   stats: baseStats({
     claimsExtracted: allClaims.length,
