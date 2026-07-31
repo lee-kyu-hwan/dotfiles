@@ -11,7 +11,7 @@ export const meta = {
   ],
 }
 
-// deep-research: Scope → pipeline(Search → URL-dedup → Fetch+Extract) → 3-vote Verify → Synthesize
+// deep-research: Scope → Search barrier → URL selection → Fetch+Extract → 3-vote Verify → Synthesize
 // Ported from bughunter architecture. WebSearch/WebFetch instead of git/grep.
 // Question is passed via Workflow({name: 'deep-research', args: '<question>'}).
 
@@ -95,8 +95,10 @@ const SCOPE_SCHEMA = {
   },
 }
 const SEARCH_SCHEMA = {
-  type: "object", required: ["results"],
+  type: "object", required: ["status", "results"],
   properties: {
+    status: { enum: ["ok", "no_results", "failed"] },
+    errorReason: { type: "string" },
     results: { type: "array", maxItems: 6, items: {
       type: "object", required: ["url", "title", "relevance"],
       properties: {
@@ -109,10 +111,12 @@ const SEARCH_SCHEMA = {
   },
 }
 const EXTRACT_SCHEMA = {
-  type: "object", required: ["claims", "sourceQuality"],
+  type: "object", required: ["status", "claims", "sourceQuality"],
   properties: {
+    status: { enum: ["ok", "irrelevant", "paywalled", "failed"] },
     sourceQuality: { enum: ["primary", "secondary", "blog", "forum", "unreliable"] },
     publishDate: { type: "string" },
+    errorReason: { type: "string" },
     claims: { type: "array", maxItems: 5, items: {
       type: "object", required: ["claim", "quote", "importance"],
       properties: {
@@ -174,10 +178,7 @@ const scope = await callAgent(
 if (!scope) {
   return { error: "Scope agent returned no result — cannot decompose the research question." }
 }
-log("Q: " + QUESTION.slice(0, 80) + (QUESTION.length > 80 ? "…" : ""))
-log("Decomposed into " + scope.angles.length + " angles: " + scope.angles.map(a => a.label).join(", "))
-
-// ─── Dedup state — accumulates across searchers as they complete ───
+// ─── Deterministic URL parsing and safe progress labels ───
 // The workflow sandbox is a bare ECMAScript realm — no URL global — so
 // hostname/path come from a regex: captures (1) hostname (userinfo, www.,
 // and port stripped) and (2) pathname. Neither userinfo nor host admits
@@ -188,10 +189,23 @@ log("Decomposed into " + scope.angles.length + " angles: " + scope.angles.map(a 
 // stopping at the first @ would label x@trusted.com@evil.com as
 // trusted.com while the fetch contacts evil.com. The host class still
 // excludes @, so the userinfo group consumes every @ up to the last one.
-const URL_HOST_PATTERN = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#\\]*@)?(?:www\.)?([^/:?#@\\]+)(?::\d+)?([^?#]*)/i
-const normURL = u => {
-  const m = String(u).match(URL_HOST_PATTERN)
-  return m ? (m[1] + m[2].replace(/\/$/, "")).toLowerCase() : String(u).toLowerCase()
+const URL_HOST_PATTERN = /^https?:\/\/(?:[^/?#\\\s]*@)?(?:www\.)?([^/:?#@\\\s]+)(?::\d+)?([^?#\s]*)/i
+const HTTP_URL_PATTERN = /^(https?):\/\/(?:[^/?#\\\s]*@)?(\[[0-9a-f:.]+\]|[^/:?#@\\\s]+)(?::(\d+))?(\/[^?#\\\s]*)?(\?[^#\\\s]*)?(?:#[^\s]*)?$/i
+const normalizedURL = value => {
+  const match = String(value).match(HTTP_URL_PATTERN)
+  if (!match) return null
+  const scheme = match[1].toLowerCase()
+  let host = match[2].toLowerCase()
+  if (!host.startsWith("[") && host.startsWith("www.")) host = host.slice(4)
+  const portNumber = match[3] === undefined ? null : Number(match[3])
+  if (portNumber !== null && portNumber > 65535) return null
+  const port = portNumber !== null && !(
+    (scheme === "http" && portNumber === 80) ||
+    (scheme === "https" && portNumber === 443)
+  ) ? ":" + portNumber : ""
+  const path = (match[4] || "").replace(/\/$/, "")
+  const query = match[5] || ""
+  return scheme + "://" + host + port + path + query
 }
 // Host and title both come from web content and reach the terminal via the
 // progress label. Two hazards: forging a trusted hostname, and smuggling
@@ -203,7 +217,7 @@ const normURL = u => {
 // U+201C-201F, U+2033, U+2036, U+275D, U+275E, U+301D, U+301E, U+FF02 — any of
 // which would visually close the quoted fallback early and forge host-shaped
 // text after it). STRICT_HOST is the strict registrable-hostname charset a
-// bare label must match (dot-separated LDH labels). normURL keeps the raw
+// bare label must match (dot-separated LDH labels). normalizedURL keeps the raw
 // capture: dedup keys are never rendered, and stripping there could collide
 // distinct URLs.
 const LABEL_CAP = 40
@@ -218,15 +232,15 @@ const quotedLabel = s => {
   const cps = Array.from(stripLabelChars(s))
   return '"' + cps.slice(0, LABEL_CAP).join("").trim() + (cps.length > LABEL_CAP ? "\u2026" : "") + '"'
 }
+log("Q: " + quotedLabel(QUESTION))
+log("Decomposed into " + scope.angles.length + " angles: " + scope.angles.map(a => quotedLabel(a.label)).join(", "))
+
 const seen = new Map()
 const dupes = []
 const budgetDropped = []
-// Angles whose searcher returned nothing. Without this, stats reports the number
-// of angles PLANNED, so a run where 4 of 5 searchers died still claims 5 angles
-// of coverage — the user trusts a one-angle answer as a five-angle one.
-const failedAngles = []
+const invalidURLs = []
+const fetchBudgetDropped = []
 const relRank = { high: 0, medium: 1, low: 2 }
-let fetchSlots = MAX_FETCH
 
 // ─── Prompts ───
 const SEARCH_PROMPT = (angle) =>
@@ -236,7 +250,9 @@ const SEARCH_PROMPT = (angle) =>
   "Search query: `" + angle.query + "`\n\n" +
   "## Task\nUse WebSearch with the query above (or a refined version). Return the top 4-6 most relevant results.\n" +
   "Rank by relevance to the ORIGINAL question, not just the search query. Skip obvious SEO spam/content farms.\n" +
-  "Include a short snippet capturing why each result is relevant.\n\nStructured output only."
+  "Include a short snippet capturing why each result is relevant.\n" +
+  "Set status=\"ok\" only when results is non-empty. Set status=\"no_results\" when the search completed but found nothing useful. " +
+  "Set status=\"failed\" for rate limits, tool/API errors, or other search failures. For failed, include a concise errorReason and results: [].\n\nStructured output only."
 
 const FETCH_PROMPT = (source, angle) =>
   "## Source Extractor\n\n" +
@@ -253,7 +269,9 @@ const FETCH_PROMPT = (source, angle) =>
   "   - include a direct quote from the source as support\n" +
   "   - be rated central/supporting/tangential to the research question\n" +
   "4. Note publish date if available.\n\n" +
-  "If the fetch fails or the page is irrelevant/paywalled, return claims: [] and sourceQuality: \"unreliable\".\n\nStructured output only."
+  "Set status=\"ok\" only when the page was fetched and assessed; claims may be empty when it contains no falsifiable claims. " +
+  "Set status=\"irrelevant\", \"paywalled\", or \"failed\" when applicable, return claims: [], and include a concise errorReason explaining the state. " +
+  "Use sourceQuality=\"unreliable\" when quality cannot be assessed.\n\nStructured output only."
 
 const VERIFY_PROMPT = (claim, v) =>
   "## Adversarial Claim Verifier (voter " + (v + 1) + "/" + VOTES_PER_CLAIM + ")\n\n" +
@@ -280,108 +298,162 @@ const VERIFY_PROMPT = (claim, v) =>
   "**refuted=false** ONLY if: claim is well-supported, current, and source quality matches claim strength.\n" +
   "Default to refuted=true if uncertain.\n\nStructured output only. Evidence MUST be specific."
 
-// ─── Pipeline: search → dedup → fetch+extract (no barrier) ───
-const searchResults = await pipeline(
-  scope.angles,
-
-  angle => callAgent(SEARCH_PROMPT(angle), {
-    label: "search:" + angle.label, phase: "Search", schema: SEARCH_SCHEMA,
-    model: "haiku", effort: "low"
-  }).then(r => {
-    // null = user skip or terminal agent error. The runtime short-circuits this
-    // item's remaining pipeline stages, so returning null is the right drop —
-    // but record it, or the loss never surfaces anywhere the user looks.
-    if (!r) {
-      failedAngles.push(angle.label)
-      log(angle.label + ": SEARCH FAILED — angle dropped")
-      return null
-    }
-    log(angle.label + ": " + r.results.length + " results")
-    return { angle: angle.label, results: r.results }
-  }),
-
-  searchResult => {
-    const sorted = [...searchResult.results].sort((a, b) => relRank[a.relevance] - relRank[b.relevance])
-    const novel = sorted.filter(r => {
-      const key = normURL(r.url)
-      if (seen.has(key)) {
-        dupes.push({ ...r, angle: searchResult.angle, dupOf: seen.get(key) })
-        return false
-      }
-      // MAX_FETCH is a hard cap, not a hint. Exempting relevance:"high" here
-      // made it advisory — a model rates most of its own picks high, so 6 angles
-      // × 6 results could all pass, spawning up to 36 fetch agents against a
-      // nominal cap of 15 while fetchSlots ran negative.
-      if (fetchSlots <= 0) {
-        budgetDropped.push({ ...r, angle: searchResult.angle })
-        return false
-      }
-      seen.set(key, { angle: searchResult.angle, title: r.title })
-      fetchSlots--
-      return true
-    })
-    if (novel.length < searchResult.results.length) {
-      log(searchResult.angle + ": " + novel.length + " novel (" + (searchResult.results.length - novel.length) + " filtered)")
-    }
-    return parallel(
-      novel.map(source => () => {
-        // A bare fetch:<host> label asserts the real fetch host, so emit it
-        // ONLY when the captured host is a verbatim, complete, un-truncated,
-        // strict-ASCII hostname that sanitization left untouched. Any
-        // deviation routes through the same quoted+ellipsis helper as the
-        // title fallback, so a lossy display value can never masquerade as the
-        // true host: non-ASCII (an IDN homograph like Cyrillic "аmazon.com",
-        // which WebFetch resolves via punycode unavailable in this realm),
-        // invalid host chars, a host long enough to need truncation (a bare
-        // prefix could show a trusted-looking domain while the real host
-        // differs), or a host sanitize altered (deleting a control char would
-        // turn exa<ctrl>mple.com into example.com, which is not the real host).
-        const capturedHost = String(source.url).match(URL_HOST_PATTERN)?.[1] ?? ""
-        const host = capturedHost.toLowerCase()
-        const cleanHost = stripLabelChars(host)
-        const isCleanBareHost = cleanHost === host && host !== "" && Array.from(host).length <= LABEL_CAP && STRICT_HOST.test(host)
-        const hostLabel = cleanHost === "" ? "" : isCleanBareHost ? host : quotedLabel(host)
-        const sourceLabel = hostLabel || (stripLabelChars(source.title).trim() && quotedLabel(source.title)) || "unknown"
-        return callAgent(FETCH_PROMPT(source, searchResult.angle), {
-          label: "fetch:" + sourceLabel,
-          phase: "Fetch",
-          schema: EXTRACT_SCHEMA,
-          model: "haiku",
-          effort: "low",
-        }).then(ext => {
-          // User-skip → null; drop it (filtered by searchResults.flat().filter(Boolean))
-          // rather than throwing into .catch() and mislabeling it "unreliable".
-          if (!ext) {
-            log("fetch skipped: " + quotedLabel(source.url))
-            return null
-          }
-          return {
-            url: source.url, title: source.title, angle: searchResult.angle,
-            sourceQuality: ext.sourceQuality, publishDate: ext.publishDate,
-            // publishDate rides on each claim so VERIFY_PROMPT's staleness check
-            // has a date to judge; without it that checklist item ran blind.
-            claims: ext.claims.map(c => ({ ...c, sourceUrl: source.url, sourceQuality: ext.sourceQuality, publishDate: ext.publishDate })),
-          }
-        }).catch(e => {
-          // This .catch sits on the thunk, so it runs BEFORE the runtime's own
-          // parallel handler. A budget-exceeded throw must not be laundered into
-          // sourceQuality "unreliable" — that would report a token limit as a
-          // research judgment about the source and suppress the runtime's
-          // "N slots dropped — token budget exceeded" tally. Drop it as null
-          // (same as a user skip) and count it where it belongs.
-          if (e?.name === "WorkflowBudgetExceededError") {
-            budgetDropped.push({ url: source.url, angle: searchResult.angle })
-            return null
-          }
-          log("fetch failed: " + quotedLabel(source.url) + " — " + stripLabelChars(e?.message || String(e)))
-          return { url: source.url, title: source.title, angle: searchResult.angle, sourceQuality: "unreliable", claims: [], fetchErrored: true }
-        })
+// ─── Search barrier → deterministic selection → fetch+extract ───
+// Promise.all/parallel preserves input order even when agents finish out of
+// order. Selection starts only after every search settles, so completion timing
+// cannot decide which angle consumes the fetch budget.
+const searchOutcomes = await parallel(
+  scope.angles.map(angle => async () => {
+    let response
+    try {
+      response = await callAgent(SEARCH_PROMPT(angle), {
+        label: "search:" + quotedLabel(angle.label),
+        phase: "Search",
+        schema: SEARCH_SCHEMA,
+        model: "haiku",
+        effort: "low",
       })
-    )
-  }
+    } catch (e) {
+      response = { status: "failed", results: [], errorReason: e?.message || String(e) }
+    }
+
+    if (!response) {
+      response = { status: "failed", results: [], errorReason: "agent returned no result" }
+    }
+    const results = Array.isArray(response.results) ? response.results : []
+    const status = response.status === "ok" && results.length === 0
+      ? "no_results"
+      : response.status === "no_results"
+        ? "no_results"
+        : response.status === "ok"
+          ? "ok"
+          : "failed"
+    if (status === "failed") {
+      log(quotedLabel(angle.label) + ": SEARCH FAILED — " + stripLabelChars(response.errorReason || "unknown error"))
+    } else {
+      log(quotedLabel(angle.label) + ": " + results.length + " results")
+    }
+    return { angle, status, results: status === "ok" ? results : [], errorReason: response.errorReason }
+  })
 )
 
-const allSources = searchResults.flat().filter(Boolean)
+// Sort within each angle, then take at most one novel valid URL per angle on
+// every round. Search completion order never enters this loop: searchOutcomes
+// and these queues retain the original scope order.
+const selectedSources = []
+const anglesWithValidURLs = new Set()
+const queues = searchOutcomes
+  .filter(outcome => outcome.status === "ok")
+  .map(outcome => ({
+    outcome,
+    cursor: 0,
+    results: [...outcome.results].sort((a, b) => relRank[a.relevance] - relRank[b.relevance]),
+  }))
+
+let candidatesRemain = true
+while (candidatesRemain) {
+  candidatesRemain = false
+  for (const queue of queues) {
+    while (queue.cursor < queue.results.length) {
+      candidatesRemain = true
+      const source = queue.results[queue.cursor++]
+      const key = normalizedURL(source.url)
+      if (!key) {
+        invalidURLs.push({ ...source, angle: queue.outcome.angle.label })
+        continue
+      }
+      anglesWithValidURLs.add(queue.outcome.angle.label)
+      if (seen.has(key)) {
+        dupes.push({ ...source, angle: queue.outcome.angle.label, dupOf: seen.get(key) })
+        continue
+      }
+      seen.set(key, { angle: queue.outcome.angle.label, title: source.title })
+      if (selectedSources.length >= MAX_FETCH) {
+        budgetDropped.push({ ...source, angle: queue.outcome.angle.label })
+      } else {
+        selectedSources.push({ source, angle: queue.outcome.angle })
+      }
+      // At most one novel valid candidate from this angle in this round.
+      break
+    }
+  }
+}
+
+const selectedAngles = new Set(selectedSources.map(item => item.angle.label))
+const anglesWithoutFetch = searchOutcomes.filter(outcome =>
+  outcome.status === "ok" &&
+  anglesWithValidURLs.has(outcome.angle.label) &&
+  !selectedAngles.has(outcome.angle.label)
+)
+
+const fetchResults = await parallel(
+  selectedSources.map(({ source, angle }) => async () => {
+    // A bare fetch:<host> label asserts the real fetch host, so emit it only
+    // for an unchanged, complete, strict-ASCII hostname.
+    const capturedHost = String(source.url).match(URL_HOST_PATTERN)?.[1] ?? ""
+    const host = capturedHost.toLowerCase()
+    const cleanHost = stripLabelChars(host)
+    const isCleanBareHost = cleanHost === host && host !== "" && Array.from(host).length <= LABEL_CAP && STRICT_HOST.test(host)
+    const hostLabel = cleanHost === "" ? "" : isCleanBareHost ? host : quotedLabel(host)
+    const sourceLabel = hostLabel || (stripLabelChars(source.title).trim() && quotedLabel(source.title)) || "unknown"
+
+    let ext
+    try {
+      // Keep the catch boundary on the agent await only. Schema transforms
+      // below may throw programming errors, which must remain visible.
+      ext = await callAgent(FETCH_PROMPT(source, angle.label), {
+        label: "fetch:" + sourceLabel,
+        phase: "Fetch",
+        schema: EXTRACT_SCHEMA,
+        model: "haiku",
+        effort: "low",
+      })
+    } catch (e) {
+      if (e?.name === "WorkflowBudgetExceededError") {
+        const dropped = { url: source.url, angle: angle.label }
+        budgetDropped.push(dropped)
+        fetchBudgetDropped.push(dropped)
+        return null
+      }
+      ext = { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: e?.message || String(e) }
+    }
+
+    if (!ext) {
+      ext = { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: "agent returned no result" }
+    }
+    const status = ["ok", "irrelevant", "paywalled", "failed"].includes(ext.status) ? ext.status : "failed"
+    if (status !== "ok") {
+      const action = status === "failed" ? "failed" : "skipped (" + status + ")"
+      log("fetch " + action + ": " + quotedLabel(source.url) + " — " + stripLabelChars(ext.errorReason || "no reason provided"))
+      return {
+        url: source.url,
+        title: source.title,
+        angle: angle.label,
+        status,
+        sourceQuality: ext.sourceQuality || "unreliable",
+        claims: [],
+      }
+    }
+
+    return {
+      url: source.url,
+      title: source.title,
+      angle: angle.label,
+      status,
+      sourceQuality: ext.sourceQuality,
+      publishDate: ext.publishDate,
+      claims: ext.claims.map(c => ({
+        ...c,
+        sourceUrl: source.url,
+        sourceQuality: ext.sourceQuality,
+        publishDate: ext.publishDate,
+      })),
+    }
+  })
+)
+
+const completedFetches = fetchResults.filter(Boolean)
+const allSources = completedFetches.filter(source => source.status === "ok")
 const allClaims = allSources.flatMap(s => s.claims)
 const impRank = { central: 0, supporting: 1, tangential: 2 }
 const qualRank = { primary: 0, secondary: 1, blog: 2, forum: 3, unreliable: 4 }
@@ -394,11 +466,16 @@ const confRank = { high: 0, medium: 1, low: 2 }
 // scope.angles.length alone claimed 5 angles even when 4 searchers died.
 const baseStats = extra => ({
   anglesPlanned: scope.angles.length,
-  anglesSucceeded: scope.angles.length - failedAngles.length,
-  anglesFailed: failedAngles.length,
+  anglesSucceeded: searchOutcomes.filter(outcome => outcome.status === "ok").length,
+  anglesNoResults: searchOutcomes.filter(outcome => outcome.status === "no_results").length,
+  anglesFailed: searchOutcomes.filter(outcome => outcome.status === "failed").length,
+  anglesWithoutFetch: anglesWithoutFetch.length,
+  sourcesSelected: selectedSources.length,
   sourcesFetched: allSources.length,
-  fetchErrored: allSources.filter(s => s.fetchErrored).length,
+  fetchSkipped: completedFetches.filter(source => source.status === "irrelevant" || source.status === "paywalled").length,
+  fetchErrored: completedFetches.filter(source => source.status === "failed").length,
   urlDupes: dupes.length,
+  invalidUrlDropped: invalidURLs.length,
   budgetDropped: budgetDropped.length,
   ...extra,
 })
@@ -414,25 +491,29 @@ if (rankedClaims.length === 0) {
   // already draws that line; search and fetch did not. Reporting a total search
   // failure as "no claims found" invites abandoning a question that was never
   // actually researched.
-  const errored = allSources.filter(s => s.fetchErrored).length
+  const failedSearches = searchOutcomes.filter(outcome => outcome.status === "failed")
+  const errored = completedFetches.filter(source => source.status === "failed").length
+  const fetchInfrastructureFailure = selectedSources.length > 0 && allSources.length === 0 && (
+    errored > 0 || fetchBudgetDropped.length === selectedSources.length
+  )
   let summary
-  if (failedAngles.length === scope.angles.length) {
+  if (failedSearches.length === scope.angles.length) {
     summary = "All " + scope.angles.length + " search angles failed (likely rate-limiting or API errors). This is an infrastructure failure, not a research finding — retry."
-  } else if (allSources.length > 0 && errored === allSources.length) {
-    summary = "Every one of " + allSources.length + " source fetches failed. Infrastructure failure, not a research finding — retry."
+  } else if (fetchInfrastructureFailure) {
+    summary = "No selected source could be fetched and " + errored + " fetches failed. Infrastructure failure, not a research finding — retry."
   } else {
     summary = "No claims extracted. " + allSources.length + " sources fetched" + (errored > 0 ? " (" + errored + " errored)" : "") + ", none yielded checkable claims. " + dupes.length + " URL dupes, " + budgetDropped.length + " budget-dropped."
   }
-  if (failedAngles.length > 0 && failedAngles.length < scope.angles.length) {
-    summary += " Angles that failed: " + failedAngles.join(", ") + "."
+  if (failedSearches.length > 0 && failedSearches.length < scope.angles.length) {
+    summary += " Angles that failed: " + failedSearches.map(outcome => stripLabelChars(outcome.angle.label)).join(", ") + "."
   }
-  return {
+  return makeResult({
+    status: failedSearches.length === scope.angles.length || fetchInfrastructureFailure ? "infrastructure_failure" : "no_claims",
     question: QUESTION,
     summary,
-    findings: [], refuted: [], unverified: [],
     sources: allSources.map(s => ({ url: s.url, quality: s.sourceQuality, publishDate: s.publishDate })),
     stats: baseStats({ claimsExtracted: 0, claimsVerified: 0 }),
-  }
+  })
 }
 
 // ─── Verify: 3-vote adversarial ───
