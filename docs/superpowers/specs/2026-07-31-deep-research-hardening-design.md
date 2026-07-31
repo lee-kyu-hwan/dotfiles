@@ -133,16 +133,16 @@ delimiter 조기 종료를 막지만 prompt injection을 완전히 제거하지�
 
 ```text
 title: string
-claim: string
 claimIds: string[]  // minItems: 1
 confidence: "high" | "medium" | "low"
 ```
 
 워크플로 코드는 모든 `claimIds`가 confirmed map에 존재하는지 검증한다.
-최종 `sources`, `votes`, `quotes`, verifier evidence는 해당 confirmed claim에서
-재구성한다. 허용되지 않은 ID나 빈 ID 배열이 있으면 synthesis 실패로 취급해
-이미 검증된 claim을 salvage한다. 합성 결과를 `...report`로 직접 spread하지
-않는다.
+최종 finding의 `claims`, `sources`, `votes`, `quotes`, verifier evidence는
+해당 confirmed claim에서 재구성한다. 모델은 finding 제목과 grouping,
+confidence만 제안할 수 있으며 새로운 claim 문장을 만들 수 없다. 허용되지
+않은 ID나 빈 ID 배열이 있으면 synthesis 실패로 취급해 이미 검증된 claim을
+salvage한다. 합성 결과를 `...report`로 직접 spread하지 않는다.
 
 ## 검색과 fetch 선택
 
