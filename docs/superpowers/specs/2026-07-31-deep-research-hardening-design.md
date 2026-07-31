@@ -174,10 +174,13 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
   `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
   408·409·429·5xx, 알려진 재시도 가능 API error type/code만
   `unverified` 표로 처리한다. SDK를 import할 수 없는 워크플로 sandbox에서는
-  이름·status·type/code를 명시적으로 duck-type 판별한다.
+  실제 `Error` subclass의 `constructor.name`과 직렬화된 오류의 안전한
+  `name`·status·type/code shape를 함께 duck-type 판별한다.
 - Verifier의 prompt와 호출 options는 `try` 밖에서 만든다. 일반 `Error`,
   `TypeError`·`ReferenceError`·`SyntaxError`·`RangeError`와 인증·권한·잘못된
-  요청 같은 비재시도 오류는 숨기지 않고 전파한다.
+  요청 같은 비재시도 오류는 숨기지 않고 전파한다. 내장 프로그래밍 오류
+  constructor와 HTTP 400~499(408·409·429 제외) 판정은 retryable 이름·flag·
+  type/code보다 우선한다.
 - claim 단위 병렬 결과가 null이어도 원 claim을 보존해 unverified panel을
   만든다.
 - Synthesis throw, null, provenance 검증 실패는 `synthesis_failed` salvage를

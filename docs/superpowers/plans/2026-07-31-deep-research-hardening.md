@@ -621,7 +621,10 @@ const voted = rankedClaims.map(claim =>
 오류, 워크플로 budget 오류, 명시적 retryable 신호, HTTP
 408·409·429·5xx를 `null` 표로 바꾼다. 일반 프로그래밍 오류와 인증·권한·잘못된
 요청 오류는 다시 throw한다. 워크플로 sandbox에서는 SDK를 import할 수 없으므로
-공식 오류 이름과 `status`, `type`/`code`를 좁게 duck-type 판별한다.
+실제 subclass의 `constructor.name`과 직렬화된 오류의 `name`, `status`,
+`type`/`code`를 좁게 duck-type 판별한다. `Error`·`TypeError` 등 내장
+프로그래밍 오류 constructor와 HTTP 400~499(408·409·429 제외)는 충돌하는
+retryable 이름·flag·type/code보다 먼저 비복구 대상으로 판정한다.
 
 - [ ] **Step 4: 2표 판정 테스트 추가**
 

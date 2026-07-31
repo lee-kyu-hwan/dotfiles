@@ -108,8 +108,40 @@ const verifierResult = (outcome, evidence = outcome + " evidence") => ({
   confidence: "high",
 })
 
-const agentError = (name, properties = {}) =>
-  Object.assign(new Error(name + " fixture"), { name }, properties)
+class APIConnectionError extends Error {}
+class APIConnectionTimeoutError extends Error {}
+class RetryableError extends Error {}
+class RateLimitError extends Error {}
+class InternalServerError extends Error {}
+class WorkflowBudgetExceededError extends Error {}
+class BadRequestError extends Error {}
+class AuthenticationError extends Error {}
+class PermissionDeniedError extends Error {}
+class CustomAgentError extends Error {}
+class APIError extends Error {}
+
+const structuredAgentError = properties => ({
+  message: "structured agent error fixture",
+  ...properties,
+})
+
+const conflictingProgrammingError = error =>
+  Object.assign(error, {
+    name: "APIConnectionError",
+    retryable: true,
+    status: 503,
+    type: "api_error",
+    code: "connection_error",
+  })
+
+const conflictingClientError = (status, name = "APIError") =>
+  structuredAgentError({
+    name,
+    status,
+    retryable: true,
+    type: "api_error",
+    code: "connection_error",
+  })
 
 const synthesisReport = claimIds => ({
   summary: "Synthesis summary",
@@ -674,7 +706,7 @@ test("개별 verifier 연결 오류는 나머지 투표를 잃지 않고 unverif
     args: "테스트 질문",
     respond: async call => {
       if (call.options.phase === "Verify" && call.options.label.startsWith("v2:")) {
-        throw agentError("APIConnectionError")
+        throw new APIConnectionError("verifier service unavailable")
       }
       return baseResponder(call)
     },
@@ -696,19 +728,26 @@ test("개별 verifier 연결 오류는 나머지 투표를 잃지 않고 unverif
 
 test("명시적인 verifier 인프라 오류만 unverified 표로 복구한다", async t => {
   const recoverableErrors = [
-    ["workflow budget", agentError("WorkflowBudgetExceededError")],
-    ["API connection", agentError("APIConnectionError")],
-    ["API connection timeout", agentError("APIConnectionTimeoutError")],
-    ["SDK retryable", agentError("RetryableError")],
-    ["rate limit class", agentError("RateLimitError")],
-    ["internal server class", agentError("InternalServerError")],
-    ["retryable flag", agentError("AgentError", { retryable: true })],
-    ["HTTP 408", agentError("APIError", { status: 408 })],
-    ["HTTP 409", agentError("APIError", { status: 409 })],
-    ["HTTP 429", agentError("APIError", { status: 429 })],
-    ["HTTP 5xx", agentError("APIError", { status: 503 })],
-    ["API error type", agentError("APIError", { type: "overloaded_error" })],
-    ["API error code", agentError("APIError", { code: "timeout_error" })],
+    ["workflow budget constructor", new WorkflowBudgetExceededError("budget")],
+    ["API connection constructor", new APIConnectionError("connection")],
+    ["API connection timeout constructor", new APIConnectionTimeoutError("timeout")],
+    ["SDK retryable constructor", new RetryableError("retryable")],
+    ["rate limit constructor", new RateLimitError("rate limit")],
+    ["internal server constructor", new InternalServerError("internal")],
+    ["custom Error subclass retryable flag", Object.assign(
+      new CustomAgentError("custom retryable"),
+      { retryable: true },
+    )],
+    ["serialized API connection name", structuredAgentError({
+      name: "APIConnectionError",
+    })],
+    ["structured retryable flag", structuredAgentError({ retryable: true })],
+    ["APIError HTTP 408", Object.assign(new APIError("408"), { status: 408 })],
+    ["APIError HTTP 409", Object.assign(new APIError("409"), { status: 409 })],
+    ["APIError HTTP 429", Object.assign(new APIError("429"), { status: 429 })],
+    ["structured HTTP 5xx", structuredAgentError({ status: 503 })],
+    ["structured API error type", structuredAgentError({ type: "overloaded_error" })],
+    ["structured API error code", structuredAgentError({ code: "timeout_error" })],
   ]
 
   for (const [label, injectedError] of recoverableErrors) {
@@ -739,22 +778,40 @@ test("명시적인 verifier 인프라 오류만 unverified 표로 복구한다",
 
 test("verifier의 프로그래밍 오류와 비재시도 API 오류는 전파한다", async t => {
   const fatalErrors = [
-    ["generic Error", new Error("generic verifier bug")],
-    ["TypeError", new TypeError("verifier type bug")],
-    ["ReferenceError", new ReferenceError("verifier reference bug")],
-    ["SyntaxError", new SyntaxError("verifier syntax bug")],
-    ["RangeError", new RangeError("verifier range bug")],
-    ["bad request class", agentError("BadRequestError", { status: 400 })],
-    ["bad request status", agentError("APIError", {
-      status: 400,
-      retryable: true,
-      type: "api_error",
-    })],
-    ["authentication class", agentError("AuthenticationError", { status: 401 })],
-    ["permission class", agentError("PermissionDeniedError", { status: 403 })],
-    ["not found status", agentError("APIError", { status: 404 })],
-    ["unprocessable status", agentError("APIError", { status: 422 })],
-    ["invalid request type", agentError("APIError", { type: "invalid_request_error" })],
+    ["generic Error with conflicting recovery tags", conflictingProgrammingError(
+      new Error("generic verifier bug"),
+    )],
+    ["TypeError with conflicting recovery tags", conflictingProgrammingError(
+      new TypeError("verifier type bug"),
+    )],
+    ["ReferenceError with conflicting recovery tags", conflictingProgrammingError(
+      new ReferenceError("verifier reference bug"),
+    )],
+    ["SyntaxError with conflicting recovery tags", conflictingProgrammingError(
+      new SyntaxError("verifier syntax bug"),
+    )],
+    ["RangeError with conflicting recovery tags", conflictingProgrammingError(
+      new RangeError("verifier range bug"),
+    )],
+    ["bad request constructor with conflicts", Object.assign(
+      new BadRequestError("bad request"),
+      { retryable: true, status: 503, type: "api_error" },
+    )],
+    ["authentication constructor with conflicts", Object.assign(
+      new AuthenticationError("authentication"),
+      { retryable: true, status: 503, type: "api_error" },
+    )],
+    ["permission constructor with conflicts", Object.assign(
+      new PermissionDeniedError("permission"),
+      { retryable: true, status: 503, type: "api_error" },
+    )],
+    ["HTTP 400 with conflicts", conflictingClientError(400, "BadRequestError")],
+    ["HTTP 401 with conflicts", conflictingClientError(401, "AuthenticationError")],
+    ["HTTP 403 with conflicts", conflictingClientError(403, "PermissionDeniedError")],
+    ["HTTP 404 with conflicts", conflictingClientError(404)],
+    ["HTTP 405 with conflicts", conflictingClientError(405)],
+    ["HTTP 422 with conflicts", conflictingClientError(422)],
+    ["invalid request type", structuredAgentError({ type: "invalid_request_error" })],
   ]
 
   for (const [label, injectedError] of fatalErrors) {

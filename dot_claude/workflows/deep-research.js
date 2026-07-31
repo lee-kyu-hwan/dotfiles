@@ -36,6 +36,7 @@ const RECOVERABLE_AGENT_ERROR_NAMES = new Set([
   "WorkflowBudgetExceededError",
 ])
 const NON_RECOVERABLE_AGENT_ERROR_NAMES = new Set([
+  "Error",
   "TypeError",
   "ReferenceError",
   "SyntaxError",
@@ -57,9 +58,29 @@ const RECOVERABLE_AGENT_ERROR_TYPES = new Set([
 const isRecoverableAgentError = error => {
   if (!error || (typeof error !== "object" && typeof error !== "function")) return false
   const status = error.status
-  if (NON_RECOVERABLE_AGENT_ERROR_NAMES.has(error.name)) return false
-  if (status === 400 || status === 401 || status === 403) return false
-  if (RECOVERABLE_AGENT_ERROR_NAMES.has(error.name) || error.retryable === true) return true
+  if (
+    typeof status === "number" &&
+    status >= 400 &&
+    status <= 499 &&
+    status !== 408 &&
+    status !== 409 &&
+    status !== 429
+  ) {
+    return false
+  }
+
+  const constructorName =
+    typeof error.constructor?.name === "string" ? error.constructor.name : ""
+  const serializedName = typeof error.name === "string" ? error.name : ""
+  if (NON_RECOVERABLE_AGENT_ERROR_NAMES.has(constructorName)) return false
+  if (RECOVERABLE_AGENT_ERROR_NAMES.has(constructorName)) return true
+  if (
+    NON_RECOVERABLE_AGENT_ERROR_NAMES.has(serializedName) &&
+    (serializedName !== "Error" || constructorName === "Object" || !constructorName)
+  ) {
+    return false
+  }
+  if (RECOVERABLE_AGENT_ERROR_NAMES.has(serializedName) || error.retryable === true) return true
   if (
     typeof status === "number" &&
     (status === 408 || status === 409 || status === 429 || (status >= 500 && status <= 599))
