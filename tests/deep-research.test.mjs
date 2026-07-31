@@ -562,6 +562,7 @@ test("합성 claim ID를 원본 provenance로 결정적으로 확장하고 중�
   assert.deepEqual(result.findings, [{
     title: "Verified finding",
     confidence: "high",
+    claimIds: ["c0"],
     claims: ["Verified fact"],
     sources: [sourceUrl],
     sourceDetails: [{

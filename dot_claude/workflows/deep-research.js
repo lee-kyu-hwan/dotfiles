@@ -697,6 +697,7 @@ const buildFinding = (finding, claimsById) => {
   return {
     title: finding.title,
     confidence: finding.confidence,
+    claimIds,
     claims: claims.map(claim => claim.claim),
     sources,
     sourceDetails: claims.map(claim => ({
