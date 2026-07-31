@@ -544,7 +544,7 @@ if (rankedClaims.length === 0) {
 // Barrier here is intentional — claim pool must be fully assembled before ranking/verification.
 phase("Verify")
 const adjudicate = (claim, verdicts = []) => {
-  const presentVerdicts = verdicts.filter(Boolean)
+  const presentVerdicts = (Array.isArray(verdicts) ? verdicts : []).filter(Boolean)
   const supportedVotes = presentVerdicts.filter(v => v.outcome === "supported").length
   const refutedVotes = presentVerdicts.filter(v => v.outcome === "refuted").length
   const erroredVotes = VOTES_PER_CLAIM - supportedVotes - refutedVotes
@@ -565,20 +565,24 @@ const adjudicate = (claim, verdicts = []) => {
 const panelResults = await parallel(
   rankedClaims.map(claim => () =>
     parallel(
-      Array.from({ length: VOTES_PER_CLAIM }, (_, v) => () =>
+      Array.from({ length: VOTES_PER_CLAIM }, (_, v) => async () => {
         // Verification is this harness's entire point, so these agents inherit the
         // session model and effort instead of pinning a cheap tier. The prompt
         // requires an explicit supported/refuted/unverified outcome, so use the
         // strongest available verifier for merit-based adjudication and reliable
         // separation of infrastructure failures.
-        callAgent(VERIFY_PROMPT(claim, v), {
-          // claim.claim is model-extracted web page text: untrusted, same as a
-          // fetch label. Route it through quotedLabel rather than raw slice.
-          label: "v" + v + ":" + quotedLabel(claim.claim),
-          phase: "Verify",
-          schema: VERDICT_SCHEMA,
-        })
-      )
+        try {
+          return await callAgent(VERIFY_PROMPT(claim, v), {
+            // claim.claim is model-extracted web page text: untrusted, same as a
+            // fetch label. Route it through quotedLabel rather than raw slice.
+            label: "v" + v + ":" + quotedLabel(claim.claim),
+            phase: "Verify",
+            schema: VERDICT_SCHEMA,
+          })
+        } catch {
+          return null
+        }
+      })
     ).then(verdicts => {
       return adjudicate(claim, verdicts)
     })

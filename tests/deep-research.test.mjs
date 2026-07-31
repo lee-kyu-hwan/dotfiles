@@ -659,6 +659,66 @@ test("supported-refuted-null 패널은 1-1 (1 errored) unverified로 보존한�
   assert.equal(result.unverified[0].erroredVotes, 1)
 })
 
+test("개별 verifier 예외는 나머지 투표를 잃지 않고 unverified로 보존한다", async () => {
+  const baseResponder = makeSingleClaimResponder({
+    verdicts: [
+      verifierResult("supported"),
+      verifierResult("refuted"),
+      verifierResult("supported"),
+    ],
+  })
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async call => {
+      if (call.options.phase === "Verify" && call.options.label.startsWith("v2:")) {
+        throw new Error("verifier service unavailable")
+      }
+      return baseResponder(call)
+    },
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assertResultContract(result)
+  result.sources.forEach(assertSourceContract)
+  assert.equal(result.stats.agentCalls, calls.length)
+  assert.equal(result.stats.agentCalls, 8)
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(result.stats.verifierErrored, 1)
+  assert.equal(result.unverified[0].vote, "1-1 (1 errored)")
+  assert.equal(result.unverified[0].erroredVotes, 1)
+})
+
+test("inner verifier panel의 null은 0-0 (3 errored) unverified로 정규화한다", async () => {
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("supported"),
+      ],
+    }),
+    parallelOverride: async (tasks, run, callIndex) =>
+      callIndex === 3 ? null : run(tasks),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assertResultContract(result)
+  result.sources.forEach(assertSourceContract)
+  assert.equal(result.stats.agentCalls, calls.length)
+  assert.equal(result.stats.agentCalls, 5)
+  assert.equal(result.stats.claimsVerified, 1)
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.killed, 0)
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(result.stats.verifierErrored, 3)
+  assert.equal(result.unverified[0].vote, "0-0 (3 errored)")
+  assert.equal(result.unverified[0].erroredVotes, 3)
+})
+
 test("supported 두 표와 unverified 한 표는 claim을 확인하고 합성한다", async () => {
   const { result, calls } = await runWorkflow({
     args: "테스트 질문",

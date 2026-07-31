@@ -681,14 +681,7 @@ git commit -m "fix: 미결 검증 패널을 unverified로 보존한다"
 
 ```js
 const synthesisReport = claimIds => ({
-  summary: "summary",
-  findings: [{
-    title: "Finding",
-    claimIds,
-    confidence: "high",
-  }],
-  caveats: "none",
-  openQuestions: [],
+  findings: [{ claimIds }],
 })
 
 test("합성기가 존재하지 않는 claim ID를 반환하면 salvage한다", async () => {
@@ -729,27 +722,24 @@ Expected: FAIL because the current schema accepts arbitrary sources/votes and sp
 ```js
 const REPORT_SCHEMA = {
   type: "object",
-  required: ["summary", "findings", "caveats"],
+  required: ["findings"],
+  additionalProperties: false,
   properties: {
-    summary: { type: "string" },
     findings: {
       type: "array",
       items: {
         type: "object",
-        required: ["title", "claimIds", "confidence"],
+        required: ["claimIds"],
+        additionalProperties: false,
         properties: {
-          title: { type: "string" },
           claimIds: {
             type: "array",
             minItems: 1,
             items: { type: "string" },
           },
-          confidence: { enum: ["high", "medium", "low"] },
         },
       },
     },
-    caveats: { type: "string" },
-    openQuestions: { type: "array", items: { type: "string" } },
   },
 }
 
@@ -759,9 +749,27 @@ const buildFinding = (finding, confirmedById) => {
     throw new Error("SynthesisProvenanceError")
   }
   const claims = claimIds.map(id => confirmedById.get(id))
+  const distinctPrimarySources = new Set(
+    claims
+      .filter(item => item.sourceQuality === "primary")
+      .map(item => item.sourceUrl)
+  ).size
+  const unanimous = claims.every(item =>
+    item.supportedVotes === VOTES_PER_CLAIM &&
+    item.refutedVotes === 0 &&
+    item.erroredVotes === 0
+  )
+  const hasEstablishedSource = claims.some(item =>
+    item.sourceQuality === "primary" || item.sourceQuality === "secondary"
+  )
+  const confidence = distinctPrimarySources >= 2 && unanimous
+    ? "high"
+    : hasEstablishedSource
+      ? "medium"
+      : "low"
   return {
-    title: finding.title,
-    confidence: finding.confidence,
+    title: claims[0].claim,
+    confidence,
     claimIds,
     claims: claims.map(item => item.claim),
     sources: [...new Set(claims.map(item => item.sourceUrl))],
@@ -796,9 +804,10 @@ const buildFinding = (finding, confirmedById) => {
 }
 ```
 
-Synthesis 성공 경로는 `report.findings.map(buildFinding)` 결과만 반환하고
-`...report` spread를 제거한다. Provenance 오류는 `synthesis_failed`
-salvage로 보낸다.
+Synthesis 성공 경로는 grouping-only `report.findings.map(buildFinding)` 결과만
+받는다. 제목과 confidence를 포함한 narrative와 provenance는 코드가 confirmed
+claim에서 결정적으로 만들고 `...report` spread를 제거한다. Provenance 오류는
+`synthesis_failed` salvage로 보낸다.
 
 - [ ] **Step 4: 정상 provenance 재구성 테스트 추가**
 
