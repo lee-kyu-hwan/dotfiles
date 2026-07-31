@@ -740,10 +740,87 @@ test("fetch budget 이름을 위조한 비복구 Error는 budget drop으로 숨�
   )
 })
 
+test("plain record가 아닌 budget 이름 객체와 status 충돌은 fetch drop으로 숨기지 않는다", async t => {
+  const arrayCollision = Object.assign([], {
+    constructor: null,
+    name: "WorkflowBudgetExceededError",
+    message: "array budget collision",
+    retryable: true,
+  })
+  const customPrototypeCollision = Object.assign(
+    Object.create({ customPrototype: true }),
+    {
+      constructor: null,
+      name: "WorkflowBudgetExceededError",
+      message: "custom prototype budget collision",
+      retryable: true,
+    }
+  )
+  const statusCollision = structuredAgentError({
+    name: "WorkflowBudgetExceededError",
+    status: 400,
+    retryable: true,
+  })
+  const proxyCollision = new Proxy(
+    {
+      name: "WorkflowBudgetExceededError",
+      message: "proxy budget collision",
+      retryable: true,
+    },
+    {
+      getPrototypeOf() {
+        throw new Error("prototype unavailable")
+      },
+    }
+  )
+  const cases = [
+    ["array", arrayCollision],
+    ["custom prototype", customPrototypeCollision],
+    ["status 400", statusCollision],
+    ["prototype proxy", proxyCollision],
+  ]
+
+  for (const [label, collision] of cases) {
+    await t.test(label, async () => {
+      await assert.rejects(
+        runWorkflow({
+          args: "테스트 질문",
+          respond: async ({ prompt, options }) => {
+            if (options.label === "scope") {
+              return makeScope(["핵심", "보조-1", "보조-2"])
+            }
+            if (options.phase === "Search") {
+              return prompt.includes("## Web Searcher: 핵심")
+                ? {
+                    status: "ok",
+                    results: [searchResult(
+                      "https://budget-record-" + label.replaceAll(" ", "-") + ".example/report"
+                    )],
+                  }
+                : { status: "no_results", results: [] }
+            }
+            if (options.phase === "Fetch") throw collision
+            throw new Error("unexpected agent call: " + options.label)
+          },
+        }),
+        error =>
+          error !== collision &&
+          error?.kind === "fetch" &&
+          error?.message === collision.message,
+      )
+    })
+  }
+})
+
 test("실제 constructor와 직렬화된 plain-object budget 오류만 fetch drop으로 기록한다", async t => {
+  const nullPrototypeBudget = Object.assign(Object.create(null), {
+    name: "WorkflowBudgetExceededError",
+    message: "null-prototype budget",
+  })
   const cases = [
     ["constructor", new WorkflowBudgetExceededError("budget")],
     ["serialized", structuredAgentError({ name: "WorkflowBudgetExceededError" })],
+    ["null prototype", nullPrototypeBudget],
   ]
 
   for (const [label, budgetError] of cases) {
@@ -755,8 +832,10 @@ test("실제 constructor와 직렬화된 plain-object budget 오류만 fetch dro
           if (options.phase === "Search") {
             return prompt.includes("## Web Searcher: 핵심")
               ? {
-                  status: "ok",
-                  results: [searchResult("https://budget-" + label + ".example/report")],
+                    status: "ok",
+                    results: [searchResult(
+                      "https://budget-" + label.replaceAll(" ", "-") + ".example/report"
+                    )],
                 }
               : { status: "no_results", results: [] }
           }

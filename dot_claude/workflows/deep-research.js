@@ -110,13 +110,37 @@ const safeErrorConstructorName = error => {
     return ""
   }
 }
+const safeErrorPrototype = error => {
+  try {
+    return { readable: true, value: Object.getPrototypeOf(error) }
+  } catch {
+    return { readable: false, value: null }
+  }
+}
+const safeActualConstructorName = error => {
+  const prototype = safeErrorPrototype(error)
+  if (!prototype.readable || !prototype.value) return ""
+  try {
+    return typeof prototype.value.constructor?.name === "string"
+      ? prototype.value.constructor.name
+      : ""
+  } catch {
+    return ""
+  }
+}
+const hasWorkflowBudgetExceededIdentity = error =>
+  safeActualConstructorName(error) === "WorkflowBudgetExceededError" ||
+  safeErrorField(error, "name") === "WorkflowBudgetExceededError"
 const isWorkflowBudgetExceededError = error => {
   if (!isRecoverableAgentError(error)) return false
-  const constructorName = safeErrorConstructorName(error)
+  const constructorName = safeActualConstructorName(error)
   const serializedName = safeErrorField(error, "name")
-  return constructorName === "WorkflowBudgetExceededError" ||
-    ((constructorName === "Object" || !constructorName) &&
-      serializedName === "WorkflowBudgetExceededError")
+  if (constructorName === "WorkflowBudgetExceededError") return true
+  const prototype = safeErrorPrototype(error)
+  const isPlainRecord =
+    prototype.readable &&
+    (prototype.value === Object.prototype || prototype.value === null)
+  return isPlainRecord && serializedName === "WorkflowBudgetExceededError"
 }
 
 // Claude Workflow parallel() returns null for a rejected task instead of
@@ -654,6 +678,7 @@ const fetchTaskResults = await parallel(
         fetchBudgetDroppedIndexes.add(fetchIndex)
         return null
       }
+      if (hasWorkflowBudgetExceededIdentity(e)) throw e
       if (!isRecoverableAgentError(e)) throw e
       ext = { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: e?.message || String(e) }
     }

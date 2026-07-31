@@ -1145,5 +1145,6 @@ git commit -m "docs: deep-research 검증 결과를 반영한다"
    `value` 내부의 vote로만 취급한다. `VERDICT_SCHEMA`에는
    `additionalProperties: false`를 더하되 schema에 보안을 의존하지 않는다.
 7. fetch budget은 공통 classifier를 먼저 통과한 실제 constructor 또는
-   직렬화 plain-object name만 인정한다. 일반 `Error`/HTTP 400 충돌은
-   전파하고 두 정상 budget shape는 drop으로 보존한다.
+   `Object.prototype`/`null` prototype의 직렬화 plain-record name만
+   인정한다. Array·커스텀 prototype·prototype 조회 실패 객체와 일반
+   `Error`/HTTP 400 충돌은 전파하고 정상 budget shape는 drop으로 보존한다.

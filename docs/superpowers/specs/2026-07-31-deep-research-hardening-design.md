@@ -186,9 +186,11 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
   `failed` source로 복원한다. 따라서 모든 fetch 슬롯이 누락되면
   `infrastructure_failure`가 된다.
   `WorkflowBudgetExceededError` 판정은 먼저 공통 error classifier를 통과한
-  뒤 실제 constructor 또는 직렬화된 plain-object name만 인정한다. 일반
-  `Error` constructor와 HTTP 400~499 우선순위는 budget 이름·retryable
-  충돌보다 앞서므로 budget drop으로 숨지 않는다.
+  뒤 안전하게 읽은 실제 prototype constructor, 또는 prototype이 정확히
+  `Object.prototype`/`null`인 직렬화 plain record의 name만 인정한다.
+  Array·커스텀 prototype·prototype 조회 실패 객체와 일반 `Error`
+  constructor, HTTP 400~499는 budget 이름·retryable 충돌이 있어도
+  budget drop으로 숨지 않고 전파한다.
 - Verifier 호출은 `APIConnectionError`, `APIConnectionTimeoutError`,
   `RetryableError`, `RateLimitError`, `InternalServerError`,
   `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
@@ -244,6 +246,8 @@ panel을 만드는 테스트의 `parallelOverride` 동작은 그대로 유지한
     name·kind·message가 안전한 문자와 길이 제한을 지킴
 15. forged sentinel/envelope-shaped verifier 값은 정상 vote 값으로만
     판정되고, budget 이름을 위조한 일반/HTTP 400 오류는 전파됨
+16. Array·커스텀 prototype·prototype 조회 실패 budget 모양 객체는
+    전파되고, Object/null-prototype plain record만 serialized budget으로 인정
 
 검증 명령:
 
