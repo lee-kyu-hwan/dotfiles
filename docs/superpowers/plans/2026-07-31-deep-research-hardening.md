@@ -4,7 +4,7 @@
 
 **Goal:** `deep-research`가 실패를 연구 결론으로 위장하지 않고, confirmed claim의 실제 출처·투표만 최종 finding으로 반환하도록 강화한다.
 
-**Architecture:** 배포 제약 때문에 워크플로는 단일 JavaScript 파일로 유지한다. 검색 전체를 fan-out/fan-in한 뒤 결정적 round-robin으로 fetch 후보를 선택하고, 각 단계는 명시적 상태를 반환한다. 합성 모델은 confirmed claim ID만 그룹화하며 최종 finding의 claim·source·vote·quote는 코드가 원본에서 재구성한다. 실제 Claude Workflow `parallel()`이 task rejection을 `null`로 정규화하므로, 병렬 task의 비복구 오류는 직렬화 가능한 sentinel로 barrier를 통과시킨 뒤 바깥에서 다시 throw한다.
+**Architecture:** 배포 제약 때문에 워크플로는 단일 JavaScript 파일로 유지한다. 검색 전체를 fan-out/fan-in한 뒤 결정적 round-robin으로 fetch 후보를 선택하고, 각 단계는 명시적 상태를 반환한다. 합성 모델은 confirmed claim ID만 그룹화하며 최종 finding의 claim·source·vote·quote는 코드가 원본에서 재구성한다. 실제 Claude Workflow `parallel()`이 task rejection을 `null`로 정규화하므로, 모든 병렬 task 결과를 guard-owned plain-data envelope로 감싸 barrier를 통과시킨 뒤 한 계층만 검증·unwrap한다.
 
 **Tech Stack:** Claude Workflow bare ECMAScript, JSON Schema, Node.js `node:test`, `AsyncFunction`, chezmoi
 
@@ -635,12 +635,14 @@ retryable 이름·flag·type/code보다 먼저 비복구 대상으로 판정한�
 
 실제 `parallel()`은 위 비복구 throw도 `null`로 바꾸므로 search·fetch·각
 verifier vote thunk를 `guardParallelTask(kind, thunk)`로 감싼다. guard는
-raw `Error`를 반환하지 않고 C0/C1·bidi/format 제어 문자와 길이를 제한한
-`kind`·`name`·`message` plain-data sentinel을 반환한다. 각 barrier 직후
-sentinel을 찾아 새 `Error`로 복원한다. 중첩 verifier에서는 내부 vote
-sentinel을 adjudication하지 않고 외부 panel 결과까지 그대로 전달해 외부
-barrier에서 throw한다. sentinel이 아닌 누락/null vote와 panel은 기존대로
-unverified로 보존한다.
+성공도 `{protocol,ok:true,value}`, 실패도
+`{protocol,ok:false,failure:{kind,name,message}}` envelope로 반환한다.
+failure는 raw `Error`를 담지 않고 C0/C1·bidi/format 제어 문자와 길이를
+제한한다. agent 값은 `value` 아래에 있으므로 marker-shaped field를 반환해도
+envelope가 될 수 없다. 각 barrier는 정확히 한 계층을 검증·unwrap한다.
+중첩 verifier는 내부 failure를 panel guard 안에서 throw해 외부 guard가 다시
+envelope로 감싼다. 실제 누락/null vote와 panel은 기존대로 unverified로
+보존하며 non-null non-envelope 결과는 `ParallelProtocolError`로 전파한다.
 
 - [ ] **Step 4: 2표 판정 테스트 추가**
 
@@ -1118,7 +1120,7 @@ git add dot_agents/skills/deep-research/SKILL.md docs/superpowers
 git commit -m "docs: deep-research 검증 결과를 반영한다"
 ```
 
-### 리뷰 후 런타임 의미론 보정: parallel rejection sentinel
+### 리뷰 후 런타임 의미론 보정: parallel result envelope
 
 **Files:**
 - Modify: `tests/deep-research.test.mjs`
@@ -1129,8 +1131,8 @@ git commit -m "docs: deep-research 검증 결과를 반영한다"
 1. 기본 테스트 하네스를 all-settled/rejection-to-null 의미론으로 바꾸고,
    기존 verifier 비복구 오류 테스트와 malformed fetch claim 변환 테스트가
    실패하는 RED를 확인한다.
-2. search·fetch·nested verifier task를 plain-data sentinel guard로 감싸고
-   각 barrier 뒤에서만 sentinel을 복원·throw한다.
+2. search·fetch·nested verifier task의 성공/실패를 모두 plain-data
+   envelope로 감싸고 각 barrier에서 한 계층만 검증·unwrap한다.
 3. 재시도 가능 agent 오류, budget drop, 실제 누락/null 결과의 기존
    상태·stats·quorum 동작을 유지한다.
 4. focused/full 테스트, wrapped syntax, skill validator,
@@ -1139,3 +1141,9 @@ git commit -m "docs: deep-research 검증 결과를 반영한다"
    기록한 `WorkflowBudgetExceededError` index의 null은 기존 budget drop으로
    남기고, 다른 누락/null slot은 source metadata를 보존한 `failed` fetch로
    복원한다. 한 개/전체 slot 누락과 누락·budget·성공 혼합을 테스트한다.
+6. verifier가 이전 sentinel 또는 현재 envelope 모양의 추가 필드를 반환해도
+   `value` 내부의 vote로만 취급한다. `VERDICT_SCHEMA`에는
+   `additionalProperties: false`를 더하되 schema에 보안을 의존하지 않는다.
+7. fetch budget은 공통 classifier를 먼저 통과한 실제 constructor 또는
+   직렬화 plain-object name만 인정한다. 일반 `Error`/HTTP 400 충돌은
+   전파하고 두 정상 budget shape는 drop으로 보존한다.

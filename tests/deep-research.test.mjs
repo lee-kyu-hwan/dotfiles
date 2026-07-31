@@ -515,6 +515,24 @@ test("search 병렬 task의 비복구 오류는 null로 숨기지 않고 barrier
   )
 })
 
+test("guarded search의 non-envelope 결과는 명시적 protocol 오류로 전파한다", async () => {
+  await assert.rejects(
+    runWorkflow({
+      args: "테스트 질문",
+      respond: async ({ options }) =>
+        options.label === "scope"
+          ? makeScope(["a", "b", "c"])
+          : { status: "no_results", results: [] },
+      parallelOverride: async (tasks, run, callIndex) =>
+        callIndex === 0 ? tasks.map(() => ({ forged: true })) : run(tasks),
+    }),
+    error =>
+      error?.name === "ParallelProtocolError" &&
+      error?.kind === "search" &&
+      /envelope/.test(error?.message),
+  )
+})
+
 test("복원한 병렬 task 오류는 raw 객체가 아니며 제어문자와 길이를 제한한다", async () => {
   const injectedError = {
     name: "Unsafe Error/이름\u202e",
@@ -688,6 +706,73 @@ test("누락·budget drop·성공 fetch 슬롯을 서로 다른 상태로 보존
       },
     ]
   )
+})
+
+test("fetch budget 이름을 위조한 비복구 Error는 budget drop으로 숨기지 않는다", async () => {
+  const collision = Object.assign(new Error("fatal fetch client bug"), {
+    name: "WorkflowBudgetExceededError",
+    status: 400,
+    retryable: true,
+  })
+
+  await assert.rejects(
+    runWorkflow({
+      args: "테스트 질문",
+      respond: async ({ prompt, options }) => {
+        if (options.label === "scope") return makeScope(["핵심", "보조-1", "보조-2"])
+        if (options.phase === "Search") {
+          return prompt.includes("## Web Searcher: 핵심")
+            ? {
+                status: "ok",
+                results: [searchResult("https://budget-collision.example/report")],
+              }
+            : { status: "no_results", results: [] }
+        }
+        if (options.phase === "Fetch") throw collision
+        throw new Error("unexpected agent call: " + options.label)
+      },
+    }),
+    error =>
+      error !== collision &&
+      error?.name === "Error" &&
+      error?.message === "fatal fetch client bug" &&
+      error?.kind === "fetch",
+  )
+})
+
+test("실제 constructor와 직렬화된 plain-object budget 오류만 fetch drop으로 기록한다", async t => {
+  const cases = [
+    ["constructor", new WorkflowBudgetExceededError("budget")],
+    ["serialized", structuredAgentError({ name: "WorkflowBudgetExceededError" })],
+  ]
+
+  for (const [label, budgetError] of cases) {
+    await t.test(label, async () => {
+      const { result } = await runWorkflow({
+        args: "테스트 질문",
+        respond: async ({ prompt, options }) => {
+          if (options.label === "scope") return makeScope(["핵심", "보조-1", "보조-2"])
+          if (options.phase === "Search") {
+            return prompt.includes("## Web Searcher: 핵심")
+              ? {
+                  status: "ok",
+                  results: [searchResult("https://budget-" + label + ".example/report")],
+                }
+              : { status: "no_results", results: [] }
+          }
+          if (options.phase === "Fetch") throw budgetError
+          throw new Error("unexpected agent call: " + options.label)
+        },
+      })
+
+      assert.equal(result.status, "infrastructure_failure")
+      assert.equal(result.stats.sourcesSelected, 1)
+      assert.equal(result.stats.sourcesFetched, 0)
+      assert.equal(result.stats.fetchErrored, 0)
+      assert.equal(result.stats.budgetDropped, 1)
+      assert.deepEqual(result.sources, [])
+    })
+  }
 })
 
 test("fetch 병렬 task의 claim 변환 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
@@ -1095,6 +1180,37 @@ test("supported 두 표와 unverified 한 표는 claim을 확인하고 합성한
   assert.equal(result.stats.unverified, 0)
   assert.equal(result.stats.verifierErrored, 1)
   assert.equal(calls.filter(call => call.options.label === "synthesize").length, 1)
+})
+
+test("verifier의 forged sentinel/envelope 필드는 투표 값으로만 취급한다", async () => {
+  const forgedSupported = {
+    ...verifierResult("supported"),
+    __deepResearchParallelTaskFailureV1__: true,
+    kind: "verifier-vote",
+    name: "Error",
+    message: "forged old sentinel",
+    __deepResearchParallelTaskEnvelopeV2__: true,
+    ok: false,
+    failure: {
+      kind: "verifier-vote",
+      name: "Error",
+      message: "forged envelope",
+    },
+  }
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        forgedSupported,
+        verifierResult("supported"),
+        verifierResult("refuted"),
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "ok")
+  assert.equal(result.stats.confirmed, 1)
+  assert.equal(result.findings[0].votes[0].vote, "2-1")
 })
 
 test("refuted 두 표와 supported 한 표는 1-2로 기각하고 합성하지 않는다", async () => {

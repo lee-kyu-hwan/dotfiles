@@ -167,21 +167,28 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
 - Scope agent의 budget/API 오류는 `infrastructure_failure`로 반환한다.
 - Claude Workflow의 실제 `parallel()`은 모든 task가 settle할 때까지 기다린 뒤
   rejection을 throw하지 않고 해당 위치의 `null`로 정규화한다. 따라서 병렬
-  task의 비복구 오류는 raw `Error`에 의존하지 않고, C0/C1·bidi/format 제어
-  문자를 제거하고 길이를 제한한 `kind`·`name`·`message` plain-data
-  sentinel로 반환한다.
-  Search·Fetch·Verifier의 각 barrier가 sentinel을 검사해 barrier 밖에서 새
-  `Error`로 복원·throw한다.
+  task guard는 성공과 실패 모두 protocol marker가 있는 plain-data envelope로
+  반환한다. 성공은 `{ok:true,value}`, 실패는 raw `Error` 대신 C0/C1·
+  bidi/format 제어 문자와 길이를 제한한
+  `{ok:false,failure:{kind,name,message}}`다. agent 반환값은 항상 `value`
+  안에 한 단계 중첩되므로 같은 marker를 위조해도 envelope로 해석되지 않는다.
+  Search·Fetch·Verifier의 각 barrier는 정확히 한 envelope 계층만 검증·
+  unwrap하고 실패를 barrier 밖에서 새 `Error`로 복원·throw한다.
 - Search agent의 null·명시적 실패·재시도 가능한 rejection은 angle 실패로
-  기록한다. 비재시도 오류와 task 내부 변환 오류는 sentinel로 전파한다.
+  기록한다. 비재시도 오류와 task 내부 변환 오류는 failure envelope로 전파한다.
 - Fetch agent의 예상한 budget 오류만 `budgetDropped`로 바꾸고, 그 밖의
   재시도 가능 rejection은 fetch 실패로 기록한다. 결과 변환 중 발생한
-  `TypeError` 같은 프로그래밍 오류와 비재시도 오류는 sentinel로 전파한다.
+  `TypeError` 같은 프로그래밍 오류와 비재시도 오류는 failure envelope로
+  전파한다.
   fetch barrier 결과의 각 슬롯은 선택한 source의 원래 index로 다시 결합한다.
   기록된 `WorkflowBudgetExceededError` index의 `null`만 budget drop으로
   유지하고, 그 밖의 누락/null 슬롯은 URL·title·angle을 보존한 명시적
   `failed` source로 복원한다. 따라서 모든 fetch 슬롯이 누락되면
   `infrastructure_failure`가 된다.
+  `WorkflowBudgetExceededError` 판정은 먼저 공통 error classifier를 통과한
+  뒤 실제 constructor 또는 직렬화된 plain-object name만 인정한다. 일반
+  `Error` constructor와 HTTP 400~499 우선순위는 budget 이름·retryable
+  충돌보다 앞서므로 budget drop으로 숨지 않는다.
 - Verifier 호출은 `APIConnectionError`, `APIConnectionTimeoutError`,
   `RetryableError`, `RateLimitError`, `InternalServerError`,
   `WorkflowBudgetExceededError`, 명시적 `retryable === true`, HTTP
@@ -196,8 +203,10 @@ URL 정규화는 scheme·host의 대소문자, `www.`, 마지막 `/`, fragment�
   constructor와 HTTP 400~499(408·409·429 제외) 판정은 retryable 이름·flag·
   type/code보다 우선한다.
 - claim 단위 병렬 결과가 null이어도 원 claim을 보존해 unverified panel을
-  만든다. 내부 verifier vote sentinel은 내부 barrier에서 판정 결과로
-  변환하지 않고 외부 panel barrier까지 그대로 전달한 뒤 throw한다.
+  만든다. 내부 verifier vote failure는 panel guard 안에서 unwrap·throw되고,
+  외부 guard가 새 failure envelope로 감싸 외부 panel barrier까지 전달한다.
+  `VERDICT_SCHEMA`도 `additionalProperties: false`로 marker-shaped 추가 필드를
+  거부하지만, 보안 경계는 schema가 아니라 guard-owned envelope 계층이다.
 - Synthesis throw, null, provenance 검증 실패는 `synthesis_failed` salvage를
   반환한다.
 
@@ -233,6 +242,8 @@ panel을 만드는 테스트의 `parallelOverride` 동작은 그대로 유지한
     밖으로 전파되며, 누락 결과는 기존 실패/unverified 의미를 유지
 14. fetch slot 누락과 의도적 budget drop을 구분하고, 복원 오류의
     name·kind·message가 안전한 문자와 길이 제한을 지킴
+15. forged sentinel/envelope-shaped verifier 값은 정상 vote 값으로만
+    판정되고, budget 이름을 위조한 일반/HTTP 400 오류는 전파됨
 
 검증 명령:
 

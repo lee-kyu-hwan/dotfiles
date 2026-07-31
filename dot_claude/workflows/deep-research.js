@@ -96,10 +96,35 @@ const isRecoverableAgentError = error => {
     .some(value => RECOVERABLE_AGENT_ERROR_TYPES.has(value))
 }
 
+const safeErrorField = (error, key) => {
+  try {
+    return error?.[key]
+  } catch {
+    return undefined
+  }
+}
+const safeErrorConstructorName = error => {
+  try {
+    return typeof error?.constructor?.name === "string" ? error.constructor.name : ""
+  } catch {
+    return ""
+  }
+}
+const isWorkflowBudgetExceededError = error => {
+  if (!isRecoverableAgentError(error)) return false
+  const constructorName = safeErrorConstructorName(error)
+  const serializedName = safeErrorField(error, "name")
+  return constructorName === "WorkflowBudgetExceededError" ||
+    ((constructorName === "Object" || !constructorName) &&
+      serializedName === "WorkflowBudgetExceededError")
+}
+
 // Claude Workflow parallel() returns null for a rejected task instead of
-// propagating its Error. A plain-data sentinel survives that boundary (and any
-// nested parallel boundary) without relying on Error object serialization.
-const PARALLEL_TASK_FAILURE = "__deepResearchParallelTaskFailureV1__"
+// propagating its Error. Every guarded task therefore returns a plain-data
+// envelope. Agent values stay nested in `value`, so they cannot impersonate the
+// envelope that owns the parallel boundary.
+const PARALLEL_TASK_PROTOCOL = "__deepResearchParallelTaskEnvelopeV2__"
+const RESTORED_PARALLEL_FAILURE = Symbol("restoredParallelFailure")
 const sanitizeFailureMessage = value => {
   let text
   try {
@@ -116,40 +141,95 @@ const sanitizeFailureToken = (value, fallback) =>
     .replace(/[^A-Za-z0-9_.:-]/g, "_")
     .slice(0, 80) || fallback
 const makeParallelTaskFailure = (kind, error) => {
-  const constructorName =
-    typeof error?.constructor?.name === "string" ? error.constructor.name : ""
-  const serializedName = typeof error?.name === "string" ? error.name : ""
+  const restoredFailure = safeErrorField(error, RESTORED_PARALLEL_FAILURE)
+  if (restoredFailure) return restoredFailure
+  const constructorName = safeErrorConstructorName(error)
+  const serializedName = safeErrorField(error, "name")
   return {
-    [PARALLEL_TASK_FAILURE]: true,
     kind: sanitizeFailureToken(kind, "parallel-task"),
     name: sanitizeFailureToken(
       constructorName && constructorName !== "Object" ? constructorName : serializedName,
       "Error"
     ),
-    message: sanitizeFailureMessage(error?.message ?? error),
+    message: sanitizeFailureMessage(safeErrorField(error, "message") ?? error),
   }
-}
-const isParallelTaskFailure = value =>
-  Boolean(value && typeof value === "object" && value[PARALLEL_TASK_FAILURE] === true)
-const findParallelTaskFailure = results => {
-  if (isParallelTaskFailure(results)) return results
-  if (!Array.isArray(results)) return null
-  return results.find(isParallelTaskFailure) || null
 }
 const guardParallelTask = (kind, task) => async () => {
   try {
-    return await task()
+    return {
+      [PARALLEL_TASK_PROTOCOL]: true,
+      ok: true,
+      value: await task(),
+    }
   } catch (error) {
-    return makeParallelTaskFailure(kind, error)
+    return {
+      [PARALLEL_TASK_PROTOCOL]: true,
+      ok: false,
+      failure: makeParallelTaskFailure(kind, error),
+    }
   }
 }
-const throwParallelTaskFailure = results => {
-  const failure = findParallelTaskFailure(results)
-  if (!failure) return
+const throwParallelTaskFailure = failure => {
   const error = new Error(failure.message)
   error.name = failure.name
   error.kind = failure.kind
+  error[RESTORED_PARALLEL_FAILURE] = failure
   throw error
+}
+const isSafeFailure = failure =>
+  Boolean(
+    failure &&
+    typeof failure === "object" &&
+    typeof failure.kind === "string" &&
+    /^[A-Za-z0-9_.:-]{1,80}$/.test(failure.kind) &&
+    typeof failure.name === "string" &&
+    /^[A-Za-z0-9_.:-]{1,80}$/.test(failure.name) &&
+    typeof failure.message === "string" &&
+    failure.message.length <= 500 &&
+    !/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/.test(failure.message)
+  )
+const protocolError = (kind, index) => {
+  const failure = {
+    kind: sanitizeFailureToken(kind, "parallel-task"),
+    name: "ParallelProtocolError",
+    message: "invalid parallel task envelope at " + kind + "[" + index + "]",
+  }
+  const error = new Error(failure.message)
+  error.name = "ParallelProtocolError"
+  error.kind = failure.kind
+  error[RESTORED_PARALLEL_FAILURE] = failure
+  throw error
+}
+const unwrapParallelTaskResults = (results, expectedLength, kind) => {
+  if (results != null && !Array.isArray(results)) protocolError(kind, 0)
+  const rawResults = Array.isArray(results) ? results : []
+  if (rawResults.length > expectedLength) protocolError(kind, expectedLength)
+  return Array.from({ length: expectedLength }, (_, index) => {
+    const envelope = rawResults[index]
+    if (envelope == null) return { present: false, value: null }
+    try {
+      if (
+        typeof envelope !== "object" ||
+        envelope[PARALLEL_TASK_PROTOCOL] !== true ||
+        typeof envelope.ok !== "boolean"
+      ) {
+        protocolError(kind, index)
+      }
+      if (envelope.ok) {
+        if (!Object.prototype.hasOwnProperty.call(envelope, "value")) {
+          protocolError(kind, index)
+        }
+        return { present: true, value: envelope.value }
+      }
+      if (!isSafeFailure(envelope.failure)) protocolError(kind, index)
+      throwParallelTaskFailure(envelope.failure)
+    } catch (error) {
+      if (safeErrorField(error, RESTORED_PARALLEL_FAILURE)) {
+        throw error
+      }
+      protocolError(kind, index)
+    }
+  })
 }
 
 const EMPTY_STATS = {
@@ -263,7 +343,7 @@ const EXTRACT_SCHEMA = {
   },
 }
 const VERDICT_SCHEMA = {
-  type: "object", required: ["outcome", "evidence", "confidence"],
+  type: "object", required: ["outcome", "evidence", "confidence"], additionalProperties: false,
   properties: {
     outcome: { enum: ["supported", "refuted", "unverified"] },
     evidence: { type: "string" },
@@ -484,9 +564,13 @@ const searchTaskResults = await parallel(
     return { angle, status, results: status === "ok" ? results : [], errorReason: response.errorReason }
   }))
 )
-throwParallelTaskFailure(searchTaskResults)
+const searchTaskSlots = unwrapParallelTaskResults(
+  searchTaskResults,
+  scope.angles.length,
+  "search"
+)
 const searchOutcomes = scope.angles.map((angle, index) =>
-  searchTaskResults?.[index] || {
+  (searchTaskSlots[index].present && searchTaskSlots[index].value) || {
     angle,
     status: "failed",
     results: [],
@@ -563,10 +647,7 @@ const fetchTaskResults = await parallel(
         effort: "low",
       })
     } catch (e) {
-      if (
-        e?.name === "WorkflowBudgetExceededError" ||
-        e?.constructor?.name === "WorkflowBudgetExceededError"
-      ) {
+      if (isWorkflowBudgetExceededError(e)) {
         const dropped = { url: source.url, angle: angle.label }
         budgetDropped.push(dropped)
         fetchBudgetDropped.push(dropped)
@@ -614,11 +695,14 @@ const fetchTaskResults = await parallel(
     }
   }))
 )
-throwParallelTaskFailure(fetchTaskResults)
-const fetchTaskArray = Array.isArray(fetchTaskResults) ? fetchTaskResults : []
+const fetchTaskSlots = unwrapParallelTaskResults(
+  fetchTaskResults,
+  selectedSources.length,
+  "fetch"
+)
 const fetchResults = selectedSources.map(({ source, angle }, fetchIndex) => {
-  const result = fetchTaskArray[fetchIndex]
-  if (result) return result
+  const slot = fetchTaskSlots[fetchIndex]
+  if (slot.present && slot.value) return slot.value
   // A budget exception deliberately returns null and has already been counted.
   // Any other missing slot means parallel lost the selected task result.
   if (fetchBudgetDroppedIndexes.has(fetchIndex)) return null
@@ -724,7 +808,7 @@ const adjudicate = (claim, verdicts = []) => {
 
 const panelResults = await parallel(
   rankedClaims.map(claim => guardParallelTask("verifier-panel", async () => {
-    const verdicts = await parallel(
+    const voteResults = await parallel(
       Array.from({ length: VOTES_PER_CLAIM }, (_, v) => guardParallelTask("verifier-vote", async () => {
         // Verification is this harness's entire point, so these agents inherit the
         // session model and effort instead of pinning a cheap tier. The prompt
@@ -747,18 +831,30 @@ const panelResults = await parallel(
         }
       }))
     )
-    // Preserve an inner vote sentinel unchanged through the outer panel task.
-    // Missing/null vote arrays remain an unverified panel by design.
-    const voteFailure = findParallelTaskFailure(verdicts)
-    return voteFailure || adjudicate(claim, verdicts)
+    // Unwrap inside the guarded panel. A vote failure is thrown here, then the
+    // outer guard re-envelopes it for the outer barrier. Runtime-missing votes
+    // remain null and therefore unverified.
+    const voteSlots = unwrapParallelTaskResults(
+      voteResults,
+      VOTES_PER_CLAIM,
+      "verifier-vote"
+    )
+    const verdicts = voteSlots.map(slot => slot.present ? slot.value : null)
+    return adjudicate(claim, verdicts)
   }))
 )
-throwParallelTaskFailure(panelResults)
+const panelSlots = unwrapParallelTaskResults(
+  panelResults,
+  rankedClaims.length,
+  "verifier-panel"
+)
 
 // Outer parallel execution may itself omit a panel. Rejoin by opaque claimId
 // rather than result position so every ranked claim reaches adjudication.
 const panelsByClaimId = new Map(
-  (panelResults || []).filter(Boolean).map(panel => [panel.claimId, panel])
+  panelSlots
+    .filter(slot => slot.present && slot.value)
+    .map(slot => [slot.value.claimId, slot.value])
 )
 const voted = rankedClaims.map(claim =>
   panelsByClaimId.get(claim.claimId) || adjudicate(claim, [])
