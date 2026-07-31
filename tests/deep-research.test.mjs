@@ -307,13 +307,14 @@ test("invalid_input과 no_claims는 동일한 공통 result 및 numeric stats �
   assertResultContract(noClaims.result)
 })
 
-test("Scope throw와 null은 재시도 가능한 구조화된 infrastructure_failure를 반환한다", async t => {
+test("Scope의 복구 가능한 throw와 null은 재시도 가능한 구조화된 infrastructure_failure를 반환한다", async t => {
   const cases = [
     {
-      name: "throw",
+      name: "recoverable throw",
       respond: async () => {
-        throw new Error("scope service unavailable")
+        throw new RateLimitError("scope service unavailable")
       },
+      expectedError: "scope service unavailable",
     },
     {
       name: "null",
@@ -323,7 +324,7 @@ test("Scope throw와 null은 재시도 가능한 구조화된 infrastructure_fai
 
   for (const fixture of cases) {
     await t.test(fixture.name, async () => {
-      const { result, calls } = await runWorkflow({
+      const { result, calls, logs } = await runWorkflow({
         args: "테스트 질문",
         respond: fixture.respond,
       })
@@ -331,6 +332,11 @@ test("Scope throw와 null은 재시도 가능한 구조화된 infrastructure_fai
       assert.equal(result.status, "infrastructure_failure")
       assert.match(result.summary, /Scope/)
       assert.match(result.summary, /retry/i)
+      if (fixture.expectedError) {
+        assert.equal(result.error, fixture.expectedError)
+        assert.ok(result.summary.includes(fixture.expectedError))
+        assert.ok(logs.some(message => message.includes(fixture.expectedError)))
+      }
       assert.deepEqual(result.findings, [])
       assert.deepEqual(result.sources, [])
       assert.equal(result.stats.agentCalls, 1)
@@ -338,6 +344,80 @@ test("Scope throw와 null은 재시도 가능한 구조화된 infrastructure_fai
       assertResultContract(result)
     })
   }
+})
+
+test("Scope의 비복구 오류는 infrastructure_failure로 숨기지 않고 전파한다", async t => {
+  const fatalErrors = [
+    ["programming TypeError", new TypeError("scope transform bug")],
+    ["authentication error", new AuthenticationError("invalid api key")],
+  ]
+
+  for (const [label, injectedError] of fatalErrors) {
+    await t.test(label, async () => {
+      await assert.rejects(
+        runWorkflow({
+          args: "테스트 질문",
+          respond: async () => {
+            throw injectedError
+          },
+        }),
+        error => error === injectedError,
+      )
+    })
+  }
+})
+
+test("Scope의 malformed angles는 크래시 없이 infrastructure_failure를 반환한다", async t => {
+  const cases = [
+    ["angles 누락", { question: "q", summary: "s" }],
+    ["angles 비배열", { question: "q", summary: "s", angles: "broad · academic · news" }],
+    ["angles 빈 배열", { question: "q", summary: "s", angles: [] }],
+    ["angles 항목 전부 malformed", {
+      question: "q",
+      summary: "s",
+      angles: [null, "핵심", { label: "", query: "" }, { label: "라벨만" }, { query: "쿼리만" }],
+    }],
+  ]
+
+  for (const [label, scope] of cases) {
+    await t.test(label, async () => {
+      const { result, calls } = await runWorkflow({
+        args: "테스트 질문",
+        respond: async () => scope,
+      })
+
+      assert.equal(result.status, "infrastructure_failure")
+      assert.match(result.summary, /search angles/)
+      assert.match(result.summary, /retry/i)
+      assert.equal(calls.length, 1)
+      assertResultContract(result)
+    })
+  }
+})
+
+test("malformed angle 항목은 드롭을 기록하고 유효한 각도로 계속 진행한다", async () => {
+  const { result, calls, logs } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ options }) => {
+      if (options.label === "scope") {
+        return {
+          question: "q",
+          summary: "s",
+          angles: [
+            { label: "핵심", query: "핵심 query" },
+            null,
+            { label: "쿼리 없음" },
+          ],
+        }
+      }
+      return { status: "no_results", results: [] }
+    },
+  })
+
+  assert.equal(result.status, "no_claims")
+  assert.equal(result.stats.anglesPlanned, 1)
+  assert.equal(calls.filter(call => call.options.phase === "Search").length, 1)
+  assert.ok(logs.some(message => message.includes("dropped 2 malformed angle entries")))
 })
 
 test("no_claims, inconclusive, synthesis_failed, ok의 source는 동일한 완전한 shape을 유지한다", async t => {
@@ -494,6 +574,33 @@ test("검색 실패와 결과 없음 상태를 구분하고 빈 ok 결과를 no_
   assert.equal(result.stats.anglesNoResults, 2)
   assert.equal(result.stats.anglesFailed, 1)
   assert.equal(result.stats.sourcesSelected, 0)
+  // Partial search failure must name the dead angles, not just count them.
+  assert.match(result.summary, /Angles that failed: 실패\./)
+})
+
+test("전 검색 각도 실패는 no_claims가 아닌 infrastructure_failure로 보고한다", async () => {
+  const scope = makeScope(["실패-1", "실패-2", "실패-3"])
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        return { status: "failed", results: [], errorReason: "rate limited" }
+      }
+      throw new Error("unexpected agent call: " + options.label)
+    },
+  })
+
+  // Rate-limited searches must never read as "nothing is out there".
+  assert.equal(result.status, "infrastructure_failure")
+  assert.match(result.summary, /All 3 search angles failed/)
+  assert.match(result.summary, /retry/i)
+  assert.equal(result.stats.anglesPlanned, 3)
+  assert.equal(result.stats.anglesFailed, 3)
+  assert.equal(result.stats.anglesSucceeded, 0)
+  assert.equal(result.stats.sourcesSelected, 0)
+  assert.deepEqual(result.sources, [])
+  assertResultContract(result)
 })
 
 test("search 병렬 task의 비복구 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
@@ -854,35 +961,85 @@ test("실제 constructor와 직렬화된 plain-object budget 오류만 fetch dro
   }
 })
 
-test("fetch 병렬 task의 claim 변환 오류는 null로 숨기지 않고 barrier 밖으로 전파한다", async () => {
-  await assert.rejects(
-    runWorkflow({
-      args: "테스트 질문",
-      respond: async ({ prompt, options }) => {
-        if (options.label === "scope") return makeScope(["핵심", "보조-1", "보조-2"])
-        if (options.phase === "Search") {
-          return prompt.includes("## Web Searcher: 핵심")
-            ? {
-                status: "ok",
-                results: [searchResult("https://malformed.example/report")],
-              }
-            : { status: "no_results", results: [] }
-        }
-        if (options.phase === "Fetch") {
-          return {
-            status: "ok",
-            sourceQuality: "primary",
-            claims: {},
+test("ok fetch의 malformed claims는 barrier를 죽이지 않고 해당 source만 failed로 강등한다", async t => {
+  const malformedClaims = [
+    ["claims 누락", { status: "ok", sourceQuality: "primary" }],
+    ["claims 비배열", { status: "ok", sourceQuality: "primary", claims: {} }],
+  ]
+
+  for (const [label, malformedExtract] of malformedClaims) {
+    await t.test(label, async () => {
+      const scope = makeScope(["정상", "malformed", "보조"])
+      const { result, logs } = await runWorkflow({
+        args: "테스트 질문",
+        respond: async ({ prompt, options }) => {
+          if (options.label === "scope") return scope
+          if (options.phase === "Search") {
+            if (prompt.includes("## Web Searcher: 정상")) {
+              return { status: "ok", results: [searchResult("https://healthy.example/report")] }
+            }
+            if (prompt.includes("## Web Searcher: malformed")) {
+              return { status: "ok", results: [searchResult("https://malformed.example/report")] }
+            }
+            return { status: "no_results", results: [] }
           }
-        }
-        throw new Error("unexpected agent call: " + options.label)
-      },
+          if (options.phase === "Fetch") {
+            if (prompt.includes("https://malformed.example/report")) return malformedExtract
+            return {
+              status: "ok",
+              sourceQuality: "primary",
+              publishDate: "2026-07-01",
+              claims: [{
+                claim: "핵심 주장은 검증 가능하다.",
+                quote: "핵심 주장을 뒷받침하는 원문",
+                importance: "central",
+              }],
+            }
+          }
+          if (options.phase === "Verify") return verifierResult("supported")
+          if (options.label === "synthesize") return synthesisReport(["c0"])
+          throw new Error("unexpected agent call: " + options.label)
+        },
+      })
+
+      // Malformed extractor output degrades one source; the other source's
+      // pipeline still completes end-to-end.
+      assert.equal(result.status, "ok")
+      assert.equal(result.stats.sourcesFetched, 1)
+      assert.equal(result.stats.fetchErrored, 1)
+      assert.equal(result.stats.confirmed, 1)
+      const malformedSource = result.sources.find(source => source.url === "https://malformed.example/report")
+      assert.equal(malformedSource.fetchStatus, "failed")
+      assert.equal(malformedSource.claimCount, 0)
+      assert.ok(logs.some(message => message.includes("claims array")))
+    })
+  }
+})
+
+test("claims 배열 안의 비객체 항목은 claim으로 집계하지 않는다", async () => {
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("supported"),
+        verifierResult("supported"),
+      ],
+      claims: [
+        null,
+        "문자열 주장",
+        {
+          claim: "핵심 주장은 검증 가능하다.",
+          quote: "핵심 주장을 뒷받침하는 원문",
+          importance: "central",
+        },
+      ],
     }),
-    error =>
-      error?.name === "TypeError" &&
-      /map/.test(error?.message) &&
-      error?.kind === "fetch",
-  )
+  })
+
+  assert.equal(result.status, "ok")
+  assert.equal(result.stats.claimsExtracted, 1)
+  assert.equal(result.stats.confirmed, 1)
 })
 
 test("선택된 fetch가 모두 실패하면 infrastructure_failure를 반환한다", async () => {
@@ -984,6 +1141,57 @@ test("같은 경로의 서로 다른 query URL은 별도 fetch 후보로 유지�
   assert.ok(fetchedPrompts.some(prompt => prompt.includes("https://video.example/watch?v=a")))
   assert.ok(fetchedPrompts.some(prompt => prompt.includes("https://video.example/watch?v=b")))
   assert.equal(result.stats.urlDupes, 0)
+})
+
+test("동치 URL 변형은 정규화로 접혀 한 번만 fetch하고 urlDupes로 집계한다", async () => {
+  const scope = makeScope(["원본", "변형", "보조"])
+  const { result, calls } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ({ prompt, options }) => {
+      if (options.label === "scope") return scope
+      if (options.phase === "Search") {
+        if (prompt.includes("## Web Searcher: 원본")) {
+          return {
+            status: "ok",
+            results: [
+              // Every variant normalizes to https://example.com/page:
+              // www. prefix, https default port 443, trailing slash, fragment.
+              searchResult("https://www.example.com:443/page/"),
+              searchResult("https://example.com/page#section"),
+            ],
+          }
+        }
+        if (prompt.includes("## Web Searcher: 변형")) {
+          return {
+            status: "ok",
+            results: [
+              searchResult("HTTPS://EXAMPLE.com/page"),
+              searchResult("https://example.com/other"),
+            ],
+          }
+        }
+        return { status: "no_results", results: [] }
+      }
+      if (options.phase === "Fetch") {
+        return { status: "irrelevant", sourceQuality: "unreliable", claims: [], errorReason: "fixture" }
+      }
+      throw new Error("unexpected agent call: " + options.label)
+    },
+  })
+
+  const fetchedPrompts = calls
+    .filter(call => call.options.phase === "Fetch")
+    .map(call => call.prompt)
+  // One fetch for the equivalence class (first-seen raw URL), one for the
+  // genuinely distinct URL.
+  assert.equal(fetchedPrompts.length, 2)
+  assert.ok(fetchedPrompts.some(prompt => prompt.includes("https://www.example.com:443/page/")))
+  assert.ok(fetchedPrompts.some(prompt => prompt.includes("https://example.com/other")))
+  assert.ok(!fetchedPrompts.some(prompt => prompt.includes("EXAMPLE.com")))
+  assert.ok(!fetchedPrompts.some(prompt => prompt.includes("#section")))
+  assert.equal(result.stats.sourcesSelected, 2)
+  assert.equal(result.stats.urlDupes, 2)
+  assert.equal(result.stats.invalidUrlDropped, 0)
 })
 
 test("http(s)가 아닌 검색 URL은 fetch 전에 제외한다", async () => {
@@ -1213,7 +1421,7 @@ test("verifier의 프로그래밍 오류와 비재시도 API 오류는 전파한
   }
 })
 
-test("inner verifier panel의 null은 0-0 (3 errored) unverified로 정규화한다", async () => {
+test("inner verifier panel의 전면 null 유실은 inconclusive가 아닌 infrastructure_failure로 보고한다", async () => {
   const { result, calls } = await runWorkflow({
     args: "테스트 질문",
     respond: makeSingleClaimResponder({
@@ -1227,7 +1435,11 @@ test("inner verifier panel의 null은 0-0 (3 errored) unverified로 정규화한
       callIndex === 3 ? null : run(tasks),
   })
 
-  assert.equal(result.status, "inconclusive")
+  // Zero verifier votes arrived, so verification never actually ran. That is
+  // an infrastructure failure, not the research conclusion "inconclusive".
+  assert.equal(result.status, "infrastructure_failure")
+  assert.match(result.summary, /Verification never ran/)
+  assert.match(result.summary, /retry/i)
   assertResultContract(result)
   result.sources.forEach(assertSourceContract)
   assert.equal(result.stats.agentCalls, calls.length)
@@ -1313,7 +1525,7 @@ test("refuted 두 표와 supported 한 표는 1-2로 기각하고 합성하지 �
   assert.equal(calls.filter(call => call.options.label === "synthesize").length, 0)
 })
 
-test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한다", async () => {
+test("누락된 외부 검증 panel의 전면 유실도 infrastructure_failure로 보고한다", async () => {
   const { result, calls, logs } = await runWorkflow({
     args: "테스트 질문",
     respond: makeSingleClaimResponder({
@@ -1327,7 +1539,8 @@ test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한�
       callIndex === 2 ? null : run(tasks),
   })
 
-  assert.equal(result.status, "inconclusive")
+  assert.equal(result.status, "infrastructure_failure")
+  assert.match(result.summary, /Verification never ran/)
   assert.equal(result.stats.claimsVerified, 1)
   assert.equal(result.stats.confirmed, 0)
   assert.equal(result.stats.killed, 0)
@@ -1337,6 +1550,74 @@ test("누락된 외부 검증 panel도 0-0 (3 errored) unverified로 복원한�
   assert.ok(logs.some(message => message.includes("0-0 (3 errored) ?")))
   assert.equal(calls.filter(call => call.options.phase === "Verify").length, 0)
   assert.equal(calls.filter(call => call.options.label === "synthesize").length, 0)
+})
+
+test("일부 verifier 투표라도 도착하면 전면 미확정이라도 inconclusive를 유지한다", async () => {
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        {
+          outcome: "unverified",
+          evidence: "could not check",
+          confidence: "low",
+          failureReason: "WebSearch rate limited",
+        },
+        null,
+        null,
+      ],
+    }),
+  })
+
+  // A verifier DID run and explicitly answered "unverified" — that is a
+  // research conclusion, not lost infrastructure.
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.stats.unverified, 1)
+  assert.equal(result.stats.verifierErrored, 3)
+})
+
+test("unverified claim은 verifier의 failureReason을 reason으로 전달한다", async () => {
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        {
+          outcome: "unverified",
+          evidence: "search unavailable",
+          confidence: "low",
+          failureReason: "WebSearch rate limited",
+        },
+        {
+          outcome: "unverified",
+          evidence: "search unavailable",
+          confidence: "high",
+          failureReason: "tool API returned 529",
+        },
+        verifierResult("supported"),
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.unverified[0].vote, "1-0 (2 errored)")
+  // Highest-confidence unverified verdict wins, mirroring toRefuted.
+  assert.equal(result.unverified[0].reason, "tool API returned 529")
+})
+
+test("unverified verdict가 전혀 없으면 reason은 빈 문자열이다", async () => {
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        verifierResult("supported"),
+        verifierResult("refuted"),
+        null,
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.unverified[0].reason, "")
 })
 
 test("confirmed와 누락 panel 혼합은 실제 agent 호출 수와 claim partition을 유지한다", async () => {

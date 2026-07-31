@@ -409,11 +409,18 @@ try {
   // Catch only the awaited agent operation. Any later transform failure is a
   // programming error and must remain visible.
   scope = await callAgent(SCOPE_PROMPT, { label: "scope", schema: SCOPE_SCHEMA })
-} catch {
+} catch (error) {
+  // Same error taxonomy as the search/fetch/verify stages: recoverable
+  // infrastructure errors become a structured retry result that preserves the
+  // cause; programming and non-retryable API errors must stay visible.
+  if (!isRecoverableAgentError(error)) throw error
+  const reason = sanitizeFailureMessage(safeErrorField(error, "message") ?? error)
+  log("scope failed: " + reason)
   return makeResult({
     status: "infrastructure_failure",
     question: QUESTION,
-    summary: "Scope agent failed. This is an infrastructure failure, not a research conclusion — retry.",
+    error: reason,
+    summary: "Scope agent failed (" + reason + "). This is an infrastructure failure, not a research conclusion — retry.",
   })
 }
 if (!scope) {
@@ -423,6 +430,27 @@ if (!scope) {
     summary: "Scope agent returned no result. This is an infrastructure failure, not a research conclusion — retry.",
   })
 }
+// SCOPE_SCHEMA promises 3-6 angle objects, but schema enforcement is the
+// runtime's contract, not a guarantee. A malformed decomposition is model
+// output failure, not a programming error — report it as a structured retry
+// instead of crashing on scope.angles below.
+const rawAngles = Array.isArray(scope.angles) ? scope.angles : []
+const validAngles = rawAngles.filter(angle =>
+  angle && typeof angle === "object" &&
+  typeof angle.label === "string" && angle.label.trim() !== "" &&
+  typeof angle.query === "string" && angle.query.trim() !== ""
+)
+if (validAngles.length === 0) {
+  return makeResult({
+    status: "infrastructure_failure",
+    question: QUESTION,
+    summary: "Scope agent returned no usable search angles (malformed structured output). This is an infrastructure failure, not a research conclusion — retry.",
+  })
+}
+if (validAngles.length < rawAngles.length) {
+  log("scope: dropped " + (rawAngles.length - validAngles.length) + " malformed angle entries")
+}
+scope = { ...scope, angles: validAngles }
 // ─── Deterministic URL parsing and safe progress labels ───
 // The workflow sandbox is a bare ECMAScript realm — no URL global — so
 // hostname/path come from a regex: captures (1) hostname (userinfo, www.,
@@ -686,7 +714,15 @@ const fetchTaskResults = await parallel(
     if (!ext) {
       ext = { status: "failed", sourceQuality: "unreliable", claims: [], errorReason: "agent returned no result" }
     }
-    const status = ["ok", "irrelevant", "paywalled", "failed"].includes(ext.status) ? ext.status : "failed"
+    let status = ["ok", "irrelevant", "paywalled", "failed"].includes(ext.status) ? ext.status : "failed"
+    // EXTRACT_SCHEMA requires claims, but a response violating it is model
+    // output failure, not a programming error — demote this one source to
+    // failed instead of letting ext.claims.map crash the whole barrier and
+    // discard every other completed fetch.
+    if (status === "ok" && !Array.isArray(ext.claims)) {
+      status = "failed"
+      ext = { ...ext, errorReason: "extractor returned status ok without a claims array" }
+    }
     if (status !== "ok") {
       const action = status === "failed" ? "failed" : "skipped (" + status + ")"
       log("fetch " + action + ": " + quotedLabel(source.url) + " — " + stripLabelChars(ext.errorReason || "no reason provided"))
@@ -710,7 +746,7 @@ const fetchTaskResults = await parallel(
       fetchStatus: status,
       sourceQuality: ext.sourceQuality,
       publishDate: ext.publishDate,
-      claims: ext.claims.map(c => ({
+      claims: ext.claims.filter(c => c && typeof c === "object").map(c => ({
         ...c,
         sourceUrl: source.url,
         sourceTitle: source.title,
@@ -909,15 +945,51 @@ const toRefuted = c => {
     counterSource: why?.counterSource || "",
   }
 }
-const toUnverified = c => ({
-  claim: c.claim,
-  vote: c.vote,
-  erroredVotes: c.erroredVotes,
-  validVotes: c.supportedVotes + c.refutedVotes,
-  source: c.sourceUrl,
-})
+const toUnverified = c => {
+  // Symmetric with toRefuted: carry the verifier's own account of WHY the
+  // claim could not be checked (rate limit? ambiguous search?), not just vote
+  // counts. Prefer the highest-confidence explicit unverified verdict.
+  const why = c.verdicts
+    .filter(v => v.outcome === "unverified")
+    .sort((a, b) => confRank[a.confidence] - confRank[b.confidence])[0]
+  return {
+    claim: c.claim,
+    vote: c.vote,
+    erroredVotes: c.erroredVotes,
+    validVotes: c.supportedVotes + c.refutedVotes,
+    source: c.sourceUrl,
+    reason: why?.failureReason || "",
+  }
+}
+
+// erroredVotes counts explicit "unverified" outcomes together with lost votes,
+// so it cannot separate "verifiers ran and could not confirm" (a research
+// conclusion) from "verification never happened" (an infrastructure failure).
+// presentVotes counts actual verdict objects: zero means no verifier answered.
+const presentVotes = voted.reduce((sum, claim) => sum + claim.verdicts.length, 0)
 
 if (confirmed.length === 0) {
+  if (presentVotes === 0) {
+    // Search and fetch already draw this line (see the rankedClaims === 0
+    // branch); verify must too, or a run whose verification never executed
+    // gets consumed as the research conclusion "inconclusive".
+    return makeResult({
+      status: "infrastructure_failure",
+      question: QUESTION,
+      summary: "Verification never ran: all " + (voted.length * VOTES_PER_CLAIM) +
+        " verifier votes were lost to agent errors or missing panels. This is an infrastructure failure, not a research conclusion — retry.",
+      unverified: unverified.map(toUnverified),
+      sources: allSources.map(toSource),
+      stats: baseStats({
+        claimsExtracted: allClaims.length,
+        claimsVerified: rankedClaims.length,
+        confirmed: 0,
+        killed: 0,
+        unverified: unverified.length,
+        verifierErrored,
+      }),
+    })
+  }
   let summary
   if (killed.length === 0 && unverified.length > 0) {
     summary = "Could not confirm any claims — " + unverified.length + " remained unverified because no panel reached two supported or two refuted votes. " +
