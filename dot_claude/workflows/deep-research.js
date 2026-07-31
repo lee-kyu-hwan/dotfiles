@@ -25,6 +25,59 @@ const MIN_VALID_VOTES = 2
 const MAX_FETCH = 15
 const MAX_VERIFY_CLAIMS = 25
 
+let agentCalls = 0
+const callAgent = (prompt, options) => {
+  agentCalls++
+  return agent(prompt, options)
+}
+
+const EMPTY_STATS = {
+  anglesPlanned: 0,
+  anglesSucceeded: 0,
+  anglesNoResults: 0,
+  anglesFailed: 0,
+  anglesWithoutFetch: 0,
+  sourcesSelected: 0,
+  sourcesFetched: 0,
+  fetchSkipped: 0,
+  fetchErrored: 0,
+  urlDupes: 0,
+  invalidUrlDropped: 0,
+  budgetDropped: 0,
+  claimsExtracted: 0,
+  claimsVerified: 0,
+  confirmed: 0,
+  killed: 0,
+  unverified: 0,
+  verifierErrored: 0,
+  afterSynthesis: 0,
+  agentCalls: 0,
+}
+
+const makeResult = ({
+  status,
+  question = "",
+  summary = "",
+  error,
+  findings = [],
+  confirmed = [],
+  refuted = [],
+  unverified = [],
+  sources = [],
+  stats = {},
+}) => ({
+  status,
+  question,
+  summary,
+  ...(error ? { error } : {}),
+  findings,
+  confirmed,
+  refuted,
+  unverified,
+  sources,
+  stats: { ...EMPTY_STATS, ...stats, agentCalls },
+})
+
 // ─── Schemas ───
 const SCOPE_SCHEMA = {
   type: "object", required: ["question", "angles", "summary"],
@@ -104,9 +157,9 @@ const REPORT_SCHEMA = {
 phase("Scope")
 const QUESTION = (typeof args === "string" && args.trim()) || ""
 if (!QUESTION) {
-  return { error: "No research question provided. Pass it as args: Workflow({name: 'deep-research', args: '<question>'})." }
+  return makeResult({ status: "invalid_input", error: "No research question provided." })
 }
-const scope = await agent(
+const scope = await callAgent(
   "Decompose this research question into complementary search angles.\n\n" +
   "## Question\n" + QUESTION + "\n\n" +
   "## Task\n" +
@@ -231,7 +284,7 @@ const VERIFY_PROMPT = (claim, v) =>
 const searchResults = await pipeline(
   scope.angles,
 
-  angle => agent(SEARCH_PROMPT(angle), {
+  angle => callAgent(SEARCH_PROMPT(angle), {
     label: "search:" + angle.label, phase: "Search", schema: SEARCH_SCHEMA,
     model: "haiku", effort: "low"
   }).then(r => {
@@ -289,7 +342,7 @@ const searchResults = await pipeline(
         const isCleanBareHost = cleanHost === host && host !== "" && Array.from(host).length <= LABEL_CAP && STRICT_HOST.test(host)
         const hostLabel = cleanHost === "" ? "" : isCleanBareHost ? host : quotedLabel(host)
         const sourceLabel = hostLabel || (stripLabelChars(source.title).trim() && quotedLabel(source.title)) || "unknown"
-        return agent(FETCH_PROMPT(source, searchResult.angle), {
+        return callAgent(FETCH_PROMPT(source, searchResult.angle), {
           label: "fetch:" + sourceLabel,
           phase: "Fetch",
           schema: EXTRACT_SCHEMA,
@@ -394,7 +447,7 @@ const voted = (await parallel(
         // says "default to refuted if uncertain", so a weak verifier skews toward
         // over-refuting — that silently deletes sound findings and can empty the
         // whole report via the confirmed.length === 0 branch below.
-        agent(VERIFY_PROMPT(claim, v), {
+        callAgent(VERIFY_PROMPT(claim, v), {
           // claim.claim is model-extracted web page text: untrusted, same as a
           // fetch label. Route it through quotedLabel rather than raw slice.
           label: "v" + v + ":" + quotedLabel(claim.claim),
@@ -506,13 +559,13 @@ const salvage = reason => ({
   }),
 })
 
-// Budget exhaustion makes agent() THROW, not return null, and this is a top-level
+// Budget exhaustion makes callAgent() THROW, not return null, and this is a top-level
 // await outside parallel/pipeline — nothing catches it. An uncaught throw here
 // rejects the whole workflow and discards every result above it (up to ~119
 // agents of work) along with the salvage path that exists to prevent that loss.
 let report
 try {
-  report = await agent(
+  report = await callAgent(
     "## Synthesis: research report\n\n" +
     "**Question:** " + QUESTION + "\n\n" +
     confirmed.length + " claims cleared " + VOTES_PER_CLAIM + "-vote adversarial verification. Read each claim's vote — a 2-1 panel is split, not unanimous. Merge semantic duplicates and synthesize.\n\n" +
