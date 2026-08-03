@@ -29,8 +29,9 @@ workmux remove {이름}             # worktree + tmux 윈도우 + 로컬 브랜�
 
 ## 고아 agent state 정리 (workmux 0.1.233 버그 우회)
 
-**`workmux remove`·`close` 후에는 반드시 아래를 실행한다.** 안 하면 dashboard·sidebar·
-`workmux status`가 **전부** 빈 화면이 된다.
+**`workmux remove`·`close`·`merge` 후에는 반드시 아래를 실행한다.** 안 하면 dashboard·
+sidebar·`workmux status`가 **전부** 빈 화면이 된다. `remove --gone`·`--all`처럼 여러 개를
+한 번에 지웠으면 고아도 여러 개 생기지만, 아래 스니펫이 한 번에 다 정리한다.
 
 ```bash
 d="$HOME/.local/state/workmux/agents"
@@ -49,12 +50,13 @@ if [ -d "$d" ] && [ -n "$live" ]; then
 fi
 ```
 
-**왜 필요한가:** `remove`·`close`는 tmux 윈도우만 kill하고 agent state 파일은 지우지
-않는다. 원래는 reconcile이 나중에 수거하지만, v0.1.233의 `51bd57c6`(#209 수정)이 그
-수거 경로를 깨뜨렸다 — 없는 pane을 조회하면 tmux는 exit 0으로 빈 필드를 돌려주는데
-workmux가 이를 "판단 불가"로 보고 열거 **전체**를 에러로 중단한다. 그래서 **에이전트가
-돌던 worktree를 제거할 때마다 고아 파일이 하나씩 쌓이고 그 즉시 모든 뷰가 빈다.**
-`reap-agents`도 같은 에러로 죽어서 탈출구가 못 된다.
+**왜 필요한가:** `remove`·`close`·`merge`는 tmux 윈도우만 kill하고 agent state 파일은
+지우지 않는다(`remove`와 `merge`는 같은 `cleanup.rs`를 쓴다). 원래는 reconcile이 나중에
+수거하지만, v0.1.233의 `51bd57c6`(#209 수정)이 그 수거 경로를 깨뜨렸다 — 없는 pane을
+조회하면 tmux는 exit 0으로 빈 필드를 돌려주는데 workmux가 이를 "판단 불가"로 보고 열거
+**전체**를 에러로 중단한다. 그래서 **에이전트가 돌던 worktree를 제거할 때마다 고아
+파일이 하나씩 쌓이고 그 즉시 모든 뷰가 빈다.** `reap-agents`도 같은 에러로 죽어서
+탈출구가 못 된다.
 
 두 가드는 workmux의 reconcile 로직을 그대로 따른 것이므로 **지우지 말 것**:
 - `instance` 비교 — 다른 tmux 서버의 state를 건드리지 않는다
