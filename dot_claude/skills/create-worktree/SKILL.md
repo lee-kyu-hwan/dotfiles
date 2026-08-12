@@ -50,16 +50,16 @@ git -C "$ROOT" config --get filter.git-crypt.smudge   # 값이 있으면 git-cry
 git-crypt 저장소에서는 그것이 smudge 필터 에러로 **실패한다**.
 
 ```bash
-./scripts/create-worktree.sh {브랜치명}    # 필터 우회·키 링크·재체크아웃 + 의존성 설치
+./scripts/create-worktree.sh {브랜치명}    # --no-checkout 생성·키 링크·체크아웃 + 의존성 설치
 workmux open {디렉토리명} --target-name {윈도우이름} --parent-session main  # 이슈 번호가 있을 때
 workmux open {디렉토리명} --parent-session main                            # 이슈 번호가 없을 때
 ```
 
 - **스크립트가 실패하면 여기서 멈춘다.** 종료 코드를 확인하고, 실패했으면
-  `workmux open`으로 넘어가지 않는다. 스크립트는 worktree를 만든 뒤 키 링크·재체크아웃·
-  의존성 설치를 하므로 뒤쪽에서 죽어도 worktree는 남는다 — 그 상태로 `workmux open`을
-  실행하면 성공해버려서 파일이 암호화된 채이거나 의존성이 없는 worktree를 정상으로
-  보고하게 된다.
+  `workmux open`으로 넘어가지 않는다. 스크립트는 worktree를 `--no-checkout`으로 만든 뒤
+  키 링크·체크아웃·의존성 설치를 하므로 뒤쪽에서 죽어도 worktree는 남는다 — 그 상태로
+  `workmux open`을 실행하면 성공해버려서 파일이 암호화된 채이거나 의존성이 없는
+  worktree를 정상으로 보고하게 된다.
 - 스크립트의 확인 프롬프트는 `-y`나 `yes |`로 우회하지 않고 사용자에게 직접 확인받는다.
 - **스크립트 출력에서 worktree 절대경로를 확보한다.** `workmux open`에 넘길
   디렉토리명은 그 경로의 basename이다 (아래 "이름 파생" 참조).
