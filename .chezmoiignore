@@ -21,4 +21,8 @@ setup.sh
 .hammerspoon/init.lua
 run_once_configure-keycastr.sh
 run_onchange_brew-bundle.sh
+# vm_stat·vm.swapusage·hw.memsize·kern.memorystatus_vm_pressure_level 가 전부
+# Darwin 전용이다. .tmux.conf 쪽도 darwin 분기로 막았고 스크립트 자체도 uname 을
+# 확인하지만, 애초에 배포하지 않는 것이 가장 확실하다.
+.local/bin/tmux-mem-status
 {{ end }}
