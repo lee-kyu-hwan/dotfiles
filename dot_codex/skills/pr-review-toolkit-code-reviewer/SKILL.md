@@ -1,6 +1,6 @@
 ---
 name: pr-review-toolkit-code-reviewer
-description: Use after code changes or before a pull request to review the selected diff for high-confidence bugs, project-rule violations, and significant quality issues.
+description: Use only for a code-quality-only review of the selected diff — high-confidence bugs, project-rule violations, and significant quality issues. For a comprehensive review that also covers tests, comments, error handling, and type design, use pr-review-toolkit instead.
 ---
 
 # PR Review Toolkit: Code Reviewer

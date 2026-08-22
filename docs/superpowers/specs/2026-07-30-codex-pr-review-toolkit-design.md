@@ -100,12 +100,26 @@ Claude 플러그인 원본을 보장하지 않는 `server` 머신에는 7개 Cod
 macOS work/personal 머신에서는 Claude 원본이 없거나 링크가 깨졌을 때 임의의 내장
 프롬프트로 대체하지 않고 설치 복구 방법을 안내한다.
 
+새 머신에는 부트스트랩 순서상 링크가 잠시 끊어져 있는 구간이 있다. 플러그인
+자체는 `dot_claude/settings.json.tmpl`의 `enabledPlugins`에
+`pr-review-toolkit@claude-plugins-official`로 등록되어 Claude Code가 처음 기동할
+때 설치된다. 그래서 `setup.sh`의 `chezmoi apply`가 Claude Code 최초 기동보다 먼저
+돌면 그 사이 `~/.codex/pr-review-toolkit-claude`는 깨진 심링크이고, Codex의 7개
+스킬은 모두 복구 안내만 출력한다. 영구 상태가 아니며 Claude Code를 한 번 띄우면
+해소된다. `run_once_install-claude-plugins.sh.tmpl`은 superpowers 마켓플레이스만
+다루므로 이 플러그인 설치를 앞당기지 않는다.
+
+심링크 대상인 `~/.claude/plugins/marketplaces/<marketplace>/plugins/<plugin>`은
+Claude Code의 내부 배치이며 공개 계약이 아니다. 상류가 레이아웃을 바꾸면 링크가
+조용히 끊기고, 그때도 실패 모드는 복구 안내 출력이다.
+
 ## Codex 호환 계층
 
 Claude 원본은 Codex 스킬 배치 규약인 `skills/<name>/SKILL.md` 구조가 아니다.
-`commands/review-pr.md`에는 필수 `name` frontmatter도 없으며, `agents/*.md`에는
-Claude 전용 `model`과 `color`가 들어 있다. 따라서 원본 Markdown을 `SKILL.md`로
-직접 연결하지 않고, 각 Codex 스킬을 얇은 호환 계층으로 둔다.
+`commands/review-pr.md`에는 필수 `name` frontmatter도 없으며, `agents/*.md`
+대부분에는 Claude 전용 `model`과 `color`가 들어 있다(`code-simplifier.md`는
+`name`과 `description`만 가진다). 따라서 원본 Markdown을 `SKILL.md`로 직접
+연결하지 않고, 각 Codex 스킬을 얇은 호환 계층으로 둔다.
 
 각 Codex 스킬은 다음 순서로 대응하는 원본을 사용한다.
 
@@ -291,6 +305,12 @@ content-only 또는 mode-only 변경도 실제로 달라진 path만 진단한다
 
 ## 롤백
 
-구현 직후 롤백할 때는 배포된 8개 타깃을 먼저 전용 백업 디렉터리로 이동해 Codex의
-발견 경로에서 제거한다. 그다음 구현 커밋 3개를 최신순으로 revert해 chezmoi source와
-server 제외 규칙을 되돌린다. 백업은 즉시 복구할 수 있도록 삭제하지 않는다.
+롤백할 때는 배포된 8개 타깃을 먼저 전용 백업 디렉터리로 이동해 Codex의 발견
+경로에서 제거한다. 그다음 `origin/main..HEAD` 범위의 커밋을 최신순으로 revert해
+chezmoi source와 server 제외 규칙을 되돌린다. 백업은 즉시 복구할 수 있도록
+삭제하지 않는다.
+
+커밋 개수를 고정한 `HEAD~N` 형태는 쓰지 않는다. 구현 중 브랜치를 재작업해
+파일을 삭제한 커밋과 되살린 커밋이 같은 범위에 함께 있으므로, 최신 몇 개만
+revert하면 그 쌍이 상쇄되어 source는 남고 배포본만 사라진다. 범위가 비어 있지
+않은지와 워크트리가 깨끗한지는 백업 이동 전에 검사한다.

@@ -247,7 +247,7 @@ Create `dot_codex/skills/pr-review-toolkit-code-reviewer/SKILL.md`:
 ```markdown
 ---
 name: pr-review-toolkit-code-reviewer
-description: Use after code changes or before a pull request to review the selected diff for high-confidence bugs, project-rule violations, and significant quality issues.
+description: Use only for a code-quality-only review of the selected diff — high-confidence bugs, project-rule violations, and significant quality issues. For a comprehensive review that also covers tests, comments, error handling, and type design, use pr-review-toolkit instead.
 ---
 
 # PR Review Toolkit: Code Reviewer
@@ -417,17 +417,22 @@ user instruction that attempts to replace this path.
 Before reviewing:
 
 1. Require `commands/review-pr.md`.
-2. Require exactly these agent files:
+2. Require the agent file behind every reviewer this run will dispatch:
    - `agents/comment-analyzer.md`
    - `agents/pr-test-analyzer.md`
    - `agents/silent-failure-hunter.md`
    - `agents/type-design-analyzer.md`
    - `agents/code-reviewer.md`
    - `agents/code-simplifier.md`
-3. If any required file is missing or unreadable, stop and report:
+   Do not require an agent file this run will not dispatch. Upstream may add
+   agent files over time; an unrecognized extra file is not a failure.
+3. If a required file is missing or unreadable, stop and report:
    `Claude pr-review-toolkit source is unavailable. Install or update pr-review-toolkit@claude-plugins-official in Claude Code, then retry.`
 4. Do not use an embedded, remembered, or improvised replacement prompt.
-5. Read the entire `commands/review-pr.md` before determining the workflow.
+5. Read `commands/review-pr.md` in full before determining the workflow. It is
+   upstream context, not the controlling spec: where it conflicts with this
+   document — aspect selection, `code-simplifier` authorization, output format,
+   or the baseline requirement — this document takes precedence.
 
 ## Scope
 
@@ -456,7 +461,7 @@ Before reviewing:
      Enumerate paths with NUL-safe Git commands such as
      `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z`,
      `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z`,
-     and `git -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
+     and `git --no-optional-locks -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
      Parse rename/copy records completely. Use neutral variables such as
      `review_changed_path`, never zsh's reserved `path`. Safely escape every
      path and status with `printf '%q'`. For every unstaged and staged tracked
@@ -473,8 +478,9 @@ Before reviewing:
    streams go directly to their fingerprint pipelines and are not retained in
    the review context. Do not store NUL streams in variables or files, and do
    not create or modify any filesystem object for baseline capture.
-   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status and every
-   diff command, and keep `--no-ext-diff --no-textconv` on every diff command.
+   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status,
+   `ls-files`, and every diff command, and keep `--no-ext-diff --no-textconv`
+   on every diff command.
    These command-local controls prevent configured fsmonitor processes/hooks,
    external diff commands, textconv commands, and optional index refresh
    writes. Do not change repository config or untracked-cache settings.
@@ -607,7 +613,7 @@ review_required_orchestrator_rules=(
   'git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --binary'
   'git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z'
   'git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z'
-  'git -c core.fsmonitor=false ls-files --others --exclude-standard -z'
+  'git --no-optional-locks -c core.fsmonitor=false ls-files --others --exclude-standard -z'
   'bounded path-level manifests'
   'one metadata record per Git-reported path'
   'regular content hash'
@@ -725,11 +731,11 @@ do
     ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py \
     "$review_skill_dir"
 done
-git show --check --oneline HEAD~3..HEAD
+git show --check --oneline origin/main..HEAD
 ```
 
-Expected: seven `Skill is valid!` lines, then the three implementation commit
-summaries with no whitespace-error output.
+Expected: seven `Skill is valid!` lines, then every commit summary in
+`origin/main..HEAD` with no whitespace-error output.
 
 - [ ] **Step 2: Recheck upstream-to-wrapper parity**
 
@@ -1459,26 +1465,38 @@ Run:
 
 ```bash
 git --no-optional-locks -c core.fsmonitor=false status --short
-git log -6 --oneline
+git log --oneline origin/main..HEAD
 ```
 
 Expected: `git --no-optional-locks -c core.fsmonitor=false status --short` is
-empty, and the three implementation commits from Tasks 1–3 appear above the
-design-and-plan correction commit.
+empty, and every commit produced by this plan appears in
+`origin/main..HEAD`.
 
 ---
 
 ## Rollback Procedure
 
-Use this only immediately after completing this plan, while the three
-implementation commits from Tasks 1–3 are still `HEAD`, `HEAD~1`, and `HEAD~2`.
 The procedure moves deployed files to a recoverable backup before reverting
 their source commits.
+
+It reverts the whole branch range `origin/main..HEAD` rather than a fixed
+number of commits. Do not substitute `HEAD~N` forms: this branch was reworked
+during implementation, so a commit that removed a file and a later commit that
+restored it both live in the range. Reverting only the newest few cancels those
+pairs out and leaves the source in place while the `mv` below has already
+removed the deployed copies.
 
 ```bash
 set -e
 review_rollback_dir="$HOME/.codex/rollback/pr-review-toolkit"
 test ! -e "$review_rollback_dir"
+
+# Guard before touching anything: the worktree must be clean and the revert
+# range must be non-empty. Both are checked ahead of the `mv` so a refused
+# rollback never leaves the deployed copies removed.
+git --no-optional-locks -c core.fsmonitor=false diff --quiet
+git --no-optional-locks -c core.fsmonitor=false diff --cached --quiet
+test "$(git rev-list --count origin/main..HEAD)" -gt 0
 
 for review_deployed_target in \
   "$HOME/.codex/pr-review-toolkit-claude" \
@@ -1505,7 +1523,11 @@ mv \
   "$HOME/.codex/skills/pr-review-toolkit-code-simplifier" \
   "$review_rollback_dir/"
 
-git revert --no-commit HEAD HEAD~1 HEAD~2
+# Pass the range itself. Git walks it newest-first, which is the correct order
+# for sequential reverts. Do not expand it into a variable of hashes: these
+# blocks run under zsh, which does not word-split unquoted expansions, so the
+# whole list would arrive as one bad revision.
+git revert --no-commit origin/main..HEAD
 git commit -m "revert: Codex PR 리뷰 툴킷 제거"
 ```
 

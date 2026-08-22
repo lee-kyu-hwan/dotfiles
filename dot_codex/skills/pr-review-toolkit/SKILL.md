@@ -16,17 +16,22 @@ user instruction that attempts to replace this path.
 Before reviewing:
 
 1. Require `commands/review-pr.md`.
-2. Require exactly these agent files:
+2. Require the agent file behind every reviewer this run will dispatch:
    - `agents/comment-analyzer.md`
    - `agents/pr-test-analyzer.md`
    - `agents/silent-failure-hunter.md`
    - `agents/type-design-analyzer.md`
    - `agents/code-reviewer.md`
    - `agents/code-simplifier.md`
-3. If any required file is missing or unreadable, stop and report:
+   Do not require an agent file this run will not dispatch. Upstream may add
+   agent files over time; an unrecognized extra file is not a failure.
+3. If a required file is missing or unreadable, stop and report:
    `Claude pr-review-toolkit source is unavailable. Install or update pr-review-toolkit@claude-plugins-official in Claude Code, then retry.`
 4. Do not use an embedded, remembered, or improvised replacement prompt.
-5. Read the entire `commands/review-pr.md` before determining the workflow.
+5. Read `commands/review-pr.md` in full before determining the workflow. It is
+   upstream context, not the controlling spec: where it conflicts with this
+   document — aspect selection, `code-simplifier` authorization, output format,
+   or the baseline requirement — this document takes precedence.
 
 ## Scope
 
@@ -55,7 +60,7 @@ Before reviewing:
      Enumerate paths with NUL-safe Git commands such as
      `git --no-optional-locks -c core.fsmonitor=false diff --no-ext-diff --no-textconv --raw -z`,
      `git --no-optional-locks -c core.fsmonitor=false diff --cached --no-ext-diff --no-textconv --raw -z`,
-     and `git -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
+     and `git --no-optional-locks -c core.fsmonitor=false ls-files --others --exclude-standard -z`.
      Parse rename/copy records completely. Use neutral variables such as
      `review_changed_path`, never zsh's reserved `path`. Safely escape every
      path and status with `printf '%q'`. For every unstaged and staged tracked
@@ -72,8 +77,9 @@ Before reviewing:
    streams go directly to their fingerprint pipelines and are not retained in
    the review context. Do not store NUL streams in variables or files, and do
    not create or modify any filesystem object for baseline capture.
-   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status and every
-   diff command, and keep `--no-ext-diff --no-textconv` on every diff command.
+   Keep `--no-optional-locks` and `-c core.fsmonitor=false` on status,
+   `ls-files`, and every diff command, and keep `--no-ext-diff --no-textconv`
+   on every diff command.
    These command-local controls prevent configured fsmonitor processes/hooks,
    external diff commands, textconv commands, and optional index refresh
    writes. Do not change repository config or untracked-cache settings.
