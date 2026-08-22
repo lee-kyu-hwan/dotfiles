@@ -21,10 +21,59 @@ workmux로 worktree와 tmux 윈도우를 함께 제거한다.
 ```bash
 workmux list                      # 대상 확인
 workmux remove {이름}             # worktree + tmux 윈도우 + 로컬 브랜치
+# 그리고 아래 "고아 agent state 정리"를 반드시 실행한다
 ```
 
 `workmux remove`는 기본적으로 **확인 프롬프트를 띄우고 미커밋 변경이 있으면 경고**한다.
 그 프롬프트를 `-f`로 우회하지 않고 사용자에게 직접 확인받는다.
+
+## 고아 agent state 정리 (workmux 0.1.233 버그 우회)
+
+**`workmux remove`·`close` 후에는 반드시 아래를 실행한다.** 안 하면 dashboard·sidebar·
+`workmux status`가 **전부** 빈 화면이 된다.
+
+```bash
+d="$HOME/.local/state/workmux/agents"
+live=$(tmux list-panes -a -F '#{pane_id}') || live=""
+if [ -d "$d" ] && [ -n "$live" ]; then
+  sock=$(tmux display-message -p '#{socket_path}')
+  boot=$(tmux display-message -p '#{start_time}')
+  for f in "$d"/tmux__*.json; do
+    [ -e "$f" ] || continue
+    [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue  # 다른 tmux 서버
+    [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue            # 이전 부팅 = resurrect 입력
+    p=$(jq -r '.pane_key.pane_id // ""' "$f")
+    printf '%s\n' "$live" | grep -qxF -- "$p" && continue                 # 살아있는 pane
+    rm -f -- "$f" && echo "pruned stale workmux agent state: $p"
+  done
+fi
+```
+
+**왜 필요한가:** `remove`·`close`는 tmux 윈도우만 kill하고 agent state 파일은 지우지
+않는다. 원래는 reconcile이 나중에 수거하지만, v0.1.233의 `51bd57c6`(#209 수정)이 그
+수거 경로를 깨뜨렸다 — 없는 pane을 조회하면 tmux는 exit 0으로 빈 필드를 돌려주는데
+workmux가 이를 "판단 불가"로 보고 열거 **전체**를 에러로 중단한다. 그래서 **에이전트가
+돌던 worktree를 제거할 때마다 고아 파일이 하나씩 쌓이고 그 즉시 모든 뷰가 빈다.**
+`reap-agents`는 탈출구가 아니다 — 오래된 agent **프로세스**를 종료하는 명령이고
+state 파일은 지우지 않는다.
+
+두 가드는 workmux의 reconcile 로직을 그대로 따른 것이므로 **지우지 말 것**:
+- `instance` 비교 — 다른 tmux 서버의 state를 건드리지 않는다
+- `boot_id` 비교 — tmux/컴퓨터 크래시 후 남은 이전 부팅의 state는 `workmux resurrect`의
+  입력이다. 지우면 복구가 불가능해진다
+
+**삭제 조건은 upstream이 아니라 설치 버전이다.**
+[raine/workmux#213](https://github.com/raine/workmux/issues/213)은 upstream
+v0.1.234(2026-08-04)에서 이미 고쳐졌지만, 이 우회책은 **0.1.233에 고정된 머신**에
+필요하다. upstream 기준으로 읽고 지우면 `remove` 한 번에 모든 뷰가 비는 상태로
+되돌아간다. 아래가 참일 때만 이 섹션 전체를 삭제한다.
+
+```bash
+workmux --version   # 0.1.234 이상이면 이 섹션은 죽은 코드다
+```
+
+관련: 0.1.233은 `--parent-session`에 넘긴 세션명의 대소문자를 보존하지 않는다
+(v0.1.234에서 수정). `main`은 소문자라 현재 영향은 없다.
 
 ### 자주 쓰는 변형
 
@@ -46,6 +95,14 @@ workmux remove {이름}             # worktree + tmux 윈도우 + 로컬 브랜�
 ## 마무리
 
 `workmux list`로 최종 상태를 안내한다. 삭제된 항목이 목록에서 사라졌는지 확인한다.
+
+**`workmux list`만으로는 위 고아 state 실패를 잡을 수 없다.** 고아가 있어도 표는
+정상처럼 exit 0으로 출력되고 AGENT 열만 조용히 빈다. `workmux status`는 에러를
+찍으면서도 exit 0을 반환하므로 종료 코드로도 구분되지 않는다. 문자열로 확인한다.
+
+```bash
+workmux status 2>&1 | grep -q '^Error:' && echo "고아 state 남음 — prune 재실행 필요"
+```
 
 ## 주의사항
 
