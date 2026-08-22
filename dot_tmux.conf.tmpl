@@ -152,9 +152,11 @@ bind = run-shell "$HOME/.local/bin/tmux-stack-layout"
 # ============================================================
 bind W display-popup -h 85% -w 90% -E "workmux dashboard"
 
-# prefix 없이 단일 조작으로도 띄운다. Option+F10/F11/F12 3연속 체계의 가운데다.
-#   M-F10 = Quick Terminal (Ghostty 전역), M-F12 = prefix
-# F10~F12는 macOS 기본이 미디어키라 fn을 함께 눌러야 한다 (fn+Option+F11).
+# prefix 없이 단일 조작으로도 띄운다. M-F11은 dashboard, M-F12는 prefix다
+# (prefix가 M-F12인 것은 macOS 분기뿐이다 — Linux는 C-b).
+# F11/F12는 macOS 기본이 미디어키(음소거/볼륨)라 fn을 함께 눌러야 한다
+# (fn+Option+F11). 번거롭지만 음량 키를 그대로 쓰기 위해 fnState는 의도적으로
+# 바꾸지 않는다.
 # root 테이블이므로 이 키는 pane 안 앱에 전달되지 않는다 —
 # nvim(F키·Alt 매핑 0개)·readline·Ghostty 어느 쪽과도 충돌하지 않음을 확인했다.
 bind -n M-F11 display-popup -h 85% -w 90% -E "workmux dashboard"
