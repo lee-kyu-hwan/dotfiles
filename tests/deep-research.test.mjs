@@ -20,11 +20,13 @@ const STATS_FIELDS = [
   "afterSynthesis",
   "agentCalls",
   "anglesFailed",
+  "anglesMalformed",
   "anglesNoResults",
   "anglesPlanned",
   "anglesSucceeded",
   "anglesWithoutFetch",
   "budgetDropped",
+  "claimsDropped",
   "claimsExtracted",
   "claimsVerified",
   "confirmed",
@@ -36,7 +38,9 @@ const STATS_FIELDS = [
   "sourcesSelected",
   "unverified",
   "urlDupes",
+  "verifierBudgetDropped",
   "verifierErrored",
+  "verifierMalformed",
 ]
 const SOURCE_FIELDS = [
   "angle",
@@ -429,9 +433,75 @@ test("malformed angle 항목은 드롭을 기록하고 유효한 각도로 계�
   })
 
   assert.equal(result.status, "no_claims")
-  assert.equal(result.stats.anglesPlanned, 1)
+  // anglesPlanned 는 "계획한 수"다. 드롭 후 생존 수를 여기 넣으면 커버리지 축소가
+  // 결과에서 사라져, 3개 중 2개가 malformed 인데도 "계획 1, 실패 0"으로 보고된다.
+  // 호출자는 anglesPlanned 를 커버리지 기준선으로 쓰므로 완전 커버리지로 오독한다.
+  assert.equal(result.stats.anglesPlanned, 3)
+  assert.equal(result.stats.anglesMalformed, 2)
   assert.equal(calls.filter(call => call.options.phase === "Search").length, 1)
   assert.ok(logs.some(message => message.includes("dropped 2 malformed angle entries")))
+})
+
+test("verdict 형태 불합격 표는 supported 로 세지 않고 errored 로 강등한다", async () => {
+  // VERDICT_SCHEMA 는 evidence 를 string 으로만 요구하므로 빈 문자열이 통과한다.
+  // 그 표를 세면 근거 칸이 빈 confidence "high" finding 이 나온다 — 사용자가
+  // 근거를 검증할 수 없는 이 워크플로에서 가장 비싼 실패다.
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: makeSingleClaimResponder({
+      verdicts: [
+        { outcome: "supported", evidence: "", confidence: "high" },
+        { outcome: "supported", evidence: "   ", confidence: "high" },
+        { outcome: "supported", evidence: "실제 근거", confidence: "high" },
+      ],
+    }),
+  })
+
+  assert.equal(result.status, "inconclusive")
+  assert.equal(result.stats.confirmed, 0)
+  assert.equal(result.stats.verifierMalformed, 2)
+  assert.equal(result.unverified.length, 1)
+  assert.equal(result.unverified[0].validVotes, 1)
+})
+
+test("예산 소진으로 실행되지 못한 verify 표는 unverified 이유와 stats 로 구분한다", async () => {
+  // fetch 는 budget_dropped 로 구분하는데 verify 는 그 분기가 없어 "검증기가 돌았지만
+  // 판정 못 함"으로 보고됐다. 호출자가 재시도 대상으로 보지 않는다.
+  const base = makeSingleClaimResponder({ verdicts: [] })
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ctx => {
+      if (ctx.options.phase === "Verify") throw new WorkflowBudgetExceededError("budget")
+      return base(ctx)
+    },
+  })
+
+  // 전면 소진은 presentVotes === 0 이 잡아 infrastructure_failure 가 된다.
+  // 핵심은 그 표들이 "판정 불능"이 아니라 "미실행"으로 집계되는 것이다.
+  assert.equal(result.stats.verifierBudgetDropped, 3)
+  assert.equal(result.status, "infrastructure_failure")
+})
+
+test("부분 예산 소진은 unverified 이유에 미실행임을 명시한다", async () => {
+  // 앞 표는 정상, 뒤 표만 소진되는 경우. confirmed 가 하나라도 있으면
+  // presentVotes === 0 분기를 우회하므로 예전에는 status "ok" 로 조용히 지나갔다.
+  let voteCount = 0
+  const base = makeSingleClaimResponder({ verdicts: [] })
+  const { result } = await runWorkflow({
+    args: "테스트 질문",
+    respond: async ctx => {
+      if (ctx.options.phase === "Verify") {
+        voteCount += 1
+        if (voteCount === 1) return { outcome: "supported", evidence: "근거", confidence: "high" }
+        throw new WorkflowBudgetExceededError("budget")
+      }
+      return base(ctx)
+    },
+  })
+
+  assert.equal(result.stats.verifierBudgetDropped, 2)
+  assert.equal(result.unverified.length, 1)
+  assert.equal(result.unverified[0].reason, "verification skipped: workflow budget exhausted")
 })
 
 test("no_claims, inconclusive, synthesis_failed, ok의 source는 동일한 완전한 shape을 유지한다", async t => {

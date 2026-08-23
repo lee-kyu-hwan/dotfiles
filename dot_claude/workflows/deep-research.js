@@ -260,6 +260,7 @@ const unwrapParallelTaskResults = (results, expectedLength, kind) => {
 
 const EMPTY_STATS = {
   anglesPlanned: 0,
+  anglesMalformed: 0,
   anglesSucceeded: 0,
   anglesNoResults: 0,
   anglesFailed: 0,
@@ -272,11 +273,14 @@ const EMPTY_STATS = {
   invalidUrlDropped: 0,
   budgetDropped: 0,
   claimsExtracted: 0,
+  claimsDropped: 0,
   claimsVerified: 0,
   confirmed: 0,
   killed: 0,
   unverified: 0,
   verifierErrored: 0,
+  verifierMalformed: 0,
+  verifierBudgetDropped: 0,
   afterSynthesis: 0,
   agentCalls: 0,
 }
@@ -449,8 +453,14 @@ if (validAngles.length === 0) {
     summary: "Scope agent returned no usable search angles (malformed structured output). This is an infrastructure failure, not a research conclusion — retry.",
   })
 }
-if (validAngles.length < rawAngles.length) {
-  log("scope: dropped " + (rawAngles.length - validAngles.length) + " malformed angle entries")
+// anglesPlanned 는 "계획한 수"여야 한다. scope.angles 를 덮어쓴 뒤 그 길이를 쓰면
+// 드롭 사실이 결과에서 사라지고, 6개 중 4개가 malformed여도 "계획 2, 실패 0"으로
+// 보고된다. 호출자는 anglesPlanned 를 커버리지 기준선으로 쓰므로 완전 커버리지로
+// 오독한다. 계획 수를 따로 붙잡고 드롭 수를 stats 로 내보낸다.
+const plannedAngleCount = rawAngles.length
+const malformedAngleCount = rawAngles.length - validAngles.length
+if (malformedAngleCount > 0) {
+  log("scope: dropped " + malformedAngleCount + " malformed angle entries")
 }
 scope = { ...scope, angles: validAngles }
 // ─── Deterministic URL parsing and safe progress labels ───
@@ -500,11 +510,34 @@ const LABEL_CAP = 40
 const LABEL_STRIP = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff\u0022\u201c-\u201f\u2033\u2036\u275d\u275e\u301d\u301e\uff02]/g
 const STRICT_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 const stripLabelChars = s => String(s).replace(LABEL_STRIP, "")
+// claim 텍스트가 없는 항목까지 버리고 드롭 수를 센다.
+const countDroppedClaims = (claims, url) => {
+  const arr = Array.isArray(claims) ? claims : []
+  const kept = arr.filter(c =>
+    c && typeof c === "object" && typeof c.claim === "string" && c.claim.trim() !== ""
+  )
+  const dropped = arr.length - kept.length
+  if (dropped > 0) {
+    claimsDroppedCount += dropped
+    log("fetch: dropped " + dropped + " malformed claim(s) from " + quotedLabel(url))
+  }
+  return kept
+}
 const untrustedJSON = value => JSON.stringify(value)
 // Render a web-controlled value as a clearly-untrusted quoted label: strip
 // dangerous chars, cap at LABEL_CAP code points (Array.from so a surrogate
 // pair never splits), and when the cap actually truncated the value, append …
 // INSIDE the quotes so a shortened string can never pass for the whole thing.
+// 아래 카운터들은 baseStats 가 읽는다. baseStats 는 invalid_input·no_claims 같은
+// 조기 반환 경로에서 verify 단계보다 먼저 호출되므로, 선언이 그 아래에 있으면
+// TDZ ReferenceError 가 난다. 반드시 여기서 함께 선언한다.
+// fetch 가 버린 malformed claim 수. 세지 않으면 부분 추출이 완전 추출로 보고된다.
+let claimsDroppedCount = 0
+// verify 가 형태 불합격으로 강등한 표 수.
+let verifierMalformedVotes = 0
+// 예산 소진으로 실행되지 못한 verify 표. fetch 의 budget_dropped 와 대응한다.
+const verifyBudgetDroppedClaimIds = new Set()
+let verifyBudgetDroppedVotes = 0
 const quotedLabel = s => {
   const cps = Array.from(stripLabelChars(s))
   return '"' + cps.slice(0, LABEL_CAP).join("").trim() + (cps.length > LABEL_CAP ? "\u2026" : "") + '"'
@@ -648,7 +681,10 @@ const queues = searchOutcomes
   .map(outcome => ({
     outcome,
     cursor: 0,
-    results: [...outcome.results].sort((a, b) => relRank[a.relevance] - relRank[b.relevance]),
+    // 열거형 밖 값이 오면 비교자가 NaN 을 돌려주고 sort 순서가 규정되지 않는다.
+    // 이 정렬이 fetch 예산 15개를 누가 먹는지 결정하므로 조용한 무작위화는
+    // 커버리지를 바꾼다. 미지값은 맨 뒤로 보낸다.
+    results: [...outcome.results].sort((a, b) => (relRank[a.relevance] ?? 99) - (relRank[b.relevance] ?? 99)),
   }))
 
 let candidatesRemain = true
@@ -758,13 +794,20 @@ const fetchTaskResults = await parallel(
       angle: angle.label,
       status,
       fetchStatus: status,
-      sourceQuality: ext.sourceQuality,
+      // status "ok" 경로에만 fallback 이 없었다. undefined 가 qualRank 조회로
+      // 흘러들어 정렬을 무작위화하는데, toSource 의 || "unreliable" 이 감사
+      // 흔적에서는 정상처럼 보이게 덮는다.
+      sourceQuality: ext.sourceQuality || "unreliable",
       publishDate: ext.publishDate,
-      claims: ext.claims.filter(c => c && typeof c === "object").map(c => ({
+      // 드롭 수를 세어 남긴다. 세지 않으면 5개 중 4개가 malformed 인 소스가
+      // fetchStatus "ok" 로 계상되고 claimsExtracted 만 줄어들어, 부분 추출과
+      // 완전 추출을 결과에서 구분할 수 없다. claim 텍스트가 빈 항목도 버린다 —
+      // 통과시키면 검증기 프롬프트에 claim: undefined 가 실린다.
+      claims: countDroppedClaims(ext.claims, source.url).map(c => ({
         ...c,
         sourceUrl: source.url,
         sourceTitle: source.title,
-        sourceQuality: ext.sourceQuality,
+        sourceQuality: ext.sourceQuality || "unreliable",
         publishDate: ext.publishDate,
       })),
     }
@@ -823,11 +866,15 @@ const confRank = { high: 0, medium: 1, low: 2 }
 // the authoritative callAgent counter after every branch has finished.
 const baseStats = extra => ({
   ...EMPTY_STATS,
-  anglesPlanned: scope.angles.length,
+  anglesPlanned: plannedAngleCount,
+  anglesMalformed: malformedAngleCount,
   anglesSucceeded: searchOutcomes.filter(outcome => outcome.status === "ok").length,
   anglesNoResults: searchOutcomes.filter(outcome => outcome.status === "no_results").length,
   anglesFailed: searchOutcomes.filter(outcome => outcome.status === "failed").length,
   anglesWithoutFetch: anglesWithoutFetch.length,
+  claimsDropped: claimsDroppedCount,
+  verifierMalformed: verifierMalformedVotes,
+  verifierBudgetDropped: verifyBudgetDroppedVotes,
   sourcesSelected: selectedSources.length,
   sourcesFetched: fetchedSources.length,
   fetchSkipped: allSources.filter(source => source.fetchStatus === "irrelevant" || source.fetchStatus === "paywalled").length,
@@ -839,7 +886,11 @@ const baseStats = extra => ({
 })
 
 const sortedClaims = [...allClaims]
-  .sort((a, b) => (impRank[a.importance] - impRank[b.importance]) || (qualRank[a.sourceQuality] - qualRank[b.sourceQuality]))
+  // 이 정렬이 어느 claim 이 검증되고 어느 것이 unranked 로 밀리는지 결정한다.
+  // 열거형 밖 값이 NaN 비교자를 만들면 central 주장이 조용히 미검증으로 밀려날 수
+  // 있고, 리포트는 그 사실을 표현할 방법이 없다. 미지값은 맨 뒤로.
+  .sort((a, b) => ((impRank[a.importance] ?? 99) - (impRank[b.importance] ?? 99)) ||
+    ((qualRank[a.sourceQuality] ?? 99) - (qualRank[b.sourceQuality] ?? 99)))
 const rankedClaims = sortedClaims.slice(0, MAX_VERIFY_CLAIMS)
 // Claims cut by the verification cap are neither confirmed nor refuted; keep
 // them enumerable in the result (and announced in the log) instead of leaving
@@ -885,10 +936,38 @@ if (rankedClaims.length === 0) {
 }
 
 // ─── Verify: 3-vote adversarial ───
+// 예산 소진으로 실행되지 못한 표는 위에서 선언한 verifyBudgetDropped* 로 집계한다.
+// fetch 단계는 이미 budget_dropped 로 구분하는데 verify catch 에는 그 분기가
+// 없었다. 그래서 부분 소진이 일어나면 "검증기가 돌았지만 판정 못 함"(unverified)
+// 으로 보고되어, 실제로는 검증이 한 번도 실행되지 않은 claim 을 호출자가 재시도
+// 대상으로 보지 않는다. SKILL.md 는 unverified 와 budgetDropped 를 구분한다.
 // Barrier here is intentional — claim pool must be fully assembled before ranking/verification.
 phase("Verify")
+// 표의 형태를 세기 전에 검증한다. VERDICT_SCHEMA 는 evidence 를 string 으로만
+// 요구하므로 **빈 문자열이 스키마를 통과한다.** 그 표를 그대로 세면 3표 만장일치
+// + primary 소스 2개로 confidence "high" 가 붙고 evidence 는 빈 칸인 finding 이
+// 나온다 — 사용자가 근거를 검증할 수 없는 이 워크플로에서 가장 비싼 실패다.
+// 이 파일은 이미 scope 앵글(:439)과 fetch claims 에 같은 방어를 하는데 표만
+// 빠져 있었다 ("schema enforcement is the runtime's contract, not a guarantee").
+const OUTCOME_VALUES = new Set(["supported", "refuted", "unverified"])
+const CONFIDENCE_VALUES = new Set(["high", "medium", "low"])
+const isUsableVerdict = v => {
+  if (!v || typeof v !== "object") return false
+  if (!OUTCOME_VALUES.has(v.outcome)) return false
+  if (!CONFIDENCE_VALUES.has(v.confidence)) return false
+  // supported/refuted 는 판정의 근거가 리포트에 실린다. 근거 없는 판정은 세지 않고
+  // errored 로 강등한다. unverified 는 근거가 없는 것이 정상이다.
+  if (v.outcome === "unverified") return true
+  return typeof v.evidence === "string" && v.evidence.trim() !== ""
+}
 const adjudicate = (claim, verdicts = []) => {
-  const presentVerdicts = (Array.isArray(verdicts) ? verdicts : []).filter(Boolean)
+  const rawVerdicts = (Array.isArray(verdicts) ? verdicts : []).filter(Boolean)
+  const presentVerdicts = rawVerdicts.filter(isUsableVerdict)
+  const malformedVotes = rawVerdicts.length - presentVerdicts.length
+  if (malformedVotes > 0) {
+    verifierMalformedVotes += malformedVotes
+    log("verify: dropped " + malformedVotes + " malformed verdict(s) for " + claim.claimId)
+  }
   const supportedVotes = presentVerdicts.filter(v => v.outcome === "supported").length
   const refutedVotes = presentVerdicts.filter(v => v.outcome === "refuted").length
   const erroredVotes = VOTES_PER_CLAIM - supportedVotes - refutedVotes
@@ -926,6 +1005,12 @@ const panelResults = await parallel(
         try {
           return await callAgent(verifyPrompt, verifyOptions)
         } catch (error) {
+          if (isWorkflowBudgetExceededError(error)) {
+            verifyBudgetDroppedClaimIds.add(claim.claimId)
+            verifyBudgetDroppedVotes += 1
+            log("verify budget-dropped: " + quotedLabel(claim.claim))
+            return null
+          }
           if (isRecoverableAgentError(error)) return null
           throw error
         }
@@ -957,7 +1042,8 @@ const panelsByClaimId = new Map(
     .map(slot => [slot.value.claimId, slot.value])
 )
 const voted = rankedClaims.map(claim =>
-  panelsByClaimId.get(claim.claimId) || adjudicate(claim, [])
+  // search(slot lost)/fetch(slot lost)는 유실을 로그로 남기는데 패널만 없었다.
+  panelsByClaimId.get(claim.claimId) || (log("verify slot lost: " + claim.claimId), adjudicate(claim, []))
 )
 for (const panel of voted) {
   const mark = panel.survives ? "✓" : panel.isRefuted ? "✗" : "?"
@@ -975,7 +1061,7 @@ log("Verify done: " + voted.length + " claims → " + confirmed.length + " confi
 // raw text stays out of the synthesis prompt entirely (see the synthesis
 // block); this exists so the USER can see why a claim died.
 const toRefuted = c => {
-  const why = c.verdicts.filter(v => v.outcome === "refuted").sort((a, b) => confRank[a.confidence] - confRank[b.confidence])[0]
+  const why = c.verdicts.filter(v => v.outcome === "refuted").sort((a, b) => (confRank[a.confidence] ?? 99) - (confRank[b.confidence] ?? 99))[0]
   return {
     claim: c.claim,
     vote: c.vote,
@@ -991,14 +1077,19 @@ const toUnverified = c => {
   // counts. Prefer the highest-confidence explicit unverified verdict.
   const why = c.verdicts
     .filter(v => v.outcome === "unverified")
-    .sort((a, b) => confRank[a.confidence] - confRank[b.confidence])[0]
+    .sort((a, b) => (confRank[a.confidence] ?? 99) - (confRank[b.confidence] ?? 99))[0]
   return {
     claim: c.claim,
     vote: c.vote,
     erroredVotes: c.erroredVotes,
     validVotes: c.supportedVotes + c.refutedVotes,
     source: c.sourceUrl,
-    reason: why?.failureReason || "",
+    // 예산 소진으로 검증이 아예 실행되지 않은 claim 은 "검증기가 판정 못 함"과
+    // 다르다. 이유 칸이 비면 호출자가 재시도 대상으로 보지 않으므로 명시한다.
+    reason: why?.failureReason ||
+      (verifyBudgetDroppedClaimIds.has(c.claimId)
+        ? "verification skipped: workflow budget exhausted"
+        : ""),
   }
 }
 
@@ -1169,7 +1260,7 @@ const buildFinding = (finding, claimsById) => {
     evidence: claims.map(claim => {
       const best = claim.verdicts
         .filter(verdict => verdict.outcome === "supported")
-        .sort((a, b) => confRank[a.confidence] - confRank[b.confidence])[0]
+        .sort((a, b) => (confRank[a.confidence] ?? 99) - (confRank[b.confidence] ?? 99))[0]
       return {
         claimId: claim.claimId,
         confidence: best?.confidence || "low",
@@ -1282,7 +1373,23 @@ return makeResult({
     ". Failures: " + failedAngleLabels.length +
     " search, " + (allSources.filter(source => source.fetchStatus === "failed").length + fetchBudgetDropped.length) +
     " fetch, " + verifierErrored + " verifier votes." +
-    (failedAngleLabels.length > 0 ? " Failed angles: " + failedAngleLabels.join(", ") + "." : ""),
+    (failedAngleLabels.length > 0 ? " Failed angles: " + failedAngleLabels.join(", ") + "." : "") +
+    // 아래 셋은 stats 에도 있지만 caveats 는 호출자가 반드시 읽는 자리다. 커버리지
+    // 축소와 미실행 검증이 조용히 지나가지 않게 여기서도 말한다.
+    (malformedAngleCount > 0
+      ? " Coverage reduced: " + malformedAngleCount + " of " + plannedAngleCount +
+        " planned angles were malformed and dropped."
+      : "") +
+    (verifyBudgetDroppedVotes > 0
+      ? " Verification incomplete: " + verifyBudgetDroppedVotes + " vote(s) across " +
+        verifyBudgetDroppedClaimIds.size + " claim(s) never ran (workflow budget exhausted) — retry with more budget."
+      : "") +
+    (verifierMalformedVotes > 0
+      ? " " + verifierMalformedVotes + " verdict(s) were dropped as malformed (missing evidence or unknown enum)."
+      : "") +
+    (claimsDroppedCount > 0
+      ? " " + claimsDroppedCount + " extracted claim(s) were dropped as malformed."
+      : ""),
   refuted: killed.map(toRefuted),
   unverified: unverified.map(toUnverified),
   unranked,
