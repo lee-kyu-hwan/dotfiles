@@ -84,9 +84,24 @@ dot_codex/
 
 ## 머신 분기
 
-Claude 플러그인 원본을 보장하지 않는 `server` 머신에는 7개 Codex 스킬과 심링크를
-배포하지 않는다. `.chezmoiignore`에는 기존 macOS 전용 제외 블록과 분리된 server
-조건 블록을 추가한다.
+`server` 머신에는 7개 Codex 스킬과 심링크를 배포하지 않는다.
+`.chezmoiignore`에는 기존 macOS 전용 제외 블록과 분리된 server 조건 블록을 추가한다.
+
+**근거와 그 한계.** 원래 근거는 "server에는 Claude 플러그인 원본이 없다"였는데, 이
+저장소를 읽으면 그 단정이 검증되지 않는다 — `install.sh`는 OS 분기 없이 Claude Code
+CLI를 설치하고(Linux 포함), `dot_claude/settings.json.tmpl`은 머신 분기 없이
+`pr-review-toolkit@claude-plugins-official`을 활성화하며 그 파일은 server에도
+배포된다. 즉 원본이 존재할 수도 있다.
+
+그래서 이 제외는 "없을 수 있다"는 쪽에 건 선택이고, **대가가 있다**: 원본 부재를
+위해 7개 스킬에 심어둔 복구 메시지가 의존성이 가장 불확실한 머신에서만 도달 불가가
+된다. server에서 `$pr-review-toolkit`을 부르면 "그런 스킬 없음" 수준의 응답만 나오고
+`machine_type` 때문에 제외됐다는 단서는 어디에도 없다.
+
+대안은 블록을 제거해 이미 설계된 graceful degradation(dangling 심링크 + 복구 메시지)에
+맡기는 것이다. 어느 쪽이 맞는지는 server에서 Claude Code를 대화형으로 기동하는지에
+달려 있고, 그건 이 문서가 단정할 수 있는 사실이 아니다. 재검토 시 이 문단을 근거로
+쓴다.
 
 ```text
 {{ if eq .machine_type "server" }}
@@ -116,9 +131,11 @@ Claude Code의 내부 배치이며 공개 계약이 아니다. 상류가 레이�
 ## Codex 호환 계층
 
 Claude 원본은 Codex 스킬 배치 규약인 `skills/<name>/SKILL.md` 구조가 아니다.
-`commands/review-pr.md`에는 필수 `name` frontmatter도 없으며, `agents/*.md`
-대부분에는 Claude 전용 `model`과 `color`가 들어 있다(`code-simplifier.md`는
-`name`과 `description`만 가진다). 따라서 원본 Markdown을 `SKILL.md`로 직접
+`commands/review-pr.md`에는 필수 `name` frontmatter도 없으며, `agents/*.md`에는
+Claude 전용 `model`이 전부 들어 있고 `color`는 대부분에 있다
+(`code-simplifier.md`는 `model: opus`만 있고 `color`가 없다 — 2026-08-23 실측.
+이 서술은 upstream 갱신에 따라 낡을 수 있으므로 래퍼는 프런트매터를 값으로
+검사하지 않고 "Claude 전용 항목은 런타임 설정으로 무시"한다). 따라서 원본 Markdown을 `SKILL.md`로 직접
 연결하지 않고, 각 Codex 스킬을 얇은 호환 계층으로 둔다.
 
 각 Codex 스킬은 다음 순서로 대응하는 원본을 사용한다.
