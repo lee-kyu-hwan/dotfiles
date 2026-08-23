@@ -27,3 +27,14 @@ run_onchange_brew-bundle.sh
 # 확인하지만, 애초에 배포하지 않는 것이 가장 확실하다.
 .local/bin/tmux-mem-status
 {{ end }}
+
+{{ if eq .machine_type "server" }}
+# server: Claude Code 공식 플러그인 의존 항목 제외
+# 주의: 이 저장소는 install.sh에서 Linux에도 Claude CLI를 설치하고
+# settings.json.tmpl은 분기 없이 이 플러그인을 켠다. 즉 원본이 있을 수도 있다.
+# 제외하면 원본 부재용 복구 메시지도 함께 사라진다 — 판단 근거는
+# docs/superpowers/specs/2026-07-30-codex-pr-review-toolkit-design.md "머신 분기".
+.codex/skills/pr-review-toolkit
+.codex/skills/pr-review-toolkit-*
+.codex/pr-review-toolkit-claude
+{{ end }}
