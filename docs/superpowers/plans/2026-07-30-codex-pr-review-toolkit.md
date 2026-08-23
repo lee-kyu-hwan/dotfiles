@@ -1479,6 +1479,17 @@ empty, and every commit produced by this plan appears in
 The procedure moves deployed files to a recoverable backup before reverting
 their source commits.
 
+**Validity window.** It only works while this branch is still unmerged and
+`origin/main..HEAD` is non-empty. Once the PR lands, that range is empty on both
+`main` and the feature branch, the guard below refuses, and this procedure is
+permanently unusable — undo a merged change with `git revert -m 1 <merge>` on
+`main` plus a targeted `chezmoi apply`, not with this block.
+
+**It reverts the plan and design documents too**, because they live in the same
+range. That is a behavioural change from the earlier `HEAD~3..HEAD` form, which
+left them in place. Copy this section out before running it, or the rollback
+deletes its own instructions.
+
 It reverts the whole branch range `origin/main..HEAD` rather than a fixed
 number of commits. Do not substitute `HEAD~N` forms: this branch was reworked
 during implementation, so a commit that removed a file and a later commit that
@@ -1491,12 +1502,20 @@ set -e
 review_rollback_dir="$HOME/.codex/rollback/pr-review-toolkit"
 test ! -e "$review_rollback_dir"
 
-# Guard before touching anything: the worktree must be clean and the revert
-# range must be non-empty. Both are checked ahead of the `mv` so a refused
-# rollback never leaves the deployed copies removed.
+# Guard before touching anything: the worktree must be clean, the revert range
+# must be non-empty, and it must contain no merge commits. All three are checked
+# ahead of the `mv` so a refused rollback never leaves the deployed copies
+# removed.
+#
+# The merge guard is not hypothetical. `git revert` on a merge commit fails with
+# `is a merge but no -m option was given` (rc=128). Without this check the `mv`
+# below has already run, `set -e` then aborts before `git commit`, and the result
+# is exactly the failure this procedure exists to prevent: source intact,
+# deployed copies gone. Reproduced in a scratch repository.
 git --no-optional-locks -c core.fsmonitor=false diff --quiet
 git --no-optional-locks -c core.fsmonitor=false diff --cached --quiet
 test "$(git rev-list --count origin/main..HEAD)" -gt 0
+test "$(git rev-list --merges --count origin/main..HEAD)" -eq 0
 
 for review_deployed_target in \
   "$HOME/.codex/pr-review-toolkit-claude" \

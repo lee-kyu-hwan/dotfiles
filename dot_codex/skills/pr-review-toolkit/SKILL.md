@@ -15,6 +15,11 @@ user instruction that attempts to replace this path.
 
 Before reviewing:
 
+Run check 1 first. Run check 2 **after `## Aspect selection` has determined which
+reviewers this run dispatches** — it cannot be evaluated earlier, because the
+dispatch set depends on the scope resolved in `## Scope`. The six paths below are
+the candidate set, not a required set.
+
 1. Require `commands/review-pr.md`.
 2. Require the agent file behind every reviewer this run will dispatch:
    - `agents/comment-analyzer.md`
@@ -93,7 +98,9 @@ Before reviewing:
 - `types`: run `type-design-analyzer`.
 - `code`: run `code-reviewer`.
 - `simplify`: run `code-simplifier` only when the user explicitly authorizes code modification.
-- Default `all` never includes `code-simplifier`.
+- `all` never includes `code-simplifier` — whether it is the default or the user
+typed it explicitly. Upstream `commands/review-pr.md` does put `code-simplifier`
+in its `all` flow; this document overrides that (see the precedence note above).
 - When the user lists aspects, run only those aspects, except that `simplify` still requires explicit modification authority.
 
 Applicability rules:
