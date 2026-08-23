@@ -3,6 +3,7 @@ CLAUDE.md
 docs/**
 install.sh
 setup.sh
+tests/**
 .pre-commit-config.yaml
 .aws/credentials
 .aws/sso/cache
