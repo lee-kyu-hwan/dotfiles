@@ -124,12 +124,14 @@ else
             continue
         fi
 
+        merged=1
+
         # 임시 세션에 붙어 있던 클라이언트를 새 이름으로 옮긴다 (detach 없이).
         if [ "$DRY_RUN" = 0 ]; then
             while read -r tty; do
                 [ -n "$tty" ] || continue
                 tmux switch-client -c "$tty" -t "$new" \
-                    || fail "클라이언트 $tty 를 $new 로 옮기지 못했다"
+                    || { fail "클라이언트 $tty 를 $new 로 옮기지 못했다"; merged=0; }
             done < <(tmux list-clients -t "$tmp" -F '#{client_tty}' 2>/dev/null)
         else
             echo "  [dry-run] $tmp 의 클라이언트를 $new 로 switch-client"
@@ -140,17 +142,27 @@ else
             while read -r widx; do
                 [ -n "$widx" ] || continue
                 tmux move-window -s "$tmp:$widx" -t "$new:" \
-                    || fail "$tmp:$widx 를 $new 로 옮기지 못했다"
+                    || { fail "$tmp:$widx 를 $new 로 옮기지 못했다"; merged=0; }
             done < <(tmux list-windows -t "$tmp" -F '#{window_index}' 2>/dev/null)
         else
             echo "  [dry-run] $tmp 의 윈도우를 $new 로 move-window"
         fi
 
+        # 임시 세션을 지우지 않는다. 윈도우를 다 옮겼으면 tmux 가 스스로 없애므로
+        # 남아 있다는 것은 **옮기지 못한 창이 있다**는 뜻이다. 그걸 kill-session 하면
+        # 실행 중인 프로세스가 죽고 붙어 있는 클라이언트가 detach된다 — 이 스크립트가
+        # 애초에 피하려던 바로 그 파괴다.
         if [ "$DRY_RUN" = 0 ] && session_exists "$tmp"; then
-            tmux kill-session -t "$tmp" \
-                || fail "빈 임시 세션 $tmp 를 지우지 못했다 — 직접 확인하라"
+            fail "임시 세션 $tmp 가 남았다 — 옮기지 못한 창이 있다. 지우지 않았으니 직접 확인하라"
+            fail "  남은 창: $(tmux list-windows -t "$tmp" -F '#{window_index}:#{window_name}' 2>/dev/null | tr '\n' ' ')"
+            merged=0
         fi
-        ok "$old → $new (합침 완료)"
+
+        if [ "$merged" = 1 ]; then
+            ok "$old → $new (합침 완료)"
+        else
+            fail "$old → $new 병합이 완료되지 않았다 — 위 항목을 먼저 처리하라"
+        fi
     done
 fi
 
@@ -246,15 +258,34 @@ done
 # ------------------------------------------------------------------
 echo "4. 재검증"
 
-if [ "$DRY_RUN" = 1 ]; then
-    skip "dry-run 이므로 재검증을 건너뛴다"
-else
-    leftover=0
+# dry-run 에서도 돌린다. 건너뛰면 `scratch` 처럼 매핑에 없는 규칙 밖 값이 사전
+# 점검에서 보고되지 않고 exit 0 이 나온다. 그걸 믿고 실제 실행하면 세션·state·git
+# config 를 먼저 바꾼 뒤에야 같은 값에서 실패해 부분 이관 상태가 된다.
+#
+# 알려진 레거시 값은 dry-run 에서 "적용 예정"으로 투영한다. 실제 실행에서 같은 값이
+# 남아 있다면 이관이 실제로 안 된 것이므로 그때는 실패다.
+check_value() {
+    # $1=값  $2=설명
+    local v="$1" m
+    printf '%s' "$v" | grep -qE "$RULE_RE" && return 0
+    if m=$(new_name_for "$v"); then
+        if [ "$DRY_RUN" = 1 ]; then
+            skip "$2: $v → $m (적용 예정)"
+            return 0
+        fi
+        fail "$2: $v 가 이관되지 않았다 (→ $m 이어야 한다)"
+        return 1
+    fi
+    fail "$2: $v 는 매핑에 없는 규칙 밖 값이다 — 어느 세션으로 옮길지 직접 정하라"
+    return 1
+}
+
+leftover=0
 
     if tmux list-sessions >/dev/null 2>&1; then
         while read -r s; do
             [ -n "$s" ] || continue
-            printf '%s' "$s" | grep -qE "$RULE_RE" || { fail "세션 이름이 규칙 밖: $s"; leftover=1; }
+            check_value "$s" "세션 이름" || leftover=1
         done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
     fi
 
@@ -275,8 +306,7 @@ else
             elif [ -n "$boot" ] && [ "$b" != "$boot" ]; then
                 skip "이전 부팅 state — resurrect 입력이라 그대로 둔다: $(basename "$f") ($s)"
             else
-                fail "agent state 의 session_name 이 규칙 밖: $s ($(basename "$f"))"
-                leftover=1
+                check_value "$s" "agent state $(basename "$f")" || leftover=1
             fi
         done
     fi
@@ -285,13 +315,11 @@ else
         git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || continue
         while read -r key value; do
             [ -n "$key" ] || continue
-            printf '%s' "$value" | grep -qE "$RULE_RE" \
-                || { fail "$repo: $key = $value 가 규칙 밖"; leftover=1; }
+            check_value "$value" "$repo: $key" || leftover=1
         done < <(git -C "$repo" config --get-regexp '^workmux\.worktree\..*\.window-session' 2>/dev/null)
     done
 
-    [ "$leftover" = 0 ] && ok "규칙 밖 값이 남지 않았다"
-fi
+[ "$leftover" = 0 ] && ok "규칙 밖 값이 남지 않았다"
 
 echo
 if [ "$rc" = 0 ]; then
@@ -301,6 +329,9 @@ if [ "$rc" = 0 ]; then
         echo "완료. 이제 tmux 안에서 prefix + C-s 로 스냅샷을 다시 저장하라."
         echo "재저장하지 않으면 구 이름이 담긴 스냅샷이 복원되며 세션이 이중화된다."
     fi
+elif [ "$DRY_RUN" = 1 ]; then
+    echo "dry-run 에서 문제를 찾았다 — 위 ✗ 를 먼저 처리하라." >&2
+    echo "지금 적용하면 일부만 이관된 상태가 된다." >&2
 else
     echo "일부 항목이 실패했다 — 위 ✗ 를 확인하라." >&2
     echo "스냅샷(prefix + C-s)은 문제를 고친 뒤에 저장하라. 지금 저장하면" >&2
