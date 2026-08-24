@@ -64,12 +64,18 @@ git -C {worktree경로} config --get workmux.worktree.{이름}.window-session
 
 ```bash
 v=$(git -C {worktree경로} config --get workmux.worktree.{이름}.window-session)
-case "$v" in
-  [0-9]*-*) ;;                     # 규칙에 맞는 값 → 의도적인 이동, 예외 1 적용
-  "")       ;;                     # 값 없음 → --parent-session 1-main
-  *) echo "규칙 밖 값: $v — 레거시로 판단" ;;
-esac
+if [ -z "$v" ]; then
+  echo "값 없음 → --parent-session 1-main"
+elif printf '%s' "$v" | grep -qE '^[0-9]+-.+$'; then
+  echo "규칙에 맞는 값: $v → 의도적인 이동, 예외 1 적용"
+else
+  echo "규칙 밖 값: $v → 레거시로 판단"
+fi
 ```
+
+셸 glob(`[0-9]*-*`)으로 판정하면 안 된다. 첫 `*`가 숫자 반복이 아니라 임의 문자열이라
+`1legacy-session`이나 `1-`처럼 규칙에 맞지 않는 값까지 통과한다(실측). 위 정규식은
+숫자 접두사 + 곧바로 이어지는 하이픈 + 비어 있지 않은 이름을 요구한다.
 
 규칙 밖 값이면 예외를 적용하지 말고 `--parent-session 1-main`을 넘기면서 git config
 값도 갱신한다. 그냥 존중하면 workmux가 그 레거시 세션을 조용히 되살리고, 값이 계속

@@ -273,8 +273,15 @@ state(`~/.local/state/workmux/agents/*.json`)의 `session_name`은 윈도우 탭
 에이전트 표시, `prefix + G`의 `last-done`, dashboard의 근거이므로 여기도 갱신해야
 스테일 표시가 사라집니다 (`move-window-to-session` 스킬의 3-(b)와 같은 저장소).
 
+`jq`가 필요합니다. macOS는 Brewfile에 있지만 Linux `install.sh`는 설치하지 않으므로
+`apt install jq`로 먼저 넣어야 합니다. 아래는 `return`/`exit`을 쓰지 않습니다 —
+대화형 zsh에서 최상위 `return`은 **셸을 즉시 종료시키고**(실측), tmux의 마지막
+pane이면 세션까지 사라집니다.
+
 ```bash
-command -v jq >/dev/null || { echo "jq가 필요합니다" >&2; return 1 2>/dev/null || exit 1; }
+if ! command -v jq >/dev/null; then
+  echo "jq가 없습니다 — brew install jq / apt install jq 후 다시 실행하세요" >&2
+else
 
 d="$HOME/.local/state/workmux/agents"
 sock=$(tmux display-message -p '#{socket_path}')
@@ -302,7 +309,26 @@ for f in "$d"/tmux__*.json; do
   fi
 done
 [ "$rc" = 0 ] || echo "일부 state를 갱신하지 못했습니다 — 위 오류를 확인하세요" >&2
+fi
 ```
+
+**마지막으로 구 이름이 남지 않았는지 재검증합니다.** 위 블록들은 대화형으로 붙여
+넣는 절차라 중간 실패가 뒤의 성공에 덮일 수 있습니다. 결과를 눈으로 확인하는 것이
+유일하게 믿을 수 있는 종료 조건입니다.
+
+```bash
+echo "--- tmux 세션 ---"; tmux list-sessions -F '#{session_name}'
+echo "--- git config (규칙 밖 값) ---"
+git config --get-regexp '^workmux\.worktree\..*\.window-session' \
+  | awk '$2 !~ /^[0-9]+-.+$/ { print "  " $0 }'
+echo "--- agent state (규칙 밖 값) ---"
+jq -r '.session_name' ~/.local/state/workmux/agents/tmux__*.json 2>/dev/null \
+  | sort -u | grep -Ev '^[0-9]+-.+$' | sed 's/^/  /'
+```
+
+세 목록이 모두 비어 있으면(세션 목록은 전부 `숫자-` 형태이면) 끝난 것입니다. 남은
+것이 있으면 스냅샷을 저장하기 전에 먼저 정리합니다 — 구 이름이 담긴 채 저장하면
+그 스냅샷이 다시 복원 소스가 됩니다.
 
 `echo`를 `jq`/`mv` 성공 조건 안에 둡니다. 밖에 두면 파싱·쓰기·이동 중 무엇이 실패해도
 `synced`가 찍혀, 마이그레이션이 끝난 줄 알았는데 dashboard와 `last-done`이 계속 구
