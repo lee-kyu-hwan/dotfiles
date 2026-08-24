@@ -138,17 +138,17 @@ fi
 # tmux 자동 연결 (재부팅 후에도 세션 복원)
 #
 # 이 로직은 tmux 밖의 새 대화형 셸에서만 실행된다 — pane 안은 $TMUX 가드에
-# 걸려 애초에 대상이 아니다. `-A`라서 main 세션이 살아 있으면 그대로 붙고,
+# 걸려 애초에 대상이 아니다. `-A`라서 1-main 세션이 살아 있으면 그대로 붙고,
 # Ghostty를 완전히 종료해도 tmux 서버는 데몬으로 남아 세션이 유지된다. 세션
-# 자체를 새로 만들려면 `tmux kill-session -t main`이 필요하다.
+# 자체를 새로 만들려면 `tmux kill-session -t 1-main`이 필요하다.
 #
-# quick 세션 마이그레이션: 예전 Quick Terminal이 만든 `quick` 세션이 남아 있으면
-# resurrect가 스냅샷에 담아 재부팅마다 되살린다. `tmux kill-session -t quick`
+# quick 세션 마이그레이션: 예전 Quick Terminal이 만든 `5-quick` 세션이 남아 있으면
+# resurrect가 스냅샷에 담아 재부팅마다 되살린다. `tmux kill-session -t 5-quick`
 # 으로 지운 뒤 `prefix + C-s`로 다시 저장해야 사라진다.
 #
 # ORCA_PANE_KEY 가드: Orca(ADE)는 pane마다 ORCA_WORKTREE_ID,
 # ORCA_AGENT_HOOK_{PORT,TOKEN} 등을 주입하고 탭·split·스크롤백·세션 복원을
-# 자체적으로 관리한다. 여기서 tmux를 exec하면 `-A`가 기존 main 세션에 붙어
+# 자체적으로 관리한다. 여기서 tmux를 exec하면 `-A`가 기존 1-main 세션에 붙어
 # 그 주입값이 전달되지 않고(tmux update-environment 기본값에 ORCA_*가 없음),
 # 워크트리별 cwd 격리와 에이전트 상태 표시가 깨진다. 그래서 Orca에서는 우회한다.
 #
@@ -157,8 +157,9 @@ fi
 # ============================================================
 if command -v tmux &>/dev/null && [[ -z "$TMUX" ]] && [[ $- == *i* ]] \
     && [[ -z "$ORCA_PANE_KEY" ]]; then
-    # 모든 대화형 터미널 → main 세션 (continuum이 자동 복원)
-    exec tmux new-session -A -s main
+    # 모든 대화형 터미널 → 1-main 세션 (continuum이 자동 복원)
+    # 세션명 접두사(1-, 2-...)는 choose-tree/list-sessions의 이름순 정렬을 고정하기 위한 것.
+    exec tmux new-session -A -s 1-main
 fi
 
 # ============================================================

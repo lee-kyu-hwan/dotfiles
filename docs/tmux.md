@@ -134,7 +134,28 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | 자동 저장 주기 | 15분 |
 | tmux 시작 시 자동 복원 | 켜짐 |
 
-새로 만든 `0`번 세션은 자동으로 `main`으로 이름이 바뀝니다.
+새로 만든 `0`번 세션은 자동으로 `1-main`으로 이름이 바뀝니다.
+
+### 세션 이름 규칙
+
+세션명은 `{순번}-{이름}` 형식을 씁니다 (`1-main`, `2-review`, `3-personal`,
+`4-eslint`, `5-quick`). `prefix → s`가 `choose-tree -Zs -O name`으로 바인딩되어
+있어 목록이 **이름순**으로 나오기 때문입니다. tmux의 기본 정렬은 `index`(세션
+생성 순)라서 접두사가 없으면 만든 순서대로 섞여 나옵니다.
+
+| 키 | 기능 |
+|----|------|
+| `prefix` → `s` | 세션 목록 (이름순 고정) |
+| 목록 안에서 `O` | 정렬 필드 순환 (`index`/`name`/`activity`/`z`) — 일회성 |
+| 목록 안에서 `r` | 정렬 역순 — 일회성 |
+| `prefix` → `$` | 세션 이름 변경 |
+
+> `prefix → w`(윈도우 트리)는 `index` 정렬을 유지합니다. `-O name`은 트리 전체에
+> 적용돼 세션 안의 윈도우까지 이름순으로 섞이는데, 윈도우는 번호 순이 맞습니다.
+
+> 세션 이름을 바꿀 때는 `~/.zshrc`의 `exec tmux new-session -A -s 1-main`,
+> `create-worktree` 스킬의 `--parent-session`, workmux의
+> `workmux.worktree.*.window-session` git config를 함께 고쳐야 합니다.
 
 ---
 
@@ -150,7 +171,7 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | `tmux attach -t 이름` | 세션 붙기 |
 | `tmux kill-session -t 이름` | 세션 종료 |
 | `prefix` → `d` | 세션 분리 (detach) |
-| `prefix` → `s` | 세션 목록 선택 |
+| `prefix` → `s` | 세션 목록 선택 (이름순 고정 — 세션 이름 규칙 참고) |
 | `prefix` → `$` | 세션 이름 변경 |
 
 ### 윈도우
