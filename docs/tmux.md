@@ -211,7 +211,7 @@ tmux list-clients -t 0-migrating -F '#{client_tty}' \
 
 # 3. 임시 세션에 살릴 것이 있는지 확인한다
 tmux list-windows -t 0-migrating -F '#{window_index} #{window_name} #{pane_current_command}'
-tmux move-window -s 0-migrating:0 -t 1-main    # 살릴 것이 있을 때만
+tmux move-window -s 0-migrating:0 -t 1-main:   # 살릴 것이 있을 때만 (`:`로 대상 세션 명시)
 
 # 4. 클라이언트가 0이고 남길 것이 없을 때만 지운다
 tmux list-clients -t 0-migrating -F '#{client_tty}'   # 비어 있어야 한다
@@ -249,6 +249,35 @@ git config --get-regexp '^workmux\.worktree\..*\.window-session' \
   | awk '$2 == "main" { print $1 }' \
   | while read -r k; do git config "$k" 1-main; done
 ```
+
+**workmux는 세션명을 두 곳에 저장합니다.** git config만 고치면 절반입니다. agent
+state(`~/.local/state/workmux/agents/*.json`)의 `session_name`은 윈도우 탭의
+에이전트 표시, `prefix + G`의 `last-done`, dashboard의 근거이므로 여기도 갱신해야
+스테일 표시가 사라집니다 (`move-window-to-session` 스킬의 3-(b)와 같은 저장소).
+
+```bash
+d="$HOME/.local/state/workmux/agents"
+sock=$(tmux display-message -p '#{socket_path}')
+boot=$(tmux display-message -p '#{start_time}')
+for f in "$d"/tmux__*.json; do
+  [ -e "$f" ] || continue
+  [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue   # 다른 tmux 서버
+  [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue             # 이전 부팅 state
+  old=$(jq -r '.session_name // ""' "$f")
+  case "$old" in
+    main)  new=1-main  ;;
+    quick) new=5-quick ;;
+    *) continue ;;
+  esac
+  jq --arg s "$new" '.session_name = $s' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"
+  echo "synced: $(basename "$f") $old → $new"
+done
+```
+
+`instance`·`boot_id` 가드는 스킬과 같은 이유로 둡니다 — 다른 tmux 서버의 state를
+건드리지 않고, `workmux resurrect`의 입력인 이전 부팅 state를 망가뜨리지 않습니다.
+그래서 이전 부팅 기록에는 구 이름이 남습니다. 그쪽은 복원 후 이 절차를 한 번 더
+돌리면 정리됩니다.
 
 개명 후 `prefix + C-s`로 스냅샷을 다시 저장하고, 구 이름이 담긴 예전 스냅샷은
 지웁니다.
