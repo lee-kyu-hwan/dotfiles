@@ -182,7 +182,8 @@ if command -v tmux &>/dev/null && [[ -z "$TMUX" ]] && [[ $- == *i* ]] \
     if [[ -n "$_sessions" ]]; then
         print -u2 "⚠ 규칙 이전 이름의 tmux 세션이 남아 있습니다: ${_sessions//$'\n'/, }"
         print -u2 "  지금 붙는 '1-main'은 별도 세션이라 기존 작업이 보이지 않습니다."
-        print -u2 "  개명 절차: docs/tmux.md 의 '기존 세션 개명'"
+        print -u2 "  이관: tmux-migrate-session-names --dry-run 으로 먼저 확인하세요."
+        print -u2 "  자세히: docs/tmux.md 의 '기존 세션 개명'"
     fi
     unset _legacy _sessions
 

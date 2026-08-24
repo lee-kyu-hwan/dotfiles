@@ -171,184 +171,49 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 
 ### 기존 세션 개명 (구 이름이 남은 머신)
 
-`main`/`quick` 같은 구 이름 세션이 살아 있는 머신에서 새 설정을 적용하면, `-A`는
-**이름이 정확히 일치할 때만** 붙기 때문에 빈 `1-main` 세션이 새로 생기고 터미널은
-거기에 붙습니다. 기존 작업은 `main`에 그대로 남고 화면에는 아무 경고가 없습니다.
+구 이름 세션(`main`, `review`, `personal`, `eslint`, `quick`)이 살아 있는 머신에서 새
+설정을 적용하면, `-A`는 **이름이 정확히 일치할 때만** 붙기 때문에 빈 `1-main` 세션이
+새로 생기고 터미널은 거기에 붙습니다. 기존 작업은 구 이름 세션에 그대로 남고 화면에는
+아무 경고가 없습니다. `.zshrc`가 이 상태를 감지해 경고는 하지만 개명은 하지 않습니다.
 
-**먼저 상태를 확인합니다.** 절차가 상태에 따라 갈리기 때문입니다.
+세션명은 세 곳에 저장되고, 하나만 고치면 나머지가 어긋납니다.
 
-```bash
-tmux list-sessions -F '#{session_name}: #{session_windows}w'
-```
+| 저장소 | 무엇의 근거인가 |
+|--------|-----------------|
+| tmux 서버의 세션명 | 실제 창 위치 |
+| `~/.local/state/workmux/agents/*.json`의 `session_name` | 윈도우 탭의 에이전트 표시, `prefix + G`의 last-done, dashboard |
+| 저장소별 `workmux.worktree.*.window-session` git config | workmux가 close/remove/open에서 창을 찾는 근거 |
 
-**상태 A — `main`만 있음** (새 셸을 아직 열지 않았을 때). 그대로 개명합니다.
-
-```bash
-tmux rename-session -t main 1-main
-```
-
-**상태 B — `main`과 `1-main`이 함께 있음** (새 셸을 이미 열어 버렸을 때). 이 상태에서
-`rename-session -t main 1-main`을 그냥 실행하면 `duplicate session: 1-main`으로
-**실패합니다**(exit 1).
-
-`1-main`을 `kill-session`으로 치우는 방식은 **쓰지 않습니다.** `list-windows`로는
-그 세션을 지워도 되는지 알 수 없습니다 — 윈도우가 하나여도 여러 Ghostty 클라이언트가
-그 하나를 공유할 수 있고, pane 안에 포그라운드 프로세스가 돌고 있을 수 있습니다.
-`kill-session`은 붙어 있는 클라이언트를 모두 detach시키고, `.zshrc`가 `exec tmux`를
-하므로 **그 터미널 창들이 닫힙니다.**
-
-개명은 비파괴적이고 붙어 있는 클라이언트도 세션을 따라옵니다. 이름만 서로 비켜
-주는 방식을 씁니다.
+세 곳을 함께 옮기고 결과를 재검증하는 스크립트가 있습니다.
 
 ```bash
-# 1. 이름을 비켜 준다 (클라이언트와 실행 중 프로세스는 그대로 유지된다)
-tmux rename-session -t 1-main 0-migrating
-tmux rename-session -t main 1-main
-
-# 2. 임시 세션에 붙어 있던 클라이언트를 새 1-main으로 옮긴다 (detach 없이)
-tmux list-clients -t 0-migrating -F '#{client_tty}' \
-  | while read -r tty; do tmux switch-client -c "$tty" -t 1-main; done
-
-# 3. 임시 세션에 살릴 것이 있는지 확인한다
-tmux list-windows -t 0-migrating -F '#{window_index} #{window_name} #{pane_current_command}'
-tmux move-window -s 0-migrating:0 -t 1-main:   # 살릴 것이 있을 때만 (`:`로 대상 세션 명시)
-
-# 4. 클라이언트가 0이고 남길 것이 없을 때만 지운다
-tmux list-clients -t 0-migrating -F '#{client_tty}'   # 비어 있어야 한다
-tmux kill-session -t 0-migrating
+tmux-migrate-session-names --dry-run               # 할 일만 출력, 아무것도 바꾸지 않음
+tmux-migrate-session-names                         # 적용 (현재 저장소의 git config 포함)
+tmux-migrate-session-names ~/code/foo ~/code/bar   # 저장소를 지정
 ```
 
-3단계에서 마지막 윈도우를 옮겼다면 임시 세션은 그 시점에 스스로 사라지므로 4단계는
-`can't find session`이 됩니다. 정상입니다.
+worktree들은 `.git/config`를 공유하므로 저장소마다 한 번이면 됩니다. `jq`가 필요합니다
+— macOS에는 이미 있고, Linux에서는 `apt install jq`로 넣어야 합니다.
 
-**상태 C — `1-main`만 있음.** `main` 쪽은 끝난 상태입니다.
+개명은 비파괴적입니다. 대상 이름이 이미 있으면 임시 이름을 거쳐 클라이언트와 윈도우를
+합치며 `kill-session`은 쓰지 않습니다 — 붙어 있는 클라이언트를 detach시키면 `.zshrc`가
+`exec tmux`를 하므로 그 터미널 창이 닫히기 때문입니다.
 
-**`quick` 세션은 A/B/C 어느 상태에서도 따로 확인합니다.** `1-main` 개명과 무관하게
-남아 있을 수 있고, 방치하면 resurrect가 계속 구 이름으로 저장·복원합니다. 타깃
-접두사 매칭 때문에 존재 확인은 정확 매칭으로 해야 합니다.
+건드리지 않는 것이 둘 있고, 스크립트가 그때마다 이유를 출력합니다.
 
-```bash
-tmux list-sessions -F '#{session_name}' | grep -qxF -- quick   && echo "quick 있음"
-tmux list-sessions -F '#{session_name}' | grep -qxF -- 5-quick && echo "5-quick 있음"
-```
+- **다른 tmux 서버의 state** — `instance`가 다르면 우리 소관이 아닙니다.
+- **이전 부팅의 state** — `workmux resurrect`의 입력입니다. 고치거나 지우면 복구가
+  불가능해집니다. 복원한 뒤 스크립트를 한 번 더 돌리면 정리됩니다.
 
-- `quick`만 있으면 `tmux rename-session -t quick 5-quick`.
-- 둘 다 있으면 상태 B와 같은 충돌입니다. 위 상태 B 절차를 `quick`/`5-quick`에 그대로
-  적용하거나, 어느 쪽을 남길지 정하고 `move-window`로 합칩니다.
-- `quick`이 없으면 건너뜁니다.
+규칙에 맞는 값(`숫자-`로 시작)은 `move-window-to-session`이 의도적으로 기록한 것이므로
+그대로 둡니다. 매핑에 없는 규칙 밖 값이 남아 있으면 스크립트가 실패로 보고합니다 —
+어느 세션으로 옮길지는 직접 정해야 합니다.
 
-**workmux 메타데이터도 함께 옮깁니다.** git config의 `window-session` 값은 세션
-개명을 따라오지 않습니다. 값이 정확히 `main`인 항목은 규칙 이전의 기본값이므로
-`1-main`으로 갱신합니다. 갱신하지 않으면 `create-worktree`의 "예외 1"이 이 값을
-의도적인 이동으로 오분류해 `workmux open`이 `main` 세션을 되살립니다.
-
-`main`만이 아닙니다. `review`/`personal`/`eslint`/`quick`도 같은 규칙으로 개명되므로
-구 이름 전체를 옮겨야 합니다. 규칙에 맞는 값(`숫자-`로 시작)은 `move-window-to-session`
-이 의도적으로 기록한 것이니 건드리지 않습니다.
-
-```bash
-# 저장소마다 (worktree들은 .git/config를 공유하므로 한 번이면 됩니다)
-git config --get-regexp '^workmux\.worktree\..*\.window-session'
-
-git config --get-regexp '^workmux\.worktree\..*\.window-session' \
-  | while read -r k v; do
-      case "$v" in
-        main)     n=1-main    ;;
-        review)   n=2-review  ;;
-        personal) n=3-personal;;
-        eslint)   n=4-eslint  ;;
-        quick)    n=5-quick   ;;
-        *) continue ;;          # 규칙에 맞는 값과 알 수 없는 값은 그대로 둔다
-      esac
-      git config "$k" "$n" && echo "migrated: $k $v → $n"
-    done
-```
-
-위 `case`에 없는 규칙 밖 값이 남아 있으면(첫 명령의 출력에서 `숫자-`로 시작하지 않는
-것) 어느 세션으로 옮길지 직접 정해야 합니다. 그대로 두면 `create-worktree`가 레거시로
-판단해 `1-main`으로 되돌립니다.
-
-**workmux는 세션명을 두 곳에 저장합니다.** git config만 고치면 절반입니다. agent
-state(`~/.local/state/workmux/agents/*.json`)의 `session_name`은 윈도우 탭의
-에이전트 표시, `prefix + G`의 `last-done`, dashboard의 근거이므로 여기도 갱신해야
-스테일 표시가 사라집니다 (`move-window-to-session` 스킬의 3-(b)와 같은 저장소).
-
-`jq`가 필요합니다. macOS는 Brewfile에 있지만 Linux `install.sh`는 설치하지 않으므로
-`apt install jq`로 먼저 넣어야 합니다. 아래는 `return`/`exit`을 쓰지 않습니다 —
-대화형 zsh에서 최상위 `return`은 **셸을 즉시 종료시키고**(실측), tmux의 마지막
-pane이면 세션까지 사라집니다.
-
-```bash
-if ! command -v jq >/dev/null; then
-  echo "jq가 없습니다 — brew install jq / apt install jq 후 다시 실행하세요" >&2
-else
-
-d="$HOME/.local/state/workmux/agents"
-sock=$(tmux display-message -p '#{socket_path}')
-boot=$(tmux display-message -p '#{start_time}')
-rc=0
-for f in "$d"/tmux__*.json; do
-  [ -e "$f" ] || continue
-  [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue   # 다른 tmux 서버
-  [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue             # 이전 부팅 state
-  old=$(jq -r '.session_name // ""' "$f")
-  case "$old" in
-    main)     new=1-main    ;;
-    review)   new=2-review  ;;
-    personal) new=3-personal;;
-    eslint)   new=4-eslint  ;;
-    quick)    new=5-quick   ;;
-    *) continue ;;
-  esac
-  if jq --arg s "$new" '.session_name = $s' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"; then
-    echo "synced: $(basename "$f") $old → $new"
-  else
-    rm -f -- "$f.tmp"
-    echo "실패: $f ($old → $new)" >&2
-    rc=1
-  fi
-done
-[ "$rc" = 0 ] || echo "일부 state를 갱신하지 못했습니다 — 위 오류를 확인하세요" >&2
-fi
-```
-
-**마지막으로 구 이름이 남지 않았는지 재검증합니다.** 위 블록들은 대화형으로 붙여
-넣는 절차라 중간 실패가 뒤의 성공에 덮일 수 있습니다. 결과를 눈으로 확인하는 것이
-유일하게 믿을 수 있는 종료 조건입니다.
-
-```bash
-echo "--- tmux 세션 ---"; tmux list-sessions -F '#{session_name}'
-echo "--- git config (규칙 밖 값) ---"
-git config --get-regexp '^workmux\.worktree\..*\.window-session' \
-  | awk '$2 !~ /^[0-9]+-.+$/ { print "  " $0 }'
-echo "--- agent state (규칙 밖 값) ---"
-jq -r '.session_name' ~/.local/state/workmux/agents/tmux__*.json 2>/dev/null \
-  | sort -u | grep -Ev '^[0-9]+-.+$' | sed 's/^/  /'
-```
-
-세 목록이 모두 비어 있으면(세션 목록은 전부 `숫자-` 형태이면) 끝난 것입니다. 남은
-것이 있으면 스냅샷을 저장하기 전에 먼저 정리합니다 — 구 이름이 담긴 채 저장하면
-그 스냅샷이 다시 복원 소스가 됩니다.
-
-`echo`를 `jq`/`mv` 성공 조건 안에 둡니다. 밖에 두면 파싱·쓰기·이동 중 무엇이 실패해도
-`synced`가 찍혀, 마이그레이션이 끝난 줄 알았는데 dashboard와 `last-done`이 계속 구
-세션을 가리키게 됩니다.
-
-`instance`·`boot_id` 가드는 스킬과 같은 이유로 둡니다 — 다른 tmux 서버의 state를
-건드리지 않고, `workmux resurrect`의 입력인 이전 부팅 state를 망가뜨리지 않습니다.
-그래서 이전 부팅 기록에는 구 이름이 남습니다. 그쪽은 복원 후 이 절차를 한 번 더
-돌리면 정리됩니다.
-
-개명 후 `prefix + C-s`로 스냅샷을 다시 저장하고, 구 이름이 담긴 예전 스냅샷은
-지웁니다.
-
-```bash
-command ls ~/.local/share/tmux/resurrect/     # 구 이름이 담긴 파일 확인
-```
-
-재저장하지 않으면 구 스냅샷이 복원될 때 세션이 **이중화**됩니다. resurrect의
-`restore.sh`는 스냅샷의 세션명이 현재 세션과 다르면 오류 없이 `new_session`으로
-새로 만들기 때문에, 재부팅마다 `1-main`과 `main`이 함께 존재하는 상태가 재생산됩니다.
+**끝나면 `prefix + C-s`로 스냅샷을 다시 저장합니다.** 재저장하지 않으면 구 이름이 담긴
+스냅샷이 복원될 때 세션이 **이중화**됩니다. resurrect의 `restore.sh`는 스냅샷의 세션명이
+현재 세션과 다르면 오류 없이 `new_session`으로 새로 만들기 때문입니다. 스크립트가 실패를
+보고했으면 **저장하기 전에 먼저 고칩니다** — 지금 저장하면 어긋난 상태가 스냅샷에
+고착됩니다.
 
 ---
 
