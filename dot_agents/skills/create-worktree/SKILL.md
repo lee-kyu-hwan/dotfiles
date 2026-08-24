@@ -54,11 +54,24 @@ git config의 `workmux.worktree.{이름}.window-session`이 `1-main`이 아니�
 git -C {worktree경로} config --get workmux.worktree.{이름}.window-session
 ```
 
-**단, 값이 정확히 `main`이면 의도적인 이동이 아니다.** 세션명 규칙 이전의 기본값이
-그대로 남은 것이다(현재 모든 세션명은 순번으로 시작하므로 `main`은 의도적인 대상이
-될 수 없다). 이 경우에는 예외를 적용하지 말고 `--parent-session 1-main`을 넘기면서
-git config 값도 갱신한다. 그냥 존중하면 workmux가 레거시 `main` 세션을 되살리고,
-그 값이 계속 남아 매번 재생산된다.
+**단, 값이 `{순번}-{이름}` 형식이 아니면 의도적인 이동이 아니다.** 규칙 이전의 값이
+그대로 남은 것이다. 현재 모든 세션명은 `숫자-`로 시작하므로, `move-window-to-session`이
+기록한 값이라면 반드시 그 형태다. `main`뿐 아니라 `review`, `personal`, `eslint`,
+`quick`도 마찬가지다 — 열거로 판정하지 말고 형식으로 판정한다.
+
+```bash
+v=$(git -C {worktree경로} config --get workmux.worktree.{이름}.window-session)
+case "$v" in
+  [0-9]*-*) ;;                     # 규칙에 맞는 값 → 의도적인 이동, 예외 1 적용
+  "")       ;;                     # 값 없음 → --parent-session 1-main
+  *) echo "규칙 밖 값: $v — 레거시로 판단" ;;
+esac
+```
+
+규칙 밖 값이면 예외를 적용하지 말고 `--parent-session 1-main`을 넘기면서 git config
+값도 갱신한다. 그냥 존중하면 workmux가 그 레거시 세션을 조용히 되살리고, 값이 계속
+남아 매번 재생산된다. 어느 새 이름으로 옮길지 애매하면(예: `personal` → `3-personal`
+이 맞는지) 추측하지 말고 사용자에게 확인한다.
 
 ```bash
 git -C {worktree경로} config workmux.worktree.{이름}.window-session 1-main

@@ -242,13 +242,31 @@ tmux list-sessions -F '#{session_name}' | grep -qxF -- 5-quick && echo "5-quick 
 `1-main`으로 갱신합니다. 갱신하지 않으면 `create-worktree`의 "예외 1"이 이 값을
 의도적인 이동으로 오분류해 `workmux open`이 `main` 세션을 되살립니다.
 
+`main`만이 아닙니다. `review`/`personal`/`eslint`/`quick`도 같은 규칙으로 개명되므로
+구 이름 전체를 옮겨야 합니다. 규칙에 맞는 값(`숫자-`로 시작)은 `move-window-to-session`
+이 의도적으로 기록한 것이니 건드리지 않습니다.
+
 ```bash
 # 저장소마다 (worktree들은 .git/config를 공유하므로 한 번이면 됩니다)
 git config --get-regexp '^workmux\.worktree\..*\.window-session'
+
 git config --get-regexp '^workmux\.worktree\..*\.window-session' \
-  | awk '$2 == "main" { print $1 }' \
-  | while read -r k; do git config "$k" 1-main; done
+  | while read -r k v; do
+      case "$v" in
+        main)     n=1-main    ;;
+        review)   n=2-review  ;;
+        personal) n=3-personal;;
+        eslint)   n=4-eslint  ;;
+        quick)    n=5-quick   ;;
+        *) continue ;;          # 규칙에 맞는 값과 알 수 없는 값은 그대로 둔다
+      esac
+      git config "$k" "$n" && echo "migrated: $k $v → $n"
+    done
 ```
+
+위 `case`에 없는 규칙 밖 값이 남아 있으면(첫 명령의 출력에서 `숫자-`로 시작하지 않는
+것) 어느 세션으로 옮길지 직접 정해야 합니다. 그대로 두면 `create-worktree`가 레거시로
+판단해 `1-main`으로 되돌립니다.
 
 **workmux는 세션명을 두 곳에 저장합니다.** git config만 고치면 절반입니다. agent
 state(`~/.local/state/workmux/agents/*.json`)의 `session_name`은 윈도우 탭의
@@ -256,23 +274,39 @@ state(`~/.local/state/workmux/agents/*.json`)의 `session_name`은 윈도우 탭
 스테일 표시가 사라집니다 (`move-window-to-session` 스킬의 3-(b)와 같은 저장소).
 
 ```bash
+command -v jq >/dev/null || { echo "jq가 필요합니다" >&2; return 1 2>/dev/null || exit 1; }
+
 d="$HOME/.local/state/workmux/agents"
 sock=$(tmux display-message -p '#{socket_path}')
 boot=$(tmux display-message -p '#{start_time}')
+rc=0
 for f in "$d"/tmux__*.json; do
   [ -e "$f" ] || continue
   [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue   # 다른 tmux 서버
   [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue             # 이전 부팅 state
   old=$(jq -r '.session_name // ""' "$f")
   case "$old" in
-    main)  new=1-main  ;;
-    quick) new=5-quick ;;
+    main)     new=1-main    ;;
+    review)   new=2-review  ;;
+    personal) new=3-personal;;
+    eslint)   new=4-eslint  ;;
+    quick)    new=5-quick   ;;
     *) continue ;;
   esac
-  jq --arg s "$new" '.session_name = $s' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"
-  echo "synced: $(basename "$f") $old → $new"
+  if jq --arg s "$new" '.session_name = $s' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"; then
+    echo "synced: $(basename "$f") $old → $new"
+  else
+    rm -f -- "$f.tmp"
+    echo "실패: $f ($old → $new)" >&2
+    rc=1
+  fi
 done
+[ "$rc" = 0 ] || echo "일부 state를 갱신하지 못했습니다 — 위 오류를 확인하세요" >&2
 ```
+
+`echo`를 `jq`/`mv` 성공 조건 안에 둡니다. 밖에 두면 파싱·쓰기·이동 중 무엇이 실패해도
+`synced`가 찍혀, 마이그레이션이 끝난 줄 알았는데 dashboard와 `last-done`이 계속 구
+세션을 가리키게 됩니다.
 
 `instance`·`boot_id` 가드는 스킬과 같은 이유로 둡니다 — 다른 tmux 서버의 state를
 건드리지 않고, `workmux resurrect`의 입력인 이전 부팅 state를 망가뜨리지 않습니다.

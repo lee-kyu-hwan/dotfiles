@@ -121,9 +121,13 @@ for p in $PANES; do
     [ "$(jq -r '.pane_key.pane_id // ""' "$f")" = "$p" ] || continue
     [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue  # 다른 tmux 서버
     [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue            # 이전 부팅 = resurrect 입력
-    jq --arg s "{대상세션}" --arg w "$(tmux display-message -p -t "$p" '#{window_name}')" \
-      '.session_name = $s | .window_name = $w' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"
-    echo "synced workmux agent state: $p → {대상세션}"
+    if jq --arg s "{대상세션}" --arg w "$(tmux display-message -p -t "$p" '#{window_name}')" \
+         '.session_name = $s | .window_name = $w' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"; then
+      echo "synced workmux agent state: $p → {대상세션}"
+    else
+      rm -f -- "$f.tmp"
+      echo "state 갱신 실패: $f" >&2
+    fi
   done
 done
 ```
