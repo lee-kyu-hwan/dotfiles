@@ -80,6 +80,14 @@ new_name_for() {
     return 1
 }
 
+TAB=$(printf '\t')
+
+read_state_meta() {
+    # state 파일 하나에서 instance / boot_id / session_name 을 탭으로 구분해 출력한다.
+    # jq 가 실패하면(파싱 오류, 읽기 실패) 비영으로 끝나므로 호출부가 구분할 수 있다.
+    jq -er '[.pane_key.instance // "", .boot_id // "", .session_name // ""] | @tsv' "$1" 2>/dev/null
+}
+
 session_exists() {
     # 정확 매칭. tmux 타깃은 접두사 매칭을 하므로 has-session 을 쓰면 안 된다
     # (`1-maintenance` 만 있어도 `has-session -t 1-main` 이 exit 0 을 낸다).
@@ -138,12 +146,16 @@ else
         fi
 
         # 남은 윈도우를 옮긴다. 마지막 윈도우가 빠지면 임시 세션은 스스로 사라진다.
+        # 타깃은 window_index 가 아니라 **window_id**(`@N`)를 쓴다. index 는 세션 안에서
+        # 재배치될 수 있는 값이라 목록을 미리 떠 두면 무효가 될 수 있다. 실측으로는
+        # move-window 가 원본 세션을 재번호하지 않지만(renumber-windows 는 kill 에서만
+        # 동작한다), id 는 그 동작에 의존하지 않는다.
         if [ "$DRY_RUN" = 0 ]; then
-            while read -r widx; do
-                [ -n "$widx" ] || continue
-                tmux move-window -s "$tmp:$widx" -t "$new:" \
-                    || { fail "$tmp:$widx 를 $new 로 옮기지 못했다"; merged=0; }
-            done < <(tmux list-windows -t "$tmp" -F '#{window_index}' 2>/dev/null)
+            while read -r wid; do
+                [ -n "$wid" ] || continue
+                tmux move-window -s "$wid" -t "$new:" \
+                    || { fail "$tmp 의 윈도우 $wid 를 $new 로 옮기지 못했다"; merged=0; }
+            done < <(tmux list-windows -t "$tmp" -F '#{window_id}' 2>/dev/null)
         else
             echo "  [dry-run] $tmp 의 윈도우를 $new 로 move-window"
         fi
@@ -182,10 +194,19 @@ else
         touched=0
         for f in "$state_dir"/tmux__*.json; do
             [ -e "$f" ] || continue
-            [ "$(jq -r '.pane_key.instance // ""' "$f" 2>/dev/null)" = "$sock" ] || continue
-            [ "$(jq -r '.boot_id // ""' "$f" 2>/dev/null)" = "$boot" ] || continue
 
-            old=$(jq -r '.session_name // ""' "$f" 2>/dev/null)
+            # 읽기·파싱 실패를 "가드 불일치"와 구분한다. jq 오류를 빈 값으로 뭉개면
+            # 손상되거나 쓰다 만 파일이 조용히 건너뛰어지고, 스테일한 session_name 이
+            # 남은 채로 스크립트가 성공으로 끝난다.
+            if ! meta=$(read_state_meta "$f"); then
+                fail "$(basename "$f") 를 읽을 수 없다 (JSON 파싱 실패) — 직접 확인하라"
+                continue
+            fi
+            IFS="$TAB" read -r i b old <<<"$meta"
+
+            [ "$i" = "$sock" ] || continue
+            [ "$b" = "$boot" ] || continue
+
             new=$(new_name_for "$old") || continue
 
             if [ "$DRY_RUN" = 1 ]; then
@@ -295,12 +316,17 @@ leftover=0
     if command -v jq >/dev/null 2>&1 && [ -d "$state_dir" ]; then
         for f in "$state_dir"/tmux__*.json; do
             [ -e "$f" ] || continue
-            s=$(jq -r '.session_name // empty' "$f" 2>/dev/null)
+
+            if ! meta=$(read_state_meta "$f"); then
+                fail "$(basename "$f") 를 읽을 수 없다 (JSON 파싱 실패) — 검증할 수 없다"
+                leftover=1
+                continue
+            fi
+            IFS="$TAB" read -r i b s <<<"$meta"
+
             [ -n "$s" ] || continue
             printf '%s' "$s" | grep -qE "$RULE_RE" && continue
 
-            i=$(jq -r '.pane_key.instance // ""' "$f" 2>/dev/null)
-            b=$(jq -r '.boot_id // ""' "$f" 2>/dev/null)
             if [ -n "$sock" ] && [ "$i" != "$sock" ]; then
                 skip "다른 tmux 서버의 state — 그대로 둔다: $(basename "$f") ($s)"
             elif [ -n "$boot" ] && [ "$b" != "$boot" ]; then
