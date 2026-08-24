@@ -77,7 +77,7 @@ tmux 패인과 Neovim 창을 구분 없이 이동합니다. prefix 없이 사용
 | `prefix` → `ㅍ` | `p` | 이전 윈도우 | ★ |
 | `prefix` → `ㅌ` | `x` | 패인 종료 (확인) | ★ |
 | `prefix` → `ㅋ` | `z` | 패인 줌 토글 | ★ |
-| `prefix` → `ㄴ` | `s` | 세션 목록 | ★ |
+| `prefix` → `ㄴ` | `s` | 세션 목록 (이름순 고정) | ★ |
 | `prefix` → `ㅐ` | `o` | 다음 패인으로 이동 | ★ |
 | `prefix` → `ㅣ` | `l` | 레이아웃 전환 | ★ |
 | `prefix` → `ㅂ` | `q` | 패인 번호 표시 | ★ |
@@ -134,7 +134,11 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | 자동 저장 주기 | 15분 |
 | tmux 시작 시 자동 복원 | 켜짐 |
 
-새로 만든 `0`번 세션은 자동으로 `1-main`으로 이름이 바뀝니다.
+이름 없이 만들어진 `0`번 세션은 `session-created` 훅이 `1-main`으로 개명합니다. 단
+`1-main`이 이미 있으면 이 개명은 **조용히 실패**하고(`duplicate session`, 훅 경로에서는
+오류가 표시되지 않음) 세션은 `0`이라는 이름으로 남습니다. `.zshrc`가 항상 `-s 1-main`을
+지정하므로 통상 흐름에서는 훅이 발동하지 않고, 인수 없이 `tmux`를 직접 실행했을 때만
+이 경로를 타게 됩니다. 규칙 밖 이름(`0`, `1`)이 생기면 `prefix → $`로 직접 고칩니다.
 
 ### 세션 이름 규칙
 
@@ -150,12 +154,43 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | 목록 안에서 `r` | 정렬 역순 — 일회성 |
 | `prefix` → `$` | 세션 이름 변경 |
 
+> 이름순 정렬은 자연 정렬이 아니라 바이트 비교입니다. 그래서 세션이 10개를 넘으면
+> `10-`이 `2-` **앞에** 오면서 순번의 의미가 깨집니다. 9개까지는 문제가 없고, 그
+> 이상 쓰게 되면 `01-`/`02-` 제로패딩으로 바꿔야 합니다.
+
 > `prefix → w`(윈도우 트리)는 `index` 정렬을 유지합니다. `-O name`은 트리 전체에
 > 적용돼 세션 안의 윈도우까지 이름순으로 섞이는데, 윈도우는 번호 순이 맞습니다.
+> 대신 `prefix → w`의 **세션 행도 생성 순으로 남습니다** — 순번 접두사는 그쪽
+> 목록에서는 순서에 영향을 주지 않습니다.
 
-> 세션 이름을 바꿀 때는 `~/.zshrc`의 `exec tmux new-session -A -s 1-main`,
-> `create-worktree` 스킬의 `--parent-session`, workmux의
-> `workmux.worktree.*.window-session` git config를 함께 고쳐야 합니다.
+> 세션 이름을 바꿀 때 함께 고쳐야 하는 곳: `.tmux.conf`의 `session-created` 훅
+> (`rename-session`의 대상 이름 — 세션명을 자동으로 결정하는 1차 지점), `~/.zshrc`의
+> `exec tmux new-session -A -s 1-main`, `create-worktree`·`move-window-to-session`
+> 스킬의 `--parent-session`, workmux의 `workmux.worktree.*.window-session` git
+> config, 그리고 이 문서.
+
+### 기존 세션 개명 (구 이름이 남은 머신)
+
+`main`/`quick` 같은 구 이름 세션이 살아 있는 머신에서 새 설정을 적용하면, `-A`는
+**이름이 정확히 일치할 때만** 붙기 때문에 빈 `1-main` 세션이 새로 생기고 터미널은
+거기에 붙습니다. 기존 작업은 `main`에 그대로 남고 화면에는 아무 경고가 없습니다.
+`chezmoi apply` 후 아래를 한 번 실행합니다.
+
+```bash
+tmux rename-session -t main 1-main
+tmux rename-session -t quick 5-quick    # 있을 때만
+```
+
+개명 후 `prefix + C-s`로 스냅샷을 다시 저장하고, 구 이름이 담긴 예전 스냅샷은
+지웁니다.
+
+```bash
+command ls ~/.local/share/tmux/resurrect/     # 구 이름이 담긴 파일 확인
+```
+
+재저장하지 않으면 구 스냅샷이 복원될 때 세션이 **이중화**됩니다. resurrect의
+`restore.sh`는 스냅샷의 세션명이 현재 세션과 다르면 오류 없이 `new_session`으로
+새로 만들기 때문에, 재부팅마다 `1-main`과 `main`이 함께 존재하는 상태가 재생산됩니다.
 
 ---
 

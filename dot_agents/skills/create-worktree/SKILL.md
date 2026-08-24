@@ -18,18 +18,32 @@ tmux를 직접 조작하지 않는다. 새 workmux 윈도우는 `1-main` 세션�
 ## 부모 tmux 세션
 
 window mode의 `workmux add`와 `workmux open` 호출에 `--parent-session 1-main`을
-넘긴다. 실행 중인 에이전트가 `personal` 같은 다른 세션에 있어도 현재 세션을 부모로
+넘긴다. 실행 중인 에이전트가 `3-personal` 같은 다른 세션에 있어도 현재 세션을 부모로
 사용하지 않는다.
+
+```bash
+tmux list-sessions -F '#{session_name}'    # 종료 코드를 먼저 본다
+```
+
+`list-sessions`가 exit 1 + `error connecting to ...`로 실패하면 tmux 서버 자체가 없는
+것이다. "세션이 없다"와 구분해 그대로 보고한다 — `grep`에 바로 물리면 두 상황이 똑같이
+"없음"으로 뭉개져 사용자가 엉뚱한 안내를 받는다.
 
 ```bash
 tmux list-sessions -F '#{session_name}' | grep -qxF -- 1-main && echo 있음 || echo 없음
 ```
 
 `has-session -t 1-main`을 쓰지 않는 이유: tmux 타깃은 접두사 매칭을 하므로
-`maintenance` 세션만 있어도 exit 0을 낸다(실측). 없는데 있다고 판정하면 아래 오류
-처리가 발동하지 않는다.
+`1-maintenance` 세션만 있어도 exit 0을 낸다(실측). 순번 접두사를 쓰는 지금은 함정이
+더 넓다 — `1-main`만 있어도 `has-session -t 1`이 exit 0이다. 없는데 있다고 판정하면
+아래 오류 처리가 발동하지 않는다.
 
-`1-main` 세션이 없으면 현재 세션으로 대체하지 말고 사용자에게 오류를 알린다.
+`1-main` 세션이 없으면 **여기서 멈춘다.** 현재 세션으로 대체하지 말고 사용자에게
+오류를 알린다. 이 체크를 건너뛰면 안전망이 없다 — workmux는 `--parent-session`에 없는
+세션명을 받으면 **오류 없이 그 세션을 새로 만들고**(rc=0, 0.1.233 실측) 그 값을
+`workmux.worktree.{이름}.window-session` git config에 영구 저장한다. 그러면 아래
+"예외 1"이 그 잘못된 값을 "의도적으로 옮긴 것"으로 승격시켜, 이후 모든 `workmux open`이
+유령 세션을 계속 존중한다. 자기 교정 경로가 없다.
 
 **예외 1 — 이미 옮겨 둔 worktree.** `workmux open`은 기존 worktree도 여는 명령이다.
 git config의 `workmux.worktree.{이름}.window-session`이 `1-main`이 아니면 그것은
@@ -131,9 +145,13 @@ tmux list-windows -a -F '#{session_name}:#{window_index}\t#{window_name}'
 
 `workmux list`의 어떤 열에도 윈도우 이름이 없다. `MUX ✓`는 윈도우가 열렸다는 것만
 알려주므로, 사용자에게 윈도우 이름을 안내하기 전에 `tmux list-windows`로 실제 이름을
-확인한다. 실제 윈도우가 **git config의 `window-session`이 가리키는 세션**에 있는지도
-함께 검증한다 (새로 만든 것이면 `1-main`). 추측한 이름을 안내하면 사용자가
-`workmux close`에 없는 이름을 넘기게 된다.
+확인한다. 추측한 이름을 안내하면 사용자가 `workmux close`에 없는 이름을 넘기게 된다.
+
+**윈도우가 실제로 어느 세션에 있는지 확인하는 것은 생략할 수 없다.** workmux는 존재하지
+않는 `--parent-session` 값을 받아도 오류 없이 그 세션을 만들어 버리므로(위 "부모 tmux
+세션" 참조), 창이 엉뚱한 세션에 열린 것을 알려 주는 신호가 이 검증뿐이다. 새로 만든
+것이면 `1-main`, 그 밖에는 git config의 `window-session`이 가리키는 세션이어야 한다.
+어긋나면 사용자에게 알리고 잘못 만들어진 세션과 git config 값을 함께 정리한다.
 
 ## 주의사항
 

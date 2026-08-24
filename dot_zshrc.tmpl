@@ -142,9 +142,12 @@ fi
 # Ghostty를 완전히 종료해도 tmux 서버는 데몬으로 남아 세션이 유지된다. 세션
 # 자체를 새로 만들려면 `tmux kill-session -t 1-main`이 필요하다.
 #
-# quick 세션 마이그레이션: 예전 Quick Terminal이 만든 `5-quick` 세션이 남아 있으면
-# resurrect가 스냅샷에 담아 재부팅마다 되살린다. `tmux kill-session -t 5-quick`
-# 으로 지운 뒤 `prefix + C-s`로 다시 저장해야 사라진다.
+# quick 세션: 예전 Quick Terminal이 만든 세션의 이름은 `quick`이었고, 지우는 대신
+# `5-quick`으로 개명해 세션 이름 규칙에 편입했다(docs/tmux.md 참고). 아직 구 이름이
+# 남은 머신에서는 resurrect가 `quick`을 스냅샷에 담아 재부팅마다 되살리므로,
+# `tmux rename-session -t quick 5-quick` 후 `prefix + C-s`로 다시 저장해야 한다.
+# `kill-session -t 5-quick`으로는 구 이름 세션을 지울 수 없다 — tmux 타깃 접두사
+# 매칭은 세션명이 타깃으로 시작할 때만 성립하고 `quick`은 `5-quick`으로 시작하지 않는다.
 #
 # ORCA_PANE_KEY 가드: Orca(ADE)는 pane마다 ORCA_WORKTREE_ID,
 # ORCA_AGENT_HOOK_{PORT,TOKEN} 등을 주입하고 탭·split·스크롤백·세션 복원을
