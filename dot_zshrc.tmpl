@@ -160,6 +160,18 @@ fi
 # ============================================================
 if command -v tmux &>/dev/null && [[ -z "$TMUX" ]] && [[ $- == *i* ]] \
     && [[ -z "$ORCA_PANE_KEY" ]]; then
+    # 구 이름 세션 경고: `-A`는 정확 매칭이라 `main`이 살아 있어도 붙지 않고 별도
+    # `1-main`을 만든다. 기존 작업이 그쪽에 남는 것을 모르면 사라진 것처럼 보이므로
+    # 알린다. 개명은 자동으로 하지 않는다 — 붙어 있는 클라이언트와 실행 중 프로세스가
+    # 걸린 판단이라 셸 시작 경로에서 자동으로 처리할 일이 아니다(docs/tmux.md 참고).
+    # 정확 매칭(`grep -qxF`)을 쓰는 이유: tmux 타깃 접두사 매칭은 `maintenance` 같은
+    # 이름에도 걸린다.
+    if tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -qxF -- main; then
+        print -u2 "⚠ 구 이름 'main' 세션이 살아 있습니다."
+        print -u2 "  지금 붙는 '1-main'은 별도 세션이라 기존 작업이 보이지 않습니다."
+        print -u2 "  개명 절차: docs/tmux.md 의 '기존 세션 개명'"
+    fi
+
     # 모든 대화형 터미널 → 1-main 세션 (continuum이 자동 복원)
     # 세션명 접두사(1-, 2-...)는 choose-tree/list-sessions의 이름순 정렬을 고정하기 위한 것.
     exec tmux new-session -A -s 1-main
