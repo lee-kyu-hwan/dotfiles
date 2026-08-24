@@ -54,6 +54,16 @@ git config의 `workmux.worktree.{이름}.window-session`이 `1-main`이 아니�
 git -C {worktree경로} config --get workmux.worktree.{이름}.window-session
 ```
 
+**단, 값이 정확히 `main`이면 의도적인 이동이 아니다.** 세션명 규칙 이전의 기본값이
+그대로 남은 것이다(현재 모든 세션명은 순번으로 시작하므로 `main`은 의도적인 대상이
+될 수 없다). 이 경우에는 예외를 적용하지 말고 `--parent-session 1-main`을 넘기면서
+git config 값도 갱신한다. 그냥 존중하면 workmux가 레거시 `main` 세션을 되살리고,
+그 값이 계속 남아 매번 재생산된다.
+
+```bash
+git -C {worktree경로} config workmux.worktree.{이름}.window-session 1-main
+```
+
 **예외 2 — 지원되지 않는 조합.** `--parent-session`은 session mode, 샌드박스 안,
 그리고 여러 worktree를 한 번에 만드는 경우(`--count`, `--foreach`, 여러 `--agent`,
 stdin)에는 거부된다. 그때는 생략한다.

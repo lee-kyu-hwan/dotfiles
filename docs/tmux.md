@@ -174,11 +174,46 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 `main`/`quick` 같은 구 이름 세션이 살아 있는 머신에서 새 설정을 적용하면, `-A`는
 **이름이 정확히 일치할 때만** 붙기 때문에 빈 `1-main` 세션이 새로 생기고 터미널은
 거기에 붙습니다. 기존 작업은 `main`에 그대로 남고 화면에는 아무 경고가 없습니다.
-`chezmoi apply` 후 아래를 한 번 실행합니다.
+
+**먼저 상태를 확인합니다.** 절차가 상태에 따라 갈리기 때문입니다.
+
+```bash
+tmux list-sessions -F '#{session_name}: #{session_windows}w'
+```
+
+**상태 A — `main`만 있음** (새 셸을 아직 열지 않았을 때). 그대로 개명합니다.
 
 ```bash
 tmux rename-session -t main 1-main
 tmux rename-session -t quick 5-quick    # 있을 때만
+```
+
+**상태 B — `main`과 빈 `1-main`이 함께 있음** (새 셸을 이미 열어 버렸을 때). 이
+상태에서 `rename-session -t main 1-main`을 그냥 실행하면 `duplicate session: 1-main`
+으로 **실패합니다**(exit 1). 빈 쪽을 먼저 치워야 합니다. 지금 붙어 있는 세션이 그 빈
+`1-main`이므로, 작업이 있는 세션으로 옮긴 다음 지웁니다 — 붙어 있는 세션을 지우면
+detach되고 `.zshrc`가 `exec tmux`를 하므로 **터미널 창이 닫힙니다.**
+
+```bash
+tmux list-windows -t 1-main      # 셸 하나뿐인지 반드시 확인 (작업이 있으면 지우지 않는다)
+tmux switch-client -t main       # 작업이 있는 세션으로 이동
+tmux kill-session -t 1-main
+tmux rename-session -t main 1-main
+```
+
+**상태 C — `1-main`만 있음.** 이미 끝난 상태입니다.
+
+**workmux 메타데이터도 함께 옮깁니다.** git config의 `window-session` 값은 세션
+개명을 따라오지 않습니다. 값이 정확히 `main`인 항목은 규칙 이전의 기본값이므로
+`1-main`으로 갱신합니다. 갱신하지 않으면 `create-worktree`의 "예외 1"이 이 값을
+의도적인 이동으로 오분류해 `workmux open`이 `main` 세션을 되살립니다.
+
+```bash
+# 저장소마다 (worktree들은 .git/config를 공유하므로 한 번이면 됩니다)
+git config --get-regexp '^workmux\.worktree\..*\.window-session'
+git config --get-regexp '^workmux\.worktree\..*\.window-session' \
+  | awk '$2 == "main" { print $1 }' \
+  | while read -r k; do git config "$k" 1-main; done
 ```
 
 개명 후 `prefix + C-s`로 스냅샷을 다시 저장하고, 구 이름이 담긴 예전 스냅샷은
