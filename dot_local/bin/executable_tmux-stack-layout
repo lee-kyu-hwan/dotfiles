@@ -27,6 +27,21 @@
 set -euo pipefail
 
 read -r W H <<< "$(tmux display -p '#{window_width} #{window_height}')"
+
+# floating pane(tmux 3.7의 `new-pane`, 기본 바인딩 `prefix + *`)이 있으면 정렬하지
+# 않고 알린 뒤 끝낸다. select-layout 으로는 floating 을 남겨둔 채 tiled 만 정렬할
+# 방법이 없다 — 실측하면:
+#   - even-horizontal 은 floating 을 타일로 **흡수한다**(tiled 2 → 3, tiled 3 → 4).
+#     단 tiled 가 1개면 재배치할 것이 없어 아무 일도 안 하고 성공한다(조용한 no-op).
+#   - 커스텀 경로는 레이아웃 문자열의 패인 수가 창 전체 패인 수와 같아야 해서,
+#     floating 을 빼고 만들면 `have N panes but need N-1` 로 거부된다.
+# 흡수는 사용자가 띄워 둔 floating 창을 말없이 타일로 바꾸는 파괴적 동작이고,
+# no-op 은 키를 눌렀는데 아무 반응이 없는 것이다. 둘 다 숨기지 않고 거부한다.
+if [ "$(tmux list-panes -f '#{pane_floating_flag}' -F x | wc -l | tr -d ' ')" -gt 0 ]; then
+  tmux display-message "floating pane이 있어 정렬하지 않았다 — 닫은 뒤 다시 누르세요"
+  exit 0
+fi
+
 # macOS 기본 bash 3.2 호환: mapfile 대신 read 루프 사용
 PANES=()
 while IFS= read -r _pid; do PANES+=( "$_pid" ); done < <(tmux list-panes -F '#{pane_id}')
