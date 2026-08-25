@@ -302,15 +302,18 @@ starship explain
 
 터미널 멀티플렉서. 하나의 터미널에서 여러 세션/창/패널을 관리하고, SSH 세션 유지에 유용하다. 이 dotfiles의 tmux 설정은 [tmux.md](./tmux.md)를 참고한다.
 
+세션명은 `{순번}-{이름}` 규칙을 따른다 — 접두사 없는 이름을 만들면 `prefix → s`
+목록(이름순 정렬)에서 밀려난다. [tmux.md](./tmux.md#세션-이름-규칙) 참고.
+
 ```sh
 # 새 세션 시작
-tmux new -s main
+tmux new -s 6-scratch
 
 # 세션 목록 확인
 tmux ls
 
 # 세션에 재연결
-tmux attach -t main
+tmux attach -t 1-main
 ```
 
 ### macism

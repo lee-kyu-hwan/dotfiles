@@ -7,7 +7,7 @@ description: Use when creating a new git worktree for a branch to work on in iso
 
 git worktree를 만들고 workmux로 tmux 윈도우를 연다. pane 레이아웃은
 `~/.config/workmux/config.yaml`(좌 nvim / 우상 / 우하)이 담당하므로 여기서
-tmux를 직접 조작하지 않는다. 새 workmux 윈도우는 `main` 세션에 연다
+tmux를 직접 조작하지 않는다. 새 workmux 윈도우는 `1-main` 세션에 연다
 (이미 다른 세션으로 옮겨 둔 worktree는 예외 — 아래 "부모 tmux 세션" 참조).
 
 ## 파라미터
@@ -17,27 +17,70 @@ tmux를 직접 조작하지 않는다. 새 workmux 윈도우는 `main` 세션에
 
 ## 부모 tmux 세션
 
-window mode의 `workmux add`와 `workmux open` 호출에 `--parent-session main`을
-넘긴다. 실행 중인 에이전트가 `personal` 같은 다른 세션에 있어도 현재 세션을 부모로
+window mode의 `workmux add`와 `workmux open` 호출에 `--parent-session 1-main`을
+넘긴다. 실행 중인 에이전트가 `3-personal` 같은 다른 세션에 있어도 현재 세션을 부모로
 사용하지 않는다.
 
 ```bash
-tmux list-sessions -F '#{session_name}' | grep -qxF -- main && echo 있음 || echo 없음
+tmux list-sessions -F '#{session_name}'    # 종료 코드를 먼저 본다
 ```
 
-`has-session -t main`을 쓰지 않는 이유: tmux 타깃은 접두사 매칭을 하므로
-`maintenance` 세션만 있어도 exit 0을 낸다(실측). 없는데 있다고 판정하면 아래 오류
-처리가 발동하지 않는다.
+`list-sessions`가 exit 1 + `error connecting to ...`로 실패하면 tmux 서버 자체가 없는
+것이다. "세션이 없다"와 구분해 그대로 보고한다 — `grep`에 바로 물리면 두 상황이 똑같이
+"없음"으로 뭉개져 사용자가 엉뚱한 안내를 받는다.
 
-`main` 세션이 없으면 현재 세션으로 대체하지 말고 사용자에게 오류를 알린다.
+```bash
+tmux list-sessions -F '#{session_name}' | grep -qxF -- 1-main && echo 있음 || echo 없음
+```
+
+`has-session -t 1-main`을 쓰지 않는 이유: tmux 타깃은 접두사 매칭을 하므로
+`1-maintenance` 세션만 있어도 exit 0을 낸다(실측). 순번 접두사를 쓰는 지금은 함정이
+더 넓다 — `1-main`만 있어도 `has-session -t 1`이 exit 0이다. 없는데 있다고 판정하면
+아래 오류 처리가 발동하지 않는다.
+
+`1-main` 세션이 없으면 **여기서 멈춘다.** 현재 세션으로 대체하지 말고 사용자에게
+오류를 알린다. 이 체크를 건너뛰면 안전망이 없다 — workmux는 `--parent-session`에 없는
+세션명을 받으면 **오류 없이 그 세션을 새로 만들고**(rc=0, 0.1.233 실측) 그 값을
+`workmux.worktree.{이름}.window-session` git config에 영구 저장한다. 그러면 아래
+"예외 1"이 그 잘못된 값을 "의도적으로 옮긴 것"으로 승격시켜, 이후 모든 `workmux open`이
+유령 세션을 계속 존중한다. 자기 교정 경로가 없다.
 
 **예외 1 — 이미 옮겨 둔 worktree.** `workmux open`은 기존 worktree도 여는 명령이다.
-git config의 `workmux.worktree.{이름}.window-session`이 `main`이 아니면 그것은
+git config의 `workmux.worktree.{이름}.window-session`이 `1-main`이 아니면 그것은
 `move-window-to-session`으로 **의도적으로 옮긴** 것이므로, `--parent-session`을
-생략해 그 값을 존중한다. 무조건 붙이면 옮겨 둔 창을 조용히 `main`으로 되끌고 온다.
+생략해 그 값을 존중한다. 무조건 붙이면 옮겨 둔 창을 조용히 `1-main`으로 되끌고 온다.
 
 ```bash
 git -C {worktree경로} config --get workmux.worktree.{이름}.window-session
+```
+
+**단, 값이 `{순번}-{이름}` 형식이 아니면 의도적인 이동이 아니다.** 규칙 이전의 값이
+그대로 남은 것이다. 현재 모든 세션명은 `숫자-`로 시작하므로, `move-window-to-session`이
+기록한 값이라면 반드시 그 형태다. `main`뿐 아니라 `review`, `personal`, `eslint`,
+`quick`도 마찬가지다 — 열거로 판정하지 말고 형식으로 판정한다.
+
+```bash
+v=$(git -C {worktree경로} config --get workmux.worktree.{이름}.window-session)
+if [ -z "$v" ]; then
+  echo "값 없음 → --parent-session 1-main"
+elif printf '%s' "$v" | grep -qE '^[0-9]+-.+$'; then
+  echo "규칙에 맞는 값: $v → 의도적인 이동, 예외 1 적용"
+else
+  echo "규칙 밖 값: $v → 레거시로 판단"
+fi
+```
+
+셸 glob(`[0-9]*-*`)으로 판정하면 안 된다. 첫 `*`가 숫자 반복이 아니라 임의 문자열이라
+`1legacy-session`이나 `1-`처럼 규칙에 맞지 않는 값까지 통과한다(실측). 위 정규식은
+숫자 접두사 + 곧바로 이어지는 하이픈 + 비어 있지 않은 이름을 요구한다.
+
+규칙 밖 값이면 예외를 적용하지 말고 `--parent-session 1-main`을 넘기면서 git config
+값도 갱신한다. 그냥 존중하면 workmux가 그 레거시 세션을 조용히 되살리고, 값이 계속
+남아 매번 재생산된다. 어느 새 이름으로 옮길지 애매하면(예: `personal` → `3-personal`
+이 맞는지) 추측하지 말고 사용자에게 확인한다.
+
+```bash
+git -C {worktree경로} config workmux.worktree.{이름}.window-session 1-main
 ```
 
 **예외 2 — 지원되지 않는 조합.** `--parent-session`은 session mode, 샌드박스 안,
@@ -68,8 +111,8 @@ git-crypt 저장소에서는 그것이 smudge 필터 에러로 **실패한다**.
 
 ```bash
 ./scripts/create-worktree.sh {브랜치명}    # --no-checkout 생성·키 링크·체크아웃 + 의존성 설치
-workmux open {디렉토리명} --target-name {윈도우이름} --parent-session main  # 이슈 번호가 있을 때
-workmux open {디렉토리명} --parent-session main                            # 이슈 번호가 없을 때
+workmux open {디렉토리명} --target-name {윈도우이름} --parent-session 1-main  # 이슈 번호가 있을 때
+workmux open {디렉토리명} --parent-session 1-main                          # 이슈 번호가 없을 때
 ```
 
 - **스크립트가 실패하면 여기서 멈춘다.** 종료 코드를 확인하고, 실패했으면
@@ -88,8 +131,8 @@ workmux open {디렉토리명} --parent-session main                            
 workmux가 생성과 윈도우 구성을 한 번에 한다.
 
 ```bash
-workmux add {브랜치명} --target-name {윈도우이름} --parent-session main  # 이슈 번호가 있을 때
-workmux add {브랜치명} --parent-session main                            # 이슈 번호가 없을 때
+workmux add {브랜치명} --target-name {윈도우이름} --parent-session 1-main  # 이슈 번호가 있을 때
+workmux add {브랜치명} --parent-session 1-main                          # 이슈 번호가 없을 때
 ```
 
 ## 이름 파생
@@ -114,7 +157,7 @@ workmux add {브랜치명} --parent-session main                            # �
   들어가지만, `workmux add`는 브랜치명 슬러그를 써서 저장소 이름이 **없다**. 그래서
   `add` 경로에서는 두 저장소가 같은 브랜치명을 쓰면 두 번째가
   `✗ A tmux window named '...' already exists`로 실패한다 — 그때는
-  `--target-name {repo명}-{짧은이름} --parent-session main`으로 재시도한다.
+  `--target-name {repo명}-{짧은이름} --parent-session 1-main`으로 재시도한다.
 
   workmux는 target name을 소문자로 정규화한다. 사용자에게 안내하거나 이후 명령에
   재사용할 이름은 정규화된 소문자 쪽이다.
@@ -131,9 +174,13 @@ tmux list-windows -a -F '#{session_name}:#{window_index}\t#{window_name}'
 
 `workmux list`의 어떤 열에도 윈도우 이름이 없다. `MUX ✓`는 윈도우가 열렸다는 것만
 알려주므로, 사용자에게 윈도우 이름을 안내하기 전에 `tmux list-windows`로 실제 이름을
-확인한다. 실제 윈도우가 **git config의 `window-session`이 가리키는 세션**에 있는지도
-함께 검증한다 (새로 만든 것이면 `main`). 추측한 이름을 안내하면 사용자가
-`workmux close`에 없는 이름을 넘기게 된다.
+확인한다. 추측한 이름을 안내하면 사용자가 `workmux close`에 없는 이름을 넘기게 된다.
+
+**윈도우가 실제로 어느 세션에 있는지 확인하는 것은 생략할 수 없다.** workmux는 존재하지
+않는 `--parent-session` 값을 받아도 오류 없이 그 세션을 만들어 버리므로(위 "부모 tmux
+세션" 참조), 창이 엉뚱한 세션에 열린 것을 알려 주는 신호가 이 검증뿐이다. 새로 만든
+것이면 `1-main`, 그 밖에는 git config의 `window-session`이 가리키는 세션이어야 한다.
+어긋나면 사용자에게 알리고 잘못 만들어진 세션과 git config 값을 함께 정리한다.
 
 ## 주의사항
 

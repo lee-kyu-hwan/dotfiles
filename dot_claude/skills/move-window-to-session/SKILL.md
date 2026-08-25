@@ -56,9 +56,10 @@ tmux list-clients -t {원본세션} -F '#{client_tty} #{client_session}'  # 붙�
 **2. 대상 세션이 있는가**
 
 `has-session`을 그냥 쓰면 안 된다. tmux 타깃은 **접두사 매칭**을 하므로
-`maintenance` 세션만 있어도 `has-session -t main`이 exit 0으로 "있음"을 낸다
-(실측). 그 상태로 1단계를 실행하면 세션이 새로 생기지도 않고 윈도우가 **엉뚱한
-기존 세션으로 조용히 들어간다** — 오타로 세션이 생기는 것보다 나쁘다.
+`1-maintenance` 세션만 있어도 `has-session -t 1-main`이 exit 0으로 "있음"을 낸다
+(실측). 세션명이 순번으로 시작하는 지금은 함정이 더 넓다 — `1-main`만 있어도
+`has-session -t 1`이 exit 0이다. 그 상태로 1단계를 실행하면 세션이 새로 생기지도
+않고 윈도우가 **엉뚱한 기존 세션으로 조용히 들어간다** — 오타로 세션이 생기는 것보다 나쁘다.
 대소문자는 구분하므로(`ZZSRC` → exit 1) 대소문자 오타는 걸러진다.
 
 ```bash
@@ -107,10 +108,14 @@ tmux move-window -r -t {원본세션}:
 그대로 유지하므로 이 단계가 막으려던 실패가 그대로 남고 config에 쓰레기까지 쌓인다.
 
 ```bash
+sync_rc=0
+
 # (a) git config — workmux가 close/remove/open에서 윈도우를 찾는 근거
-git -C {worktree경로} config workmux.worktree.{worktree명}.window-session {대상세션}
+git -C {worktree경로} config workmux.worktree.{worktree명}.window-session {대상세션} \
+  || { echo "git config 갱신 실패" >&2; sync_rc=1; }
 
 # (b) agent state — dashboard·last-done·last-agent 표시의 근거
+command -v jq >/dev/null || { echo "jq 없음 — state를 갱신하지 못한다" >&2; sync_rc=1; }
 d="$HOME/.local/state/workmux/agents"
 sock=$(tmux display-message -p '#{socket_path}')
 boot=$(tmux display-message -p '#{start_time}')
@@ -120,12 +125,25 @@ for p in $PANES; do
     [ "$(jq -r '.pane_key.pane_id // ""' "$f")" = "$p" ] || continue
     [ "$(jq -r '.pane_key.instance // ""' "$f")" = "$sock" ] || continue  # 다른 tmux 서버
     [ "$(jq -r '.boot_id // ""' "$f")" = "$boot" ] || continue            # 이전 부팅 = resurrect 입력
-    jq --arg s "{대상세션}" --arg w "$(tmux display-message -p -t "$p" '#{window_name}')" \
-      '.session_name = $s | .window_name = $w' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"
-    echo "synced workmux agent state: $p → {대상세션}"
+    if jq --arg s "{대상세션}" --arg w "$(tmux display-message -p -t "$p" '#{window_name}')" \
+         '.session_name = $s | .window_name = $w' "$f" > "$f.tmp" && mv -- "$f.tmp" "$f"; then
+      echo "synced workmux agent state: $p → {대상세션}"
+    else
+      rm -f -- "$f.tmp"
+      echo "state 갱신 실패: $f" >&2
+      sync_rc=1
+    fi
   done
 done
+
+[ "$sync_rc" = 0 ] && echo "메타데이터 동기화 완료" || echo "동기화 부분 실패 (sync_rc=1)" >&2
 ```
+
+**`sync_rc`가 0이 아니면 다음 단계로 넘어가지 않는다.** resurrect 저장(`prefix + C-s`)을
+하면 tmux 위치와 workmux 메타데이터가 어긋난 상태가 스냅샷에 고착된다. 사용자에게
+**"윈도우는 옮겼으나 메타데이터 동기화가 부분 실패했다"**고 그대로 보고하고, 실패한
+항목을 먼저 고친다. 완료로 보고하면 `workmux close/remove`가 창을 못 찾거나
+dashboard가 옛 세션을 계속 가리키는 상태가 정상으로 취급된다.
 
 **살아있는 pane의** state 파일은 삭제하지 않고 갱신한다. 지우면 에이전트 상태
 (윈도우 탭의 🤖/💬/✅, `prefix + G`의 `last-done` 대상)가 사라진다. 죽은 pane의

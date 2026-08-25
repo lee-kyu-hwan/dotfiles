@@ -77,7 +77,7 @@ tmux 패인과 Neovim 창을 구분 없이 이동합니다. prefix 없이 사용
 | `prefix` → `ㅍ` | `p` | 이전 윈도우 | ★ |
 | `prefix` → `ㅌ` | `x` | 패인 종료 (확인) | ★ |
 | `prefix` → `ㅋ` | `z` | 패인 줌 토글 | ★ |
-| `prefix` → `ㄴ` | `s` | 세션 목록 | ★ |
+| `prefix` → `ㄴ` | `s` | 세션 목록 (이름순 고정) | ★ |
 | `prefix` → `ㅐ` | `o` | 다음 패인으로 이동 | ★ |
 | `prefix` → `ㅣ` | `l` | 레이아웃 전환 | ★ |
 | `prefix` → `ㅂ` | `q` | 패인 번호 표시 | ★ |
@@ -134,7 +134,86 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | 자동 저장 주기 | 15분 |
 | tmux 시작 시 자동 복원 | 켜짐 |
 
-새로 만든 `0`번 세션은 자동으로 `main`으로 이름이 바뀝니다.
+이름 없이 만들어진 `0`번 세션은 `session-created` 훅이 `1-main`으로 개명합니다. 단
+`1-main`이 이미 있으면 이 개명은 **조용히 실패**하고(`duplicate session`, 훅 경로에서는
+오류가 표시되지 않음) 세션은 `0`이라는 이름으로 남습니다. `.zshrc`가 항상 `-s 1-main`을
+지정하므로 통상 흐름에서는 훅이 발동하지 않고, 인수 없이 `tmux`를 직접 실행했을 때만
+이 경로를 타게 됩니다. 규칙 밖 이름(`0`, `1`)이 생기면 `prefix → $`로 직접 고칩니다.
+
+### 세션 이름 규칙
+
+세션명은 `{순번}-{이름}` 형식을 씁니다 (`1-main`, `2-review`, `3-personal`,
+`4-eslint`, `5-quick`). `prefix → s`가 `choose-tree -Zs -O name`으로 바인딩되어
+있어 목록이 **이름순**으로 나오기 때문입니다. tmux의 기본 정렬은 `index`(세션
+생성 순)라서 접두사가 없으면 만든 순서대로 섞여 나옵니다.
+
+| 키 | 기능 |
+|----|------|
+| `prefix` → `s` | 세션 목록 (이름순 고정) |
+| 목록 안에서 `O` | 정렬 필드 순환 (`index`/`name`/`activity`/`z`) — 일회성 |
+| 목록 안에서 `r` | 정렬 역순 — 일회성 |
+| `prefix` → `$` | 세션 이름 변경 |
+
+> 이름순 정렬은 자연 정렬이 아니라 바이트 비교입니다. 그래서 세션이 10개를 넘으면
+> `10-`이 `2-` **앞에** 오면서 순번의 의미가 깨집니다. 9개까지는 문제가 없고, 그
+> 이상 쓰게 되면 `01-`/`02-` 제로패딩으로 바꿔야 합니다.
+
+> `prefix → w`(윈도우 트리)는 `index` 정렬을 유지합니다. `-O name`은 트리 전체에
+> 적용돼 세션 안의 윈도우까지 이름순으로 섞이는데, 윈도우는 번호 순이 맞습니다.
+> 대신 `prefix → w`의 **세션 행도 생성 순으로 남습니다** — 순번 접두사는 그쪽
+> 목록에서는 순서에 영향을 주지 않습니다.
+
+> 세션 이름을 바꿀 때 함께 고쳐야 하는 곳: `.tmux.conf`의 `session-created` 훅
+> (`rename-session`의 대상 이름 — 세션명을 자동으로 결정하는 1차 지점), `~/.zshrc`의
+> `exec tmux new-session -A -s 1-main`, `create-worktree`·`move-window-to-session`
+> 스킬의 `--parent-session`, workmux의 `workmux.worktree.*.window-session` git
+> config, 그리고 이 문서.
+
+### 기존 세션 개명 (구 이름이 남은 머신)
+
+구 이름 세션(`main`, `review`, `personal`, `eslint`, `quick`)이 살아 있는 머신에서 새
+설정을 적용하면, `-A`는 **이름이 정확히 일치할 때만** 붙기 때문에 빈 `1-main` 세션이
+새로 생기고 터미널은 거기에 붙습니다. 기존 작업은 구 이름 세션에 그대로 남고 화면에는
+아무 경고가 없습니다. `.zshrc`가 이 상태를 감지해 경고는 하지만 개명은 하지 않습니다.
+
+세션명은 세 곳에 저장되고, 하나만 고치면 나머지가 어긋납니다.
+
+| 저장소 | 무엇의 근거인가 |
+|--------|-----------------|
+| tmux 서버의 세션명 | 실제 창 위치 |
+| `~/.local/state/workmux/agents/*.json`의 `session_name` | 윈도우 탭의 에이전트 표시, `prefix + G`의 last-done, dashboard |
+| 저장소별 `workmux.worktree.*.window-session` git config | workmux가 close/remove/open에서 창을 찾는 근거 |
+
+세 곳을 함께 옮기고 결과를 재검증하는 스크립트가 있습니다.
+
+```bash
+tmux-migrate-session-names --dry-run               # 할 일만 출력, 아무것도 바꾸지 않음
+tmux-migrate-session-names                         # 적용 (현재 저장소의 git config 포함)
+tmux-migrate-session-names ~/code/foo ~/code/bar   # 저장소를 지정
+```
+
+worktree들은 `.git/config`를 공유하므로 저장소마다 한 번이면 됩니다. `jq`가 필요합니다
+— macOS에는 이미 있고, Linux에서는 `apt install jq`로 넣어야 합니다.
+
+개명은 비파괴적입니다. 대상 이름이 이미 있으면 임시 이름을 거쳐 클라이언트와 윈도우를
+합치며 `kill-session`은 쓰지 않습니다 — 붙어 있는 클라이언트를 detach시키면 `.zshrc`가
+`exec tmux`를 하므로 그 터미널 창이 닫히기 때문입니다.
+
+건드리지 않는 것이 둘 있고, 스크립트가 그때마다 이유를 출력합니다.
+
+- **다른 tmux 서버의 state** — `instance`가 다르면 우리 소관이 아닙니다.
+- **이전 부팅의 state** — `workmux resurrect`의 입력입니다. 고치거나 지우면 복구가
+  불가능해집니다. 복원한 뒤 스크립트를 한 번 더 돌리면 정리됩니다.
+
+규칙에 맞는 값(`숫자-`로 시작)은 `move-window-to-session`이 의도적으로 기록한 것이므로
+그대로 둡니다. 매핑에 없는 규칙 밖 값이 남아 있으면 스크립트가 실패로 보고합니다 —
+어느 세션으로 옮길지는 직접 정해야 합니다.
+
+**끝나면 `prefix + C-s`로 스냅샷을 다시 저장합니다.** 재저장하지 않으면 구 이름이 담긴
+스냅샷이 복원될 때 세션이 **이중화**됩니다. resurrect의 `restore.sh`는 스냅샷의 세션명이
+현재 세션과 다르면 오류 없이 `new_session`으로 새로 만들기 때문입니다. 스크립트가 실패를
+보고했으면 **저장하기 전에 먼저 고칩니다** — 지금 저장하면 어긋난 상태가 스냅샷에
+고착됩니다.
 
 ---
 
@@ -150,7 +229,7 @@ TPM으로 `tmux-resurrect`, `tmux-continuum`을 사용합니다.
 | `tmux attach -t 이름` | 세션 붙기 |
 | `tmux kill-session -t 이름` | 세션 종료 |
 | `prefix` → `d` | 세션 분리 (detach) |
-| `prefix` → `s` | 세션 목록 선택 |
+| `prefix` → `s` | 세션 목록 선택 (이름순 고정 — 세션 이름 규칙 참고) |
 | `prefix` → `$` | 세션 이름 변경 |
 
 ### 윈도우
