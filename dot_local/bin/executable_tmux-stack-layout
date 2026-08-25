@@ -3,7 +3,7 @@
 # 쌓지 않고 열 단위로 배치한다.
 #
 # 개수별 규칙:
-#   - 패인 2개: 좌우로 나란히 배치 (tmux 내장 even-horizontal)
+#   - 패인 2개: 좌우로 나란히 배치 (결과는 tmux 내장 even-horizontal 과 같다)
 #       행 단위로 쌓으면 두 패인 모두 높이가 절반으로 줄어들어, 이 개수에서는
 #       전체 높이를 유지한 채 좌우로 나눈다.
 #   - 패인 3개: 좌 1개(세로 전체) + 우 2개(상하)
@@ -19,11 +19,11 @@
 #
 # 남는 칸은 항상 좌측·상단이 가져간다. 구분선이 1칸을 쓰므로 가용 폭이
 # `W - (열수-1)`이 되고, 나누어떨어지지 않으면 1칸 차이가 난다 — 개수와 무관하게
-# 공통이며 even-horizontal 경로도 같다(아래 :44 주석 참조).
+# 공통이다.
 #
-# 패인 2개는 tmux 내장 even-horizontal로 처리한다. 나머지 배치는 tmux 기본
-# 레이아웃에 없어 layout 문자열을 직접 생성하고 checksum을 계산해
-# select-layout에 전달한다.
+# 모든 개수에서 layout 문자열을 직접 생성하고 checksum을 계산해 select-layout에
+# 전달한다. 2개는 내장 even-horizontal 로도 같은 결과가 나오지만 쓰지 않는다 —
+# 이유는 아래 2개 분기 주석 참조.
 set -euo pipefail
 
 read -r W H <<< "$(tmux display -p '#{window_width} #{window_height}')"
@@ -50,16 +50,22 @@ n=${#PANES[@]}
 # 패인 1개 이하는 정렬 의미 없음
 [ "$n" -le 1 ] && exit 0
 
-# --- 2개: 좌우 배치 예외 (tmux 내장 even-horizontal) ---
-# 패인 순서를 유지한 채 왼쪽→오른쪽으로 균등 분배한다.
+# --- 2개: 좌우 배치 ---
+# 결과는 tmux 내장 even-horizontal 과 같지만, 내장 대신 패인 ID를 박은 레이아웃
+# 문자열을 쓴다. 내장은 적용 시점의 창 상태를 그대로 따라가므로, 위 floating 검사와
+# select-layout 사이에 다른 클라이언트가 floating 을 만들면 그것까지 흡수해 버린다
+# (fail-open). 문자열은 패인 수와 ID가 박혀 있어 그 사이 창이 바뀌면
+# `have N panes but need M` 으로 거부된다 (fail-closed).
 if [ "$n" -eq 2 ]; then
-  tmux select-layout even-horizontal
-  exit 0
-fi
+  avail_w=$(( W - 1 ))
+  lw=$(( (avail_w + 1) / 2 ))   # 좌측이 나머지 한 칼럼을 갖는다 (tmux 관례)
+  rw=$(( avail_w - lw ))
+  rx=$(( lw + 1 ))
+  layout="${W}x${H},0,0{${lw}x${H},0,0,${PANES[0]#%},${rw}x${H},${rx},0,${PANES[1]#%}}"
 
 # --- 3개: 열 배치 예외 (좌 1개 세로 전체 + 우 2개 상하) ---
 # tmux layout 문법: {} = 좌우 분할, [] = 상하 분할
-if [ "$n" -eq 3 ]; then
+elif [ "$n" -eq 3 ]; then
   avail_w=$(( W - 1 ))
   lw=$(( (avail_w + 1) / 2 ))   # 좌측이 나머지 한 칼럼을 갖는다 (tmux 관례)
   rw=$(( avail_w - lw ))
@@ -137,4 +143,10 @@ for ((i = 0; i < ${#layout}; i++)); do
 done
 printf -v chk '%04x' "$csum"
 
-tmux select-layout "${chk},${layout}"
+# 실패하면(대개 검사 이후 패인이 늘거나 줄어 `have N panes but need M`) 조용히
+# 넘어가지 않고 알린다. 레이아웃은 적용되지 않은 상태로 남는다.
+if ! err=$(tmux select-layout "${chk},${layout}" 2>&1); then
+  tmux display-message "레이아웃 정렬 실패 — 패인 구성이 바뀌었습니다. 다시 누르세요"
+  echo "select-layout 실패: $err" >&2
+  exit 1
+fi
