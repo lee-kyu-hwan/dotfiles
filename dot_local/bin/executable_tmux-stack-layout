@@ -37,25 +37,39 @@ read -r W H <<< "$(tmux display -p '#{window_width} #{window_height}')"
 #     floating 을 빼고 만들면 `have N panes but need N-1` 로 거부된다.
 # 흡수는 사용자가 띄워 둔 floating 창을 말없이 타일로 바꾸는 파괴적 동작이고,
 # no-op 은 키를 눌렀는데 아무 반응이 없는 것이다. 둘 다 숨기지 않고 거부한다.
-if [ "$(tmux list-panes -f '#{pane_floating_flag}' -F x | wc -l | tr -d ' ')" -gt 0 ]; then
+# floating 검사와 패인 목록을 **한 번의 list-panes** 로 함께 읽는다. 두 번 나눠 읽으면
+# 그 사이에 다른 클라이언트가 만든 floating 이 검사는 통과하고 목록에는 들어와,
+# 개수가 맞아떨어져 그대로 흡수된다.
+# macOS 기본 bash 3.2 호환: mapfile 대신 read 루프 사용
+PANES=()
+has_floating=0
+while read -r _flag _pid; do
+  [ "$_flag" = 1 ] && has_floating=1
+  PANES+=( "$_pid" )
+done < <(tmux list-panes -F '#{pane_floating_flag} #{pane_id}')
+n=${#PANES[@]}
+
+if [ "$has_floating" = 1 ]; then
   tmux display-message "floating pane이 있어 정렬하지 않았다 — 닫은 뒤 다시 누르세요"
   exit 0
 fi
-
-# macOS 기본 bash 3.2 호환: mapfile 대신 read 루프 사용
-PANES=()
-while IFS= read -r _pid; do PANES+=( "$_pid" ); done < <(tmux list-panes -F '#{pane_id}')
-n=${#PANES[@]}
 
 # 패인 1개 이하는 정렬 의미 없음
 [ "$n" -le 1 ] && exit 0
 
 # --- 2개: 좌우 배치 ---
-# 결과는 tmux 내장 even-horizontal 과 같지만, 내장 대신 패인 ID를 박은 레이아웃
-# 문자열을 쓴다. 내장은 적용 시점의 창 상태를 그대로 따라가므로, 위 floating 검사와
-# select-layout 사이에 다른 클라이언트가 floating 을 만들면 그것까지 흡수해 버린다
-# (fail-open). 문자열은 패인 수와 ID가 박혀 있어 그 사이 창이 바뀌면
-# `have N panes but need M` 으로 거부된다 (fail-closed).
+# 결과는 tmux 내장 even-horizontal 과 같지만, 내장 대신 레이아웃 문자열을 쓴다.
+# 내장은 적용 시점의 창 상태를 그대로 따라가므로, 스냅샷 이후 다른 클라이언트가
+# floating 을 만들면 그것까지 흡수한다. 문자열은 셀 수가 박혀 있어 패인이 **늘어난**
+# 경우 `have N panes but need M` 으로 거부된다.
+#
+# 다만 이것이 완전한 fail-closed 는 아니다. 실측(tmux 3.7b):
+#   - 패인 수가 같고 ID만 다르면 그대로 적용된다 — 문자열의 leaf ID 는 검증되지
+#     않고 현재 패인 순서로 재할당된다.
+#   - 패인이 **줄면** 셀을 지우고 성공한다.
+# 즉 막아 주는 것은 "스냅샷 이후 패인이 늘어난 경우"뿐이다. 검사와 스냅샷을 한 번의
+# list-panes 로 합친 것(위)이 실제로 의미 있는 방어이고, 이 문자열은 그 뒤에 남는
+# 좁은 구간을 줄여 줄 뿐이다.
 if [ "$n" -eq 2 ]; then
   avail_w=$(( W - 1 ))
   lw=$(( (avail_w + 1) / 2 ))   # 좌측이 나머지 한 칼럼을 갖는다 (tmux 관례)
