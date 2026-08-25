@@ -40,6 +40,11 @@ read -r W H <<< "$(tmux display -p '#{window_width} #{window_height}')"
 # floating 검사와 패인 목록을 **한 번의 list-panes** 로 함께 읽는다. 두 번 나눠 읽으면
 # 그 사이에 다른 클라이언트가 만든 floating 이 검사는 통과하고 목록에는 들어와,
 # 개수가 맞아떨어져 그대로 흡수된다.
+#
+# 대상 창은 `-t` 없이도 고정된다. run-shell 자식은 TMUX_PANE 을 상속하고, tmux 는
+# 그때 기본 타깃을 **세션의 현재 창이 아니라 그 pane 의 창**으로 잡는다(실측: 세션
+# 현재 창이 @1 인 상태에서 @0 의 pane 에서 실행하면 display/list-panes 모두 @0).
+# 따라서 실행 중 다른 클라이언트가 창을 전환해도 엉뚱한 창을 건드리지 않는다.
 # macOS 기본 bash 3.2 호환: mapfile 대신 read 루프 사용
 PANES=()
 has_floating=0
