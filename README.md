@@ -67,7 +67,7 @@ Linux:                                 ┌────────────�
 | starship | Starship 프롬프트 | O | O | O |
 | fastfetch | 터미널 시작 시 시스템 정보 표시 | O | O | O |
 | claude | Claude Code 전역 설정 | O | O | O |
-| codex | Codex CLI 전역 설정 | O | O | O |
+| codex | Codex CLI 전역 설정 ([Playwright E2E 프로필](docs/codex-playwright-e2e.md)) | O | O | O |
 | aws | AWS CLI SSO 설정 ([설정 문서](docs/aws-cli.md)) | O | O | O |
 | hammerspoon | Magnet 호환 윈도우 매니지먼트 ([설정 문서](docs/hammerspoon.md)) | O | O | X |
 | ghostty | Ghostty 터미널 설정 | O | O | X |
