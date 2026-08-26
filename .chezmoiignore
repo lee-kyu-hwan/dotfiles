@@ -9,6 +9,8 @@ tests/**
 .aws/sso/cache
 .aws/cli/cache
 
+.claude/skills/quality-goal/**/__pycache__
+
 # Codex가 런타임에 계속 다시 쓰는 파일. 값이 같아도 표현을 자기 포맷으로
 # 정규화하고(`20` → `20.0`, 여러 줄 배열 → 한 줄), trust_level·hooks.state·
 # marketplaces 타임스탬프를 자동으로 덧붙인다. 관리하면 영구 drift가 되므로

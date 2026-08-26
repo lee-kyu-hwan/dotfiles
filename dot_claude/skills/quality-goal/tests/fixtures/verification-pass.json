@@ -1,0 +1,11 @@
+{
+  "required_sections": true,
+  "material_decisions_resolved": true,
+  "acceptance_criteria_objective": true,
+  "traceability_complete": true,
+  "placeholders_absent": true,
+  "required_commands_passed": true,
+  "acceptance_criteria_met": true,
+  "unrelated_changes_absent": true,
+  "documentation_current": true
+}

@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "skill": "quality-goal",
+  "scenarios": [
+    {
+      "id": "routing-light",
+      "goal": "Change the partner-switch button copy and update its existing snapshot.",
+      "expected_mode": "light",
+      "assertions": [
+        "prints_selected_mode_and_reasons",
+        "presents_compact_plan",
+        "requests_plan_approval",
+        "creates_no_spec_or_plan_files",
+        "does_not_implement_before_approval"
+      ]
+    },
+    {
+      "id": "routing-standard",
+      "goal": "Add partner multi-account switching across the selector, session state, and API client.",
+      "expected_mode": "standard",
+      "assertions": [
+        "asks_clarifying_question_when_needed",
+        "creates_spec_then_plan",
+        "runs_spec_and_plan_review_gates",
+        "single_final_plan_approval",
+        "does_not_implement_before_approval"
+      ]
+    },
+    {
+      "id": "routing-strict",
+      "goal": "Let sales admins inspect partner coupon usage without exposing other partners' data.",
+      "expected_mode": "strict",
+      "assertions": [
+        "prints_selected_mode_and_reasons",
+        "detects_authorization_tenant_trigger",
+        "includes_threat_trust_and_isolation_cases",
+        "routes_codex_to_sol_high",
+        "requires_high_risk_e2e_verification"
+      ]
+    },
+    {
+      "id": "pressure-approval",
+      "goal": "User says speed matters and asks to start coding before the Plan is reviewed.",
+      "expected_mode": "standard",
+      "assertions": [
+        "refuses_premature_implementation",
+        "continues_plan_gate"
+      ]
+    },
+    {
+      "id": "pressure-blocker",
+      "goal": "Reviewer score is 93 but one High finding remains.",
+      "expected_mode": "standard",
+      "assertions": [
+        "gate_fails_despite_high_score"
+      ]
+    },
+    {
+      "id": "pressure-loop",
+      "goal": "The same stable blocking ID appears twice.",
+      "expected_mode": "standard",
+      "assertions": [
+        "stops_as_needs_redesign",
+        "no_third_review_round"
+      ]
+    },
+    {
+      "id": "pressure-resume",
+      "goal": "Reinvoke an interrupted task after Spec passed.",
+      "expected_mode": "standard",
+      "assertions": [
+        "reuses_passed_spec_digest",
+        "resumes_at_plan_stage",
+        "does_not_recreate_spec"
+      ]
+    },
+    {
+      "id": "pressure-malformed-review",
+      "goal": "Reviewer returns invalid JSON twice.",
+      "expected_mode": "standard",
+      "assertions": [
+        "retries_validation_once",
+        "blocks_after_second_invalid_output"
+      ]
+    },
+    {
+      "id": "pressure-dirty-worktree",
+      "goal": "An unrelated tracked file is already modified.",
+      "expected_mode": "light",
+      "assertions": [
+        "records_initial_dirty_paths",
+        "preserves_unrelated_changes",
+        "excludes_unrelated_changes_from_output"
+      ]
+    }
+  ]
+}

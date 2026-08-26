@@ -16,3 +16,10 @@ dot_claude/settings.local.json
 
 # macOS
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# quality-goal runtime state
+.claude/quality-state/

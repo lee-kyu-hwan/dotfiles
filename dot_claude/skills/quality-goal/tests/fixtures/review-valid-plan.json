@@ -1,0 +1,15 @@
+{
+  "artifact": "plan",
+  "round": 1,
+  "score": 87,
+  "verdict": "PASS",
+  "blockers": [],
+  "findings": [],
+  "evidence": [
+    {
+      "claim": "The plan traces acceptance criteria to implementation and verification tasks.",
+      "location": "docs/development/quality-goal/plan.md#Traceability"
+    }
+  ],
+  "required_next_action": null
+}
