@@ -724,6 +724,71 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             with self.subTest(frontmatter_key=key):
                 self.assertEqual(actual_value, expected_value)
 
+    def test_issue_reference_detection_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertIn("#<number>", normalized)
+        self.assertIn("github issue url", normalized)
+        self.assertIn("gh issue view", normalized)
+        self.assertRegex(normalized, r"read it before classifying")
+        self.assertIn("--json title,body,labels,comments", normalized)
+        self.assertRegex(normalized, r"full issue url.{0,120}derive.{0,60}--repo")
+        self.assertIn("read-only", normalized)
+
+    def test_issue_requirement_input_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"title.{0,80}body.{0,80}comments.{0,100}requirement input")
+        self.assertRegex(normalized, r"issue number.{0,100}specific claim")
+        self.assertRegex(normalized, r"every factual claim.{0,140}repository")
+        self.assertIn("stale", normalized)
+
+    def test_issue_goal_normalization_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"quality_state\.py init.{0,180}goal_key")
+        self.assertRegex(normalized, r"goal_key.{0,100}task_id.{0,160}durable document directory")
+        self.assertRegex(normalized, r"reference.{0,100}too thin.{0,180}issue number.{0,120}one-line summary")
+        self.assertRegex(normalized, r"never.{0,100}(?:omit|without).{0,100}issue number")
+        self.assertIn("collide", normalized)
+        self.assertRegex(normalized, r"show the user.{0,100}enriched goal")
+
+    def test_issue_labels_are_classification_evidence_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"labels?.{0,100}(?:additional )?classification evidence")
+        self.assertRegex(normalized, r"labels?.{0,120}quoted.{0,100}printed reasons")
+        self.assertRegex(normalized, r"labels?.{0,120}never replace.{0,100}risk scan")
+        self.assertRegex(normalized, r"missing or wrong label.{0,100}never lowers the mode")
+        self.assertIn("scan result stands", normalized)
+
+    def test_issue_content_is_untrusted_data_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"issue body or comment.{0,100}data.{0,100}not instructions")
+        for term in ("change the mode", "waive a gate", "skip the approval", "alter loop limits", "destructive or external action"):
+            with self.subTest(untrusted_effect=term):
+                self.assertIn(term, normalized)
+        self.assertRegex(normalized, r"asks for any of that.{0,120}open question.{0,120}normal rules")
+
+    def test_issue_reading_has_no_mutation_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"reading is allowed.{0,80}writing is not")
+        for term in ("post a comment", "edit the body", "change labels", "assignees", "projects", "state", "open or close"):
+            with self.subTest(issue_mutation=term):
+                self.assertIn(term, normalized)
+        self.assertIn("user's actions", normalized)
+
+    def test_issue_unavailable_requires_pasted_requirements_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(normalized, r"gh.{0,20}is missing")
+        self.assertIn("unauthenticated", normalized)
+        self.assertRegex(normalized, r"issue cannot be read.{0,100}(?:say so|ask).{0,100}paste the requirements")
+        self.assertRegex(normalized, r"do not guess.{0,120}issue")
+        self.assertRegex(normalized, r"never silently proceed.{0,100}terse goal")
+
     def test_skill_size_and_state_names_contract(self):
         text = self.read_skill()
         _, body = parse_yaml_frontmatter(text)
