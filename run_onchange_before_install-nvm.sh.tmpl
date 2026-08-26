@@ -24,7 +24,10 @@ nvm use default
 
 expected_nvm_version="${NVM_VERSION#v}"
 actual_nvm_version="$(nvm --version)"
-actual_node_version="$(node --version)"
+# PATH 로 찾지 않는다. nvm 은 PATH 에 nvm 경로가 이미 있으면 그 자리에서 버전만
+# 교체하므로, Homebrew node 가 앞에 있으면 `nvm use` 뒤에도 `node` 는 Homebrew 판을
+# 가리킨다(실측). nvm 이 default 로 제공하는 바이너리에 직접 물어본다.
+actual_node_version="$("$(nvm which default)" --version)"
 default_node_version="$(nvm version default)"
 
 if [[ "$actual_nvm_version" != "$expected_nvm_version" ]]; then

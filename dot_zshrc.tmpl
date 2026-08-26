@@ -101,6 +101,28 @@ export PATH="$HOME/.local/bin:$PATH"
 export PATH="$PATH:$HOME/.pub-cache/bin"
 export PATH="$PATH:$HOME/.maestro/bin"
 
+# nvm 경로를 PATH 맨 앞으로 끌어온다.
+#
+# nvm.sh 를 source 하는 것만으로는 `node` 가 nvm 판으로 잡히지 않는다. nvm 은 PATH 에
+# nvm 경로가 이미 있으면 **그 자리에서 버전만 교체**하기 때문이다(실측: 8번 위치의
+# v24.18.1/bin 이 v24.19.0/bin 으로 바뀌지만 위치는 8번 그대로). tmux 서버가 물려주는
+# PATH 에 nvm 이 Homebrew 뒤에 박혀 있으면 그 순서가 새 셸마다 재생산되고, 결과적으로
+# Homebrew node 가 계속 이긴다 — `nvm current` 가 `system` 을 내고 `node` 는
+# /opt/homebrew/bin/node 였다. Homebrew node 는 firebase-cli·supabase 의 의존성이라
+# 지울 수 없으므로 여기서 순서를 바로잡는다.
+#
+# `nvm use` 를 다시 부르지 않는다 — 위 이유로 효과가 없고 약 150ms 를 더한다. nvm.sh
+# 가 이미 올바른 버전의 경로를 넣어 두었으니 그 항목을 앞으로 옮기기만 하면 되고,
+# 이 방식은 외부 명령을 쓰지 않아 비용이 없다.
+if [[ -n "${NVM_DIR:-}" ]]; then
+    _nvm_paths=("${(@M)path:#$NVM_DIR/versions/node/*/bin}")
+    if (( $#_nvm_paths )); then
+        path=("${_nvm_paths[@]}" "${(@)path:#$NVM_DIR/versions/node/*/bin}")
+        export PATH
+    fi
+    unset _nvm_paths
+fi
+
 # ============================================================
 # Aliases
 # ============================================================

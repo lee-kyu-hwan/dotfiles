@@ -122,7 +122,8 @@
     "context7@claude-plugins-official": true,
     "figma@claude-plugins-official": true,
     "codex@openai-codex": true,
-    "claude-md-management@claude-plugins-official": true
+    "claude-md-management@claude-plugins-official": true,
+    "claude-seo@agricidaniel-claude-seo": true
   },
   "extraKnownMarketplaces": {
     "superpowers-marketplace": {
@@ -135,6 +136,12 @@
       "source": {
         "source": "github",
         "repo": "openai/codex-plugin-cc"
+      }
+    },
+    "agricidaniel-claude-seo": {
+      "source": {
+        "source": "github",
+        "repo": "AgriciDaniel/claude-seo"
       }
     }
   },
