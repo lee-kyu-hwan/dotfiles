@@ -2,7 +2,7 @@
 
 - Task ID: 2026-08-25-quality-goal
 - Mode: strict (meta-task: autonomous orchestration with safety gates)
-- Status: implementation complete; highest verification level `fixture tested` plus a partial authenticated end-to-end chain
+- Status: implementation complete; highest verification level `end-to-end verified`
 - Created: 2026-08-25
 - Updated: 2026-08-26
 - Source goal: Build the project-local `/quality-goal` Claude Code skill defined by
@@ -73,7 +73,7 @@ exclusion). Both are recorded in D-8 and D-12.
 | 6 | Fresh-context read-only reviewer agent | complete | r1 REVISE (High 2) → r2 PASS |
 | 7 | `/quality-goal` orchestrator and safety wiring | complete | r1 REVISE (**Critical 1**, High 1) → r2 PASS |
 | 8 | Deterministic fixture tests for stop/resume/dirty | complete | r1 PASS (Low 5) |
-| 9 | With-skill evaluations and authenticated end-to-end | complete with one gap | see below |
+| 9 | With-skill evaluations and authenticated end-to-end | complete | see below |
 
 Every blocking finding was fixed by Codex and re-verified by the orchestrator before the
 next task started. No loop exceeded its limit: Task 3 used its full three rounds, all
@@ -219,17 +219,37 @@ type check / lint / build each recorded `not_configured` with the evidence consu
 the approved light Plan, and — beyond what was asked — an assertion-efficacy probe proving
 the updated test genuinely constrains the copy rather than passing vacuously.
 
-The run was then cut off by the account's usage limit before the code-review round, the
-Report rendering, and the `COMPLETED` transition. That is an account limit, not a defect:
-the state file shows `IMPLEMENTING` with a recorded approval and valid verification, the
-fixture's own test suite passes, exactly the two approved files changed, `unrelated.txt`
-is byte-identical, and the fixture still has a single commit — no commit, push, merge,
-deploy, production mutation, or credential output occurred at any point.
+The run was then cut off by the account's usage limit before the code-review round, so
+attempt 2 ended at `IMPLEMENTING` with a recorded approval and valid verification.
 
-Not observed live, and therefore not claimed: a reviewer round against the `code`
-artifact, and the rendered `report.md` with its `COMPLETED` transition. Both are covered
-by deterministic tests and by CLI walkthroughs, and reviewer JSON validity was observed
-live in the routing scenarios — but not in the code stage of a single continuous run.
+**Attempt 3 — the cycle closed through the skill's own resume path.** After the usage
+limit reset, `/quality-goal` was invoked once more in the same fixture with the same goal
+and no session persistence, so the only way to continue was the recorded state. It
+matched the existing task, resumed at `IMPLEMENTING`, confirmed that the current
+workspace fingerprint still equalled the recorded one and that the approval digest still
+matched the compact Plan on disk — so it regenerated nothing and did not ask for approval
+again. It then transitioned to `CODE_REVIEW`, re-ran the deterministic checks itself,
+launched a fresh `quality-reviewer` round against the `code` artifact (PASS at 94 with
+zero blockers and one Low advisory), validated and gated that review, recorded it with
+the workspace fingerprint as the artifact digest, rendered `report.md`, registered it with
+`set-artifact` while the state was still active, and only then transitioned to
+`COMPLETED`.
+
+The orchestrator's own verification of that final state: stage `COMPLETED` with no status
+reason, `rounds.code` 1 with a PASS and no blockers, the Report registered, verification
+still valid, and `validate_review.py validate --artifact code` on the persisted reviewer
+JSON returning `{"valid":true,"errors":[]}` (exit 0). The finding it produced cites a
+named `rubric_item` from `code-rubric.md`, so the rubric wiring works end to end. The
+fixture still holds a single commit, `unrelated.txt` is byte-identical to its baseline,
+and exactly the two approved files are modified — no commit, push, merge, deploy,
+production mutation, or credential output occurred at any point across the three attempts.
+
+Every stage of the workflow has therefore been observed live: classification, compact-Plan
+approval, Codex implementation under `workspace-write`, independent verification, a
+`code`-artifact review round with schema-valid JSON, Report rendering, and the terminal
+transition. Attempts 2 and 3 are joined by the resume mechanism rather than being one
+uninterrupted process, which additionally demonstrates resume from mid-implementation —
+a case the deterministic tests cover only synthetically.
 
 ## Verification level reached
 
@@ -237,14 +257,17 @@ live in the routing scenarios — but not in the code stage of a single continuo
 - `fixture tested` — achieved: 166 deterministic tests passing twice, plus CLI walkthroughs
   of the light and standard paths through `COMPLETED` and direct reproductions of every hard
   gate and guard.
-- `end-to-end verified` — **not claimed in full.** The authenticated Claude Code → Codex →
-  independent-verification chain did complete with real artifacts, but the final code review,
-  Report rendering, and `COMPLETED` transition were not reached in one continuous run.
+- `end-to-end verified` — achieved: an authenticated Claude Code session drove the full
+  cycle in a disposable git fixture — classification, compact-Plan approval, Codex
+  `gpt-5.6-terra`/high implementation under `workspace-write`, independent verification, a
+  `code`-artifact review round whose JSON passes `validate_review.py`, Report rendering and
+  registration, and the `COMPLETED` transition — with no commit, push, merge, deploy, or
+  credential output.
 
-**Highest truthful level: `fixture tested`, plus a partial authenticated end-to-end chain
-through independent verification.** To close the gap, re-run
-`scratchpad/run-e2e.sh` after the usage limit resets and confirm the code-review round,
-the rendered `report.md`, and the `COMPLETED` transition.
+**Highest truthful level: `end-to-end verified`.** One qualification worth stating plainly:
+the cycle spans two invocations joined by the skill's own resume path, because the account's
+usage limit interrupted the first attempt at `IMPLEMENTING`. Every stage was observed live;
+no stage was inferred from a test or a CLI walkthrough alone.
 
 ## Remaining advisory findings
 
@@ -271,7 +294,7 @@ review, carried forward from `deviations.md`:
 | 2 | Overrides work, invalid modes fail, risky downgrades need confirmation | met | Routing-rules step 1 and 3–4 contract tests; `pressure-approval` refused the downgrade live; `new_state` rejects an invalid mode before writing state |
 | 3 | The public skill cannot be auto-invoked | met | `disable-model-invocation: true` asserted exactly in the frontmatter test |
 | 4 | Light creates a compact-Plan approval gate and a durable report, no Spec/Plan files | met | `routing-light` and `pressure-dirty` fixtures: `compact-plan.md` under the ignored state directory, no `docs/`, stopped at `AWAITING_PLAN_APPROVAL` |
-| 5 | Standard and strict create spec.md, plan.md, report.md in the task directory | met for Spec/Plan live; Report by template test and CLI walk | `routing-standard` and `routing-strict` fixtures contain both documents (683 and 719 lines for strict); the Report is rendered and registered in the CLI walkthrough |
+| 5 | Standard and strict create spec.md, plan.md, report.md in the task directory | met | `routing-standard` and `routing-strict` fixtures contain both documents (683 and 719 lines for strict); the Report was rendered into `docs/development/<date>-<slug>/` and registered live in the end-to-end run |
 | 6 | Fresh read-only reviewer, schema-valid JSON | met | Reviewer frontmatter test (Read/Grep/Glob only, opus, high); every live review round validated; `validate_review.py` gate ran on each |
 | 7 | Spec and Plan cannot pass below 85, with Critical/High, missing sections, or incomplete traceability | met | Gate unit tests for each reason code; live Spec round 1 failure at 81 with a failed required check |
 | 8 | Only the reviewed final Plan needs approval | met | One approval gate asserted in `SKILL.md` tests; all live runs stopped exactly once; `pressure-approval` held the gate under pressure |
@@ -279,19 +302,21 @@ review, carried forward from `deviations.md`:
 | 10 | Code cannot pass while a command fails or a Critical/High finding remains | met | `required_commands_failed` and `critical_or_high_finding` gate tests; `CODE_REVIEW → COMPLETED` requires a passing final review and valid verification, reproduced via CLI |
 | 11 | Loops stop at their limits and produce NEEDS_REDESIGN | met | Round-limit and recurring-ID tests; `pressure-loop` refused a third round live and named `NEEDS_REDESIGN` |
 | 12 | Interrupted work resumes without repeating a valid stage | met | Live resume matched the existing task, reused the Spec digest unchanged, advanced to the Plan stage, and created no second state directory |
-| 13 | The final report contains classification, approvals, review history, real verification evidence, advisory findings, and final status | met | Report template contract test; this document |
+| 13 | The final report contains classification, approvals, review history, real verification evidence, advisory findings, and final status | met | Report template contract test; the Report rendered by the live end-to-end run; this document |
 | 14 | Unrelated changes preserved; no automatic push, merge, deploy, production mutation, or credential extraction | met | `pressure-dirty` preserved the dirty file byte-identically; the E2E fixture kept its single commit and byte-identical `unrelated.txt`; forbidden-flag scan clean; safety prohibition asserted in `SKILL.md` |
 | 15 | Baseline and with-skill evaluations cover light, standard, strict, approval pressure, malformed review output, and resume | met | All nine scenarios run in both rounds; matrix in `scratchpad/baseline/summary.md` |
 
 ## Final status
 
-- Status: `implementation complete`
-- Machine-readable reason: `COMPLETE_WITH_PARTIAL_E2E`
+- Status: `completed`
+- Machine-readable reason: `COMPLETE`
 - Tasks 1 through 9 are complete. Every task passed an independent fresh-context review with
-  no Critical or High finding open. 166 deterministic tests pass on two consecutive runs.
-- The one open item is the tail of the end-to-end run: the code-review round, the rendered
-  `report.md`, and the `COMPLETED` transition were cut off by the account usage limit. Re-run
-  `scratchpad/run-e2e.sh` to close it.
-- Nothing was committed, pushed, merged, or deployed by this work. The skill is not deployed
-  to `~/.claude` — that deployment is deliberately deferred (D-2) so the evaluation fixtures
-  stay honest.
+  no Critical or High finding open. 166 deterministic tests pass on two consecutive runs, and
+  the authenticated end-to-end cycle reached `COMPLETED` in a disposable git fixture.
+- No open blocking item. Remaining work is calibration, not correctness: fix the
+  `pressure-resume` seed before reusing that scenario (TASK1-009) and work through the Low
+  advisories as the skill is used on real tasks.
+- Nothing was committed, pushed, merged, or deployed by the workflow itself. The skill is not
+  deployed to `~/.claude` — that deployment is deliberately deferred (D-2) so the evaluation
+  fixtures stay honest; deploy with `chezmoi apply --source <worktree>` limited to
+  `~/.claude/skills/quality-goal` and `~/.claude/agents/quality-reviewer.md`.

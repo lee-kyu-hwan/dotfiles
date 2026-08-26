@@ -210,3 +210,25 @@ SKILL.md 런타임 지시(대상 프로젝트에서 ignore 확인/안내)로 적
   BLOCKED payload 정규식의 줄바꿈 민감성, Plan Files 목록이 실제(2개 파일)보다 넓음.
 - Task 8은 test_quality_state.py·test_content_contracts.py 2개 파일만 수정
   (test_validate_review.py는 기존 테스트가 요구를 이미 커버).
+
+## D-15. Task 9 에서 발견한 Task 5 산출물 결함과 수정
+
+- **발견 경로**: 인증된 end-to-end 실행. `codex exec --output-schema` 가 HTTP 400 으로
+  거부되어 오케스트레이터가 Codex 를 호출할 수 없었다. 결정적 테스트·CLI 워크스루로는
+  드러나지 않는 계층(외부 API 계약)의 결함이었다.
+- **원인 2건** (`gpt-5.6-terra` 로 실측):
+  - `codex-result.schema.json` 의 `"uniqueItems": true` → `'uniqueItems' is not permitted`
+  - 같은 파일의 `changed_files.items.pattern` `^(?!\.\.?/)[^/~].*` →
+    `regex lookaround is not supported`. 이 lookaround 는 Task 5 리뷰 TASK5-002 의
+    "경로 탈출 차단 강화" 조치가 도입한 것으로, 강화가 곧 비호환을 만든 사례다.
+- **수정**: `uniqueItems` 제거, 패턴을 lookaround 없는 `^([^/~.].*|\.[^/.].*)$` 로 교체.
+  로컬 9개 경로로 동등성을 확인하고 API 가 실제로 수락해 유효한 결과 객체를 반환하는
+  것까지 검증했다. 계약 테스트는 이제 패턴을 문자열이 아니라 **행동**으로 단정하고,
+  lookaround 와 `uniqueItems` 재도입을 금지한다.
+- **`review.schema.json` 은 그대로 둔다**: 로컬 `validate_review.py` 전용이라 API 로
+  전송되지 않으므로 `uniqueItems` 가 유효하다.
+- **스킬 자체의 행동은 정확했다**: 스테이지를 유지한 채 문의했고(성급한 BLOCKED 없음),
+  모델 무단 대체를 거부하며 "모델 교체는 이 400 을 해결하지 못한다"고 진단했고,
+  승인 범위 밖 파일 수정을 거부했으며 워크트리를 건드리지 않았다.
+- **교훈**: 외부 API 계약은 `structurally validated`·`fixture tested` 수준에서 검증되지
+  않는다. 스키마를 API 로 보내는 코드 경로가 있으면 최소 1회 실제 호출로 확인해야 한다.
