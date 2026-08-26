@@ -15,6 +15,14 @@ tests/**
 # 제외한다. 사람이 정한 설정만 docs/codex-config-reference.toml에 기록해 둔다.
 .codex/config.toml
 
+# 이 저장소는 public이고, 홈의 settings.json에는 autoMode.environment가 들어 있다.
+# 그 안에 조직명·비공개 저장소 경로·시크릿 환경변수 이름·k8s 네임스페이스·민감 데이터
+# 위치가 담기므로 소스로 편입하면 그대로 공개된다. 반대로 관리하면 apply 때마다 그
+# 블록(과 modelSettings의 effortLevel)이 삭제된다. 양쪽 다 안 되므로 제외한다.
+# 사람이 정한 공통 설정(hooks·permissions 등)은 docs/claude-settings-reference.json에
+# 남겨 두었다 — 새 머신에서는 그것을 보고 직접 넣는다.
+.claude/settings.json
+
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
 .Brewfile
