@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "round",
+    "score",
+    "verdict",
+    "blockers",
+    "findings",
+    "evidence",
+    "required_next_action"
+  ],
+  "properties": {
+    "artifact": {
+      "type": "string",
+      "enum": ["spec", "plan", "code"]
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "REVISE", "BLOCKED"]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/finding"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "location"],
+        "properties": {
+          "claim": {
+            "type": "string",
+            "minLength": 1
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "required_next_action": {
+      "type": ["string", "null"]
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "severity",
+        "description",
+        "evidence_location",
+        "rubric_item",
+        "required_resolution",
+        "new_blocker_evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["Critical", "High", "Medium", "Low"]
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_location": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rubric_item": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_resolution": {
+          "type": "string",
+          "minLength": 1
+        },
+        "new_blocker_evidence": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

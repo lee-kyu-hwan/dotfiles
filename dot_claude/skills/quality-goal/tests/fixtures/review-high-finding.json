@@ -1,0 +1,27 @@
+{
+  "artifact": "plan",
+  "round": 1,
+  "score": 93,
+  "verdict": "REVISE",
+  "blockers": [
+    "PLAN-TRACE-001"
+  ],
+  "findings": [
+    {
+      "id": "PLAN-TRACE-001",
+      "severity": "High",
+      "description": "An acceptance criterion is not traced to an implementation task.",
+      "evidence_location": "plan.md#Traceability",
+      "rubric_item": "Traceability completeness",
+      "required_resolution": "Map the criterion to a concrete task and verification command.",
+      "new_blocker_evidence": null
+    }
+  ],
+  "evidence": [
+    {
+      "claim": "The plan has a traceability gap despite its high numeric score.",
+      "location": "docs/development/quality-goal/plan.md#Traceability"
+    }
+  ],
+  "required_next_action": "Add the missing acceptance-criterion mapping."
+}
