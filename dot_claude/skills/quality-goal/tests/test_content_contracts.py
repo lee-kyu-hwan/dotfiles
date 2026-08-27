@@ -361,7 +361,11 @@ class ModelRoutingContentTests(unittest.TestCase):
         self.assertIn("recorded in the report", lower)
         self.assertIn("substitute model", lower)
         self.assertRegex(lower, r"sol/xhigh route.{0,220}(?:failed high-risk implementation|needs_redesign).{0,160}bounded redesign")
-        self.assertIn("ignored task state directory", lower)
+        self.assertIn("--sandbox read-only", lower)
+        self.assertIn('model_reasoning_effort="low"', lower)
+        self.assertIn("one-line prompt", lower)
+        self.assertRegex(lower, r"failed preflight.{0,180}unavailable-model recovery path")
+        self.assertIn("task state directory that the repository should ignore", lower)
         for term in ("prompt", "result", "event", "paths"):
             with self.subTest(state_path=term):
                 self.assertIn(term, lower)
@@ -609,7 +613,7 @@ class QualityReviewerAgentContentTests(unittest.TestCase):
         self.assertEqual(frontmatter["tools"].strip(), "Read, Grep, Glob")
         self.assertEqual(frontmatter["model"], "opus")
         self.assertEqual(frontmatter["effort"], "high")
-        self.assertEqual(frontmatter["maxTurns"], "12")
+        self.assertEqual(frontmatter["maxTurns"], "24")
         self.assertTrue(frontmatter["description"].strip())
         self.assertNotIn("memory", frontmatter)
         for forbidden_tool in ("Edit", "Write", "Bash", "Agent", "Task", "WebFetch"):
@@ -632,6 +636,17 @@ class QualityReviewerAgentContentTests(unittest.TestCase):
             lower,
             r"(?:blocked.{0,240}missing\s+(?:artifact|rubric|evidence)|"
             r"missing\s+(?:artifact|rubric|evidence).{0,240}blocked).{0,80}json",
+        )
+        self.assertIn("the json is the deliverable", lower)
+        self.assertIn("produced as the final output", lower)
+        self.assertIn("not verified", lower)
+        self.assertIn("with the reason", lower)
+        self.assertIn("stopping without emitting the json is never acceptable", lower)
+        self.assertIn(
+            "if any applicable gate condition or rubric item could not be verified, "
+            "the verdict must not be `pass`; return `revise` with "
+            "`required_next_action` naming the unverified condition and what would settle it.",
+            lower,
         )
 
     def test_blocked_payload_rules_are_explicit(self):
@@ -734,6 +749,90 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         self.assertIn("--json title,body,labels,comments", normalized)
         self.assertRegex(normalized, r"full issue url.{0,120}derive.{0,60}--repo")
         self.assertIn("read-only", normalized)
+
+    def test_intake_preflight_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertRegex(
+            normalized,
+            r"at intake.{0,140}git repository.{0,100}codex cli responds",
+        )
+        self.assertRegex(
+            normalized,
+            r"use the preflight block in model-routing\.md.{0,160}"
+            r"exact codex model.{0,100}before implementation",
+        )
+        routing = read_reference("model-routing.md")
+        preflight_match = re.search(
+            r"(?ms)^## Preflight\b.*?(?=\n## |\Z)",
+            routing,
+        )
+        self.assertIsNotNone(
+            preflight_match,
+            "model-routing.md must contain a clearly labelled preflight block",
+        )
+        preflight = self.normalize(preflight_match.group(0))
+        command_match = re.search(r"```bash\s+(.*?)```", preflight_match.group(0), re.DOTALL)
+        self.assertIsNotNone(command_match, "preflight block must contain a shell command")
+        command = command_match.group(1)
+        command_lower = command.casefold()
+        for parameter in (
+            "--sandbox read-only",
+            "--ephemeral",
+            '--model "$codex_model"',
+            r'-c "model_reasoning_effort=\"low\""',
+        ):
+            with self.subTest(preflight_parameter=parameter):
+                self.assertIn(parameter, command_lower)
+        self.assertIn("-C", command)
+        self.assertIn("one-line prompt", preflight)
+        self.assertRegex(
+            preflight,
+            r"exit code 0.{0,80}non-empty model reply",
+        )
+        self.assertRegex(command, r"(?m)^codex\s+exec\b")
+        self.assertNotIn("--output-schema", command)
+        self.assertNotIn("--output-last-message", command)
+
+    def test_state_root_matches_fingerprint_exclusion_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertIn(
+            "the state root passed to `quality_state.py init --root` is always "
+            "`<project_root>/.claude/quality-state`, because the workspace "
+            "fingerprint excludes exactly that path; a different location "
+            "re-enters the fingerprint and makes the workflow invalidate its "
+            "own verification.",
+            normalized,
+        )
+
+    def test_runtime_state_ignore_advisory_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        normalized = self.normalize(body)
+        self.assertIn("at intake, verify", normalized)
+        self.assertIn("check whether", normalized)
+        self.assertIn("git check-ignore", normalized)
+        self.assertIn(".claude/quality-state/", normalized)
+        self.assertRegex(
+            normalized,
+            r"not ignored.{0,180}git status.{0,120}committed by accident",
+        )
+        self.assertIn("!.claude/", normalized)
+        self.assertRegex(
+            normalized,
+            r"negation pattern.{0,160}re-enable",
+        )
+        self.assertIn("earlier `.claude` rule", normalized)
+        self.assertIn("offer to add the ignore rule", normalized)
+        self.assertRegex(
+            normalized,
+            r"do not add it unilaterally.{0,180}\.gitignore.{0,100}approved change scope",
+        )
+        self.assertRegex(normalized, r"follow-up in the report")
+        self.assertRegex(
+            normalized,
+            r"fingerprint already excludes the directory regardless.{0,120}hygiene rather than correctness",
+        )
 
     def test_issue_requirement_input_contract(self):
         _, body = parse_yaml_frontmatter(self.read_skill())

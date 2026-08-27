@@ -70,8 +70,20 @@ each one when its stage is reached:
 ## Preflight & resume
 
 At INTAKE, verify that the current project is a Git repository and that the
-Codex CLI responds. Use model-routing.md to preflight the exact Codex model
-selected for the mode before implementation. Before creating state, call
+Codex CLI responds. Use the preflight block in model-routing.md to preflight
+the exact Codex model selected for the mode before implementation. The state
+root passed to `quality_state.py init --root` is always
+`<project_root>/.claude/quality-state`, because the workspace fingerprint
+excludes exactly that path; a different location re-enters the fingerprint and
+makes the workflow invalidate its own verification. Check whether
+`.claude/quality-state/` is ignored by the target repository with
+`git check-ignore`. When it is not ignored, tell the user that runtime state is
+otherwise exposed to `git status` and can be committed by accident; a negation
+pattern such as `!.claude/` later in the file can re-enable an earlier `.claude`
+rule. Offer to add the ignore rule, but do not add it unilaterally because
+`.gitignore` is outside the approved change scope. Record this as a follow-up
+in the Report. The fingerprint already excludes the directory regardless, so
+this is hygiene rather than correctness. Before creating state, call
 quality_state.py select-resume with the goal and project root. If it returns a
 matching incomplete task, summarize its recorded state to the user and resume
 at its recorded stage. Never create a second task state for the same goal.
@@ -194,7 +206,9 @@ allowed paths, repository instructions, exact targeted commands, the
 test-first requirement, initial dirty-path exclusions, and the result
 contract at ${CLAUDE_SKILL_DIR}/schemas/codex-result.schema.json.
 
-Use the only runnable command template in model-routing.md exactly. The
+Use the implementation and fix-round command template in model-routing.md
+exactly for implementation and fix rounds. At INTAKE, use the separate
+preflight block in model-routing.md for the selected-model response check. The
 route is light or standard to gpt-5.6-terra with high effort, strict to
 gpt-5.6-sol with high effort, and bounded redesign only to gpt-5.6-sol with
 xhigh effort. A non-zero exit, missing or invalid result file, or model
@@ -255,12 +269,13 @@ or silently substitute the reviewer model.
 
 ## Codex invocation contract
 
-The prompt, result, event, and stderr files live only under the ignored task
-state directory. Invoke codex exec using exactly the command template in
-${CLAUDE_SKILL_DIR}/references/model-routing.md, including its selected model,
-reasoning effort, workspace-write sandbox, ephemeral execution, result schema,
-last-message path, JSON event output, and prompt input. Do not add an
-unapproved path or broaden the bounded task.
+The prompt, result, event, and stderr files live only under the task state
+directory that the repository should ignore. For implementation and fix rounds,
+invoke codex exec using exactly the implementation and fix-round command
+template in ${CLAUDE_SKILL_DIR}/references/model-routing.md, including its
+selected model, reasoning effort, workspace-write sandbox, ephemeral execution,
+result schema, last-message path, JSON event output, and prompt input. Do not
+add an unapproved path or broaden the bounded task.
 
 Validate the result against
 ${CLAUDE_SKILL_DIR}/schemas/codex-result.schema.json. Preserve unrelated

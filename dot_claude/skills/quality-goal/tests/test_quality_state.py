@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1155,6 +1155,89 @@ class ReviewValidationRetryTests(unittest.TestCase):
 
 
 class FingerprintTests(unittest.TestCase):
+    def test_unignored_state_files_do_not_change_fingerprint_but_normal_untracked_files_do(self):
+        root = make_git_repo(self)
+        baseline = quality_state.compute_workspace_fingerprint(root)
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        after_state_write = quality_state.compute_workspace_fingerprint(root)
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        after_state_modification = quality_state.compute_workspace_fingerprint(root)
+
+        normal_path = root / "normal-untracked.txt"
+        normal_path.write_text("one\n", encoding="utf-8")
+        after_normal_write = quality_state.compute_workspace_fingerprint(root)
+        normal_path.write_text("two\n", encoding="utf-8")
+        after_normal_modification = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, after_state_write)
+        self.assertEqual(baseline, after_state_modification)
+        self.assertNotEqual(baseline, after_normal_write)
+        self.assertNotEqual(after_normal_write, after_normal_modification)
+
+    def test_state_files_are_excluded_when_git_reports_the_untracked_claude_directory(self):
+        root = make_git_repo(self)
+        claude_root = root / ".claude"
+        claude_root.mkdir()
+        run_git(claude_root, "init")
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+
+        self.assertEqual(
+            ".claude/\0",
+            run_git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout,
+        )
+        baseline = quality_state.compute_workspace_fingerprint(root)
+
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        after_state_write = quality_state.compute_workspace_fingerprint(root)
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        after_state_modification = quality_state.compute_workspace_fingerprint(root)
+
+        normal_path = root / ".claude" / "normal-untracked.txt"
+        normal_path.write_text("one\n", encoding="utf-8")
+        after_normal_write = quality_state.compute_workspace_fingerprint(root)
+        normal_path.write_text("two\n", encoding="utf-8")
+        after_normal_modification = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, after_state_write)
+        self.assertEqual(baseline, after_state_modification)
+        self.assertNotEqual(baseline, after_normal_write)
+        self.assertNotEqual(after_normal_write, after_normal_modification)
+
+    def test_tracked_state_files_are_excluded_from_unstaged_and_staged_diffs(self):
+        root = make_git_repo(self)
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        tracked_non_state_path = root / ".claude" / "tracked-non-state.txt"
+        tracked_non_state_path.write_text("base\n", encoding="utf-8")
+        run_git(
+            root,
+            "add",
+            ".claude/quality-state/state.json",
+            ".claude/tracked-non-state.txt",
+        )
+        run_git(root, "commit", "-m", "track workflow state")
+        baseline = quality_state.compute_workspace_fingerprint(root)
+
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        unstaged_state = quality_state.compute_workspace_fingerprint(root)
+        run_git(root, "add", ".claude/quality-state/state.json")
+        staged_state = quality_state.compute_workspace_fingerprint(root)
+
+        tracked_non_state_path.write_text("changed\n", encoding="utf-8")
+        unstaged_non_state = quality_state.compute_workspace_fingerprint(root)
+        run_git(root, "add", ".claude/tracked-non-state.txt")
+        staged_non_state = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, unstaged_state)
+        self.assertEqual(baseline, staged_state)
+        self.assertNotEqual(baseline, unstaged_non_state)
+        self.assertNotEqual(baseline, staged_non_state)
+
     def test_nested_git_repository_contents_are_hashed_without_following_outside_links(self):
         root = make_git_repo(self)
         inner = root / "nested-repository"
@@ -1644,6 +1727,13 @@ class CLITests(unittest.TestCase):
             result = quality_state.main(args)
         return result, output.getvalue()
 
+    def invoke_main_with_stderr(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = quality_state.main(args)
+        return result, output.getvalue(), errors.getvalue()
+
     def assert_cli_success(self, args):
         result, output = self.invoke_main(args)
         self.assertEqual(0, result, args)
@@ -1680,6 +1770,53 @@ class CLITests(unittest.TestCase):
 
             self.assertEqual(0, first)
             self.assertEqual(4, second)
+
+    def test_cli_init_warns_for_in_repo_nonstandard_state_root_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            project_root = make_git_repo(self)
+            common = [
+                "init",
+                "--goal",
+                "A unique task",
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(directory / "artifacts"),
+            ]
+            cases = (
+                ("standard", project_root / ".claude" / "quality-state", False),
+                ("in-repo", project_root / ".claude" / "other-state", True),
+                ("out-of-repo", directory / "outside-state", False),
+            )
+
+            for task_id, root, should_warn in cases:
+                with self.subTest(state_root=root):
+                    result, _, errors = self.invoke_main_with_stderr(
+                        common
+                        + [
+                            "--root",
+                            str(root),
+                            "--task-id",
+                            task_id,
+                        ]
+                    )
+
+                    self.assertEqual(0, result)
+                    if should_warn:
+                        self.assertIn("warning:", errors)
+                        self.assertIn(
+                            "state files re-enter the workspace fingerprint",
+                            errors,
+                        )
+                    else:
+                        self.assertNotIn("warning:", errors)
+                        self.assertNotIn(
+                            "state files re-enter the workspace fingerprint",
+                            errors,
+                        )
 
     def test_cli_approve_plan_persists_plan_approval(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -71,6 +71,7 @@ ROUND_LIMITS = {"spec": 2, "plan": 2, "code": 3}
 _REQUESTED_MODES = {"auto", "light", "standard", "strict"}
 _CLASSIFIED_MODES = {"light", "standard", "strict"}
 _ARTIFACT_KEYS = {"spec", "plan", "compact_plan", "report"}
+STATE_DIR_RELATIVE = ".claude/quality-state"
 _REVIEW_STAGES = {
     "spec": "SPEC_REVIEW",
     "plan": "PLAN_REVIEW",
@@ -664,6 +665,30 @@ def _filesystem_error(path, exc):
     return FilesystemError(f"unable to read untracked path {path!s}: {exc}")
 
 
+def _is_state_path(relative_path):
+    return relative_path == STATE_DIR_RELATIVE or relative_path.startswith(
+        f"{STATE_DIR_RELATIVE}/"
+    )
+
+
+def _warn_for_nonstandard_state_root(state_root, project_root):
+    resolved_state_root = Path(state_root).resolve()
+    resolved_project_root = Path(project_root).resolve()
+    canonical_state_root = resolved_project_root / STATE_DIR_RELATIVE
+    try:
+        resolved_state_root.relative_to(resolved_project_root)
+    except ValueError:
+        return
+    if resolved_state_root == canonical_state_root:
+        return
+    print(
+        f"warning: --root {resolved_state_root} resolves inside the project root "
+        f"but is not the canonical state root {canonical_state_root}; state files "
+        "re-enter the workspace fingerprint.",
+        file=sys.stderr,
+    )
+
+
 def _read_untracked_value(digest, path, relative_path, include_path=True):
     relative_bytes = os.fsencode(relative_path)
     if include_path:
@@ -706,6 +731,10 @@ def _walk_untracked_directory(digest, root, relative_path):
         symlink_directories = []
         for dirname in list(dirnames):
             path = Path(current) / dirname
+            relative = os.path.relpath(path, root)
+            if _is_state_path(relative):
+                dirnames.remove(dirname)
+                continue
             try:
                 file_stat = os.lstat(path)
             except (OSError, UnicodeError, TypeError) as exc:
@@ -715,10 +744,14 @@ def _walk_untracked_directory(digest, root, relative_path):
                 symlink_directories.append(path)
         for path in symlink_directories:
             relative = os.path.relpath(path, root)
+            if _is_state_path(relative):
+                continue
             _read_untracked_value(digest, path, relative)
         for filename in filenames:
             path = Path(current) / filename
             relative = os.path.relpath(path, root)
+            if _is_state_path(relative):
+                continue
             _read_untracked_value(digest, path, relative)
 
 
@@ -772,18 +805,49 @@ def compute_workspace_fingerprint(project_root):
             raise
         raise GitError("BLOCKED_NOT_GIT: repository has no commit") from exc
     _frame(digest, "head", head)
-    _frame(digest, "diff", _git_run(root, "diff", "--binary", "--no-ext-diff", "HEAD"))
+    _frame(
+        digest,
+        "diff",
+        _git_run(
+            root,
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            f":(exclude){STATE_DIR_RELATIVE}",
+        ),
+    )
     _frame(
         digest,
         "cached-diff",
-        _git_run(root, "diff", "--cached", "--binary", "--no-ext-diff", "HEAD"),
+        _git_run(
+            root,
+            "diff",
+            "--cached",
+            "--binary",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            f":(exclude){STATE_DIR_RELATIVE}",
+        ),
     )
-    untracked_output = _git_run(root, "ls-files", "--others", "--exclude-standard", "-z")
+    untracked_output = _git_run(
+        root,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        f":(exclude){STATE_DIR_RELATIVE}",
+    )
     untracked_paths = sorted(
         path_bytes for path_bytes in untracked_output.split(b"\0") if path_bytes
     )
     for path_bytes in untracked_paths:
         path = os.fsdecode(path_bytes)
+        if _is_state_path(path):
+            continue
         _frame(digest, "path", path_bytes)
         if path.endswith("/"):
             _frame(digest, "dir", path_bytes)
@@ -1033,6 +1097,7 @@ def main(argv=None):
                 args.artifact_dir,
                 task_id=args.task_id,
             )
+            _warn_for_nonstandard_state_root(args.root, args.project_root)
             state_path = Path(args.root) / state["task_id"] / "state.json"
             if state_path.exists():
                 raise FilesystemError(f"state already exists: {state_path}")

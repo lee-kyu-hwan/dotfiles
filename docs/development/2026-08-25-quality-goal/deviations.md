@@ -175,9 +175,12 @@ SKILL.md 런타임 지시(대상 프로젝트에서 ignore 확인/안내)로 적
 ## D-12. Task 6 확인 사항 (리뷰 TASK6-004·005)
 
 - **agent frontmatter 키 유효성**: Claude Code 하니스 문서가 agent 정의 frontmatter에서
-  model·reasoning effort·tools를 읽는다고 명시하므로 `effort: high`는 유효. `maxTurns: 12`는
-  Plan 명시 계약이라 유지하되, 하니스가 무시해도 리뷰 품질에는 영향 없음(호출 시
-  오케스트레이터가 범위를 좁게 유지).
+  model·reasoning effort·tools를 읽는다고 명시하므로 `effort: high`는 유효.
+  `maxTurns: 12`는 Plan 명시 계약이라 이 시점에는 유지했다.
+  **2026-08-26 정정 (D-16 참조)**: 실전 사용에서 `maxTurns`가 하니스에 의해 실제로
+  적용됨이 확인됐다 — 코드 리뷰 라운드가 정확히 12턴에서 출력 없이 멈췄다. 따라서
+  "하니스가 무시해도 무관"이라는 당시 서술은 성립하지 않으며, 값도 12 → 24로 올렸다.
+  다만 `effort` 키가 실제로 적용되는지는 여전히 직접 관측하지 못했다.
 - **ignore 파일 편차 귀속**: Plan상 `.gitignore`는 Task 7 소관이나, `__pycache__` 규칙은
   Task 2 리뷰 TASK2-006 해소를 위해 선행 적용했다(D-8 기록). Task 7에서는
   `.claude/quality-state/` 항목만 추가하면 된다.
@@ -232,3 +235,109 @@ SKILL.md 런타임 지시(대상 프로젝트에서 ignore 확인/안내)로 적
   승인 범위 밖 파일 수정을 거부했으며 워크트리를 건드리지 않았다.
 - **교훈**: 외부 API 계약은 `structurally validated`·`fixture tested` 수준에서 검증되지
   않는다. 스키마를 API 로 보내는 코드 경로가 있으면 최소 1회 실제 호출로 확인해야 한다.
+
+## D-16. 실전 첫 사용에서 확보한 수정 4건 (2026-08-26)
+
+배포된 스킬을 실제 업무 모노레포(zambaguni-front, 이슈 #1290)에서 처음 사용해
+`COMPLETED`까지 완주했다. 그 과정에서 결함 1건과 계약 공백 3건이 드러났다.
+
+### FIX 1 (실제 결함) — 워크플로가 자기 검증을 무효화했다
+
+- **증상**: 대상 저장소의 `.gitignore`가 `.claude`를 넣은 직후 `!.claude/`로 무효화해
+  `.claude/quality-state/`가 untracked 상태였다. `compute_workspace_fingerprint`가
+  그 상태 파일을 해시에 포함해, **워크플로 자신의 bookkeeping 쓰기마다 fingerprint가
+  변했고** 기록된 검증이 낡은 것처럼 보였다. 오케스트레이터는 코드 동일성을 파일
+  digest로 따로 증명해야 했다.
+- **근본 원인**: 설계 §10이 "ignored `.claude/quality-state/`는 Git 제외 규칙으로
+  자연히 빠진다"고 가정했으나, 소비하는 저장소가 그것을 보장하지 않는다. 자기참조 결함.
+- **조치**: 저장소 ignore 규칙과 무관하게 무조건 제외한다. Python 측 경로 필터
+  (`_is_state_path`)가 walk 경로를, git `:(exclude)` pathspec이 diff·cached diff·
+  ls-files를 각각 막는다. 두 메커니즘은 담당 케이스가 달라 각자 자기만 지키는
+  테스트가 있다(변형 검증으로 확인: 각 메커니즘 무력화 시 해당 테스트 1건 실패).
+- **과도 제외 아님**: 같은 부모의 형제 파일(`.claude/agents.json`) 변경은 여전히 감지된다.
+
+### FIX 2 — 리뷰어 턴 예산과 출력 계약
+
+- **증상**: 실제 저장소의 코드 리뷰 라운드가 `maxTurns: 12`에서 **JSON 없이 정지**했고
+  오케스트레이터가 SendMessage로 재개해 회수했다.
+- **조치**: 24로 상향. 그리고 "JSON은 산출물이므로 모든 검사를 못 끝냈어도 최종 출력으로
+  내고, 못 끝낸 검사는 evidence에 미검증으로 기록한다"를 추가했다.
+- **round 2 리뷰가 이 조치의 회귀를 잡았다 (CODE-001, High)**: verdict에 제약이 없어
+  **잘린 리뷰가 PASS로 게이트를 통과할 수 있었다** — 기존의 fail-closed(무출력 →
+  재시도 1회 → BLOCKED)를 fail-open으로 바꾼 셈이다. 그래서 "적용 가능한 게이트 조건을
+  검증하지 못했다면 PASS 금지, REVISE + required_next_action에 명시"를 추가로 못 박았다.
+
+### FIX 3 — 프리플라이트 비용과 계약 테스트
+
+- 프리플라이트가 "정확한 모델을 확인한다"만 있고 비용 조건이 없어, 구현급 호출
+  (Sol/high + workspace-write)을 응답 확인에 낭비할 수 있었다. `read-only` + low effort
+  + 한 줄 프롬프트로 명시하고, 별도 실행 가능 블록으로 분리했다(round 2 CODE-003:
+  "유일한 실행 템플릿" 규칙과 충돌했고, 한 줄 프롬프트는 `--output-schema`를 만족할 수
+  없어 그 규칙의 적용 범위를 구현·수정 라운드로 한정했다).
+- 프리플라이트 계약 단정이 **0건**이었다(그 문단을 지워도 전 테스트 초록). 추가했다.
+
+### FIX 4 — 상태 디렉토리 ignore 위생과 상태 루트 고정
+
+- INTAKE에서 `git check-ignore`로 확인해 사용자에게 알리되, `.gitignore`는 승인 범위
+  밖이므로 직접 수정하지 않고 Report 후속 항목으로 남긴다. FIX 1이 정확성은 이미
+  보장하므로 이것은 위생 문제다.
+- round 2 CODE-004: `init --root`가 검증 없이 caller 공급이라 상태 루트를 저장소 내
+  다른 위치에 두면 FIX 1이 조용히 무효화됐다. SKILL.md가 정확한 값
+  (`<project_root>/.claude/quality-state`)을 지시하고, `init`이 저장소 내 비표준 루트에
+  대해 stderr 경고를 낸다. **중단하지 않는 이유**(round 2 CODE-010 정정): 비표준 루트의
+  실패는 fingerprint 흔들림 → 검증의 부당한 무효화로 나타나며 **거짓 PASS를 만들 수 없다**.
+  `CODE_REVIEW → COMPLETED`가 code 리뷰 1회 이상·마지막 리뷰 PASS·blocker 없음·open
+  finding 없음·`verification.valid`를 독립적으로 요구하기 때문이다. 즉 방향이 이미
+  fail-closed이므로 중단은 안전을 더하지 않고, 저장소 밖의 정당한 상태 루트만 거부하게 된다.
+
+### 잔여 advisory (Low)
+
+- CODE-005: 두 문서가 상태 디렉토리를 "ignored"로 사실 단정 → "저장소가 ignore해야 하는"
+  으로 정정.
+- CODE-006: 프리플라이트 테스트가 미변경 텍스트만 단정 → 실제 파라미터 단정 추가.
+- CODE-007: tracked 상태 테스트에 과도 제외 반대 단정 부재 → tracked 비-상태 변경 감지 추가.
+
+### 리뷰 이력
+
+- code 리뷰 round 1: **REVISE** (High 1, Medium 4, Low 2), score 72 — 배포된
+  `quality-reviewer` 에이전트로 수행. 리뷰어가 자기 evidence에 "178개 테스트·py_compile·
+  git status를 독립 재실행하지 않았다(Read/Grep/Glob만 보유)"를 미검증으로 정직히 기록했고,
+  이것이 CODE-001의 위험을 실증했다.
+- 오케스트레이터 독립 검증: 전체 테스트 178개 통과, fingerprint 제외 3경로 실제 fixture
+  재현, 과도 제외 반증, 변형 검증 2건. Codex가 "변형 시 3개 전부 실패"라고 보고했으나
+  실제로는 변형당 1건이었다 — 코드는 정확하고 보고가 부정확했다.
+
+### round 2 결과와 잔여 advisory (2026-08-27)
+
+code 리뷰 round 2: **PASS** (score 88, blocker 0). CODE-001(High) 포함 round 1의 6건이
+전부 해소 확인됐고, 코드 리뷰 루프는 한도 3 중 **2라운드로 종결**했다(사용자 지시).
+
+신규 advisory 3건은 전부 문서·운영 수준이며 스킬 번들을 바꾸지 않았다 — 리뷰가 통과한
+번들을 그대로 동결하기 위한 의도적 선택이다.
+
+- **CODE-009 (Medium) — 수용된 트레이드오프 + 후속 후보.** 새로 생긴 "미검증 시 REVISE"
+  경로에 오케스트레이터 측 처리가 없다. 실체가 결함이 아니라 "X를 검증하지 못했다"뿐인
+  well-formed REVISE도 `record-review`로 기록되어 **code 라운드 3개 중 하나를 소모**하고,
+  반복되면 `NEEDS_REDESIGN`으로 종결되어 **리뷰어 역량 실패가 코드·설계 실패로 귀속**된다.
+  방향은 fail-closed라 blocking은 아니다. 후속 조치 후보: SKILL.md 리뷰 절차에 "미검증
+  사유의 REVISE는 범위를 좁힌 새 리뷰어로 재시도하고 code 라운드를 소모하지 않는다"를
+  명시. 이번 라운드에 넣지 않은 이유는 리뷰 통과 직후 번들을 수정하면 그 리뷰가 무효가
+  되기 때문이다.
+- **CODE-008 (Low) — 잔여 위험 명시.** CODE-001의 방어는 **지시문 준수에만 의존**한다.
+  `evaluate_gate`는 evidence 배열을 읽지 않고 `review.schema.json`에도 구조화된 미검증
+  표시가 없어서, 리뷰어가 미검증 조건을 "적용되지 않음"으로 재분류하면 검증과 게이트를
+  모두 통과한다. code 아티팩트는 점수 임계도 없으므로 verdict + 오케스트레이터 자기
+  체크 4개가 게이트의 전부다. 결정적 강제를 원하면 스키마에 evidence별 `verified`
+  플래그를 넣고 `validate_review`가 "미검증 존재 ⇒ PASS 불가"를 강제하는 것이 정공법이며,
+  이는 승인 범위 밖(`review.schema.json`)이라 별건으로 다룬다.
+  - 참고: round 2 리뷰어 자신이 명령 실행 불가(Read/Grep/Glob만)를 미검증으로 공개하고도
+    PASS를 냈다. 이는 규칙 위반이 아니다 — 결정적 명령 실행은 설계상 오케스트레이터의
+    체크이고 리뷰어에게 "적용 가능한" 조건이 아니다. 다만 그 판단 주체가 리뷰어라는
+    점이 위 잔여 위험의 실체다.
+- **CODE-010 (Low) — 정정 완료.** FIX 4의 "중단하지 않는 이유"를 테스트 편의가 아니라
+  fail-closed 발현 논증으로 다시 썼다(위 FIX 4 항목 참조).
+
+Codex 보고 정확도: 변형 검증 보고가 두 라운드 연속 부정확했다(round 1 "3건 전부 실패"
+→ 실제 변형당 1건, round 2 "(b) 정확히 1건" → 실제 2건). 코드는 두 번 다 정확했고
+오케스트레이터의 직접 재실행이 차이를 잡았다. Codex 완료 보고를 증거로 쓰지 않는 규율의
+실효성이 실측으로 확인된 사례다.

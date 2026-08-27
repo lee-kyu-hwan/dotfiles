@@ -285,6 +285,17 @@ review, carried forward from `deviations.md`:
 | TASK6-007 | Low | Resolved in Task 8 — the BLOCKED payload rules are now anchored by a content test. |
 | TASK7-010/011 | Low | Both fixed post-PASS: the record-review digest sentence now names the artifact file's SHA-256, and the stage table says "at most 2 review rounds". |
 | TASK8-001…005 | Low | The dirty-preservation test discards a fingerprint it computes; `make_git_repo` inherits global git config (a global `commit.gpgsign` would break it); the round-4 rejection is enforced by the stage guard in that test while a sibling test covers the round limit; one regex is sensitive to reflowing; the Plan listed a third test file that needed no change. |
+| CODE-008…010 | Medium 1, Low 2 | Raised by the field-fix round after first production use (2026-08-26/27). The no-PASS-when-unverified defense is instruction-only — `evaluate_gate` never reads `evidence` and the schema has no structured unverified marker; a REVISE whose substance is "could not verify X" still consumes one of the three code rounds and can terminate a run as `NEEDS_REDESIGN`. Full detail, root causes, and the deterministic follow-up candidate are in `deviations.md` D-16. |
+
+## Field-fix round after first production use
+
+The skill was used on a live monorepo issue (zambaguni-front #1290) and completed. That
+run exposed one real defect — the workflow's own state directory entering the workspace
+fingerprint, so its bookkeeping invalidated its own verification — plus three contract
+gaps. All four are fixed, reviewed over two rounds by the deployed `quality-reviewer`
+agent (round 1 REVISE with one High, round 2 PASS at 88 with no blockers), and recorded in
+`deviations.md` D-16. The review loop closed at round 2 by the user's instruction, within
+the code limit of three.
 
 ## Acceptance criteria
 
