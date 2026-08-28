@@ -228,7 +228,10 @@ class SpecRubricContentTests(unittest.TestCase):
                 self.assertIn(term, lower)
         self.assertIn("`SPEC-`", text)
         self.assertRegex(lower, r"(?:later rounds|rounds after round 1).{0,220}(?:open findings|regressions)")
-        self.assertRegex(lower, r"stop.{0,100}round 2|after round 2.{0,100}stop")
+        self.assertEqual(
+            ["3"],
+            re.findall(r"after round (\d+) without a passing gate", lower),
+        )
         self.assertRegex(lower, r"needs_redesign")
 
     def test_rubric_pass_gate_keys_match_required_checks_exactly(self):
@@ -279,7 +282,10 @@ class PlanRubricContentTests(unittest.TestCase):
                 self.assertIn(term, lower)
         self.assertRegex(lower, r"every acceptance criterion.{0,180}(?:maps|map).{0,120}(?:task|verification)")
         self.assertRegex(lower, r"placeholders_absent.{0,120}placeholder text is absent")
-        self.assertRegex(lower, r"stop.{0,100}round 2|after round 2.{0,100}stop")
+        self.assertEqual(
+            ["2"],
+            re.findall(r"after round (\d+) without a passing gate", lower),
+        )
         self.assertRegex(lower, r"needs_redesign")
 
 
@@ -318,7 +324,10 @@ class CodeRubricContentTests(unittest.TestCase):
                 self.assertIn(term, lower)
         self.assertIn("`CODE-`", text)
         self.assertRegex(lower, r"(?:reviewer|review).{0,80}(?:never waivable|cannot waive)")
-        self.assertRegex(lower, r"stop.{0,100}round 3|after round 3.{0,100}stop")
+        self.assertEqual(
+            ["3"],
+            re.findall(r"after round (\d+) without a passing gate", lower),
+        )
         self.assertRegex(lower, r"needs_redesign")
 
 
@@ -720,7 +729,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "2.0.0",
+            "version": "3.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -914,7 +923,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
     def test_review_round_limits_and_reviewer_isolation_contract(self):
         _, body = parse_yaml_frontmatter(self.read_skill())
         lower = body.casefold()
-        for stage, limit in (("spec", 2), ("plan", 2), ("code", 3)):
+        for stage, limit in (("spec", 3), ("plan", 2), ("code", 3)):
             with self.subTest(stage=stage):
                 self.assertRegex(
                     lower,

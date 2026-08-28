@@ -30,5 +30,5 @@ Unsupported opinion without repository or requirement evidence cannot block the 
 
 - Round 1 is a full review of the Spec against every rubric item and required section.
 - Later rounds verify open findings and regressions introduced by revisions. A new blocker after Round 1 must be Critical or High and include `new_blocker_evidence` showing that it was newly introduced or could not reasonably have been identified earlier.
-- After round 2 without a passing gate, stop and record `NEEDS_REDESIGN`.
+- After round 3 without a passing gate, stop and record `NEEDS_REDESIGN`.
 - If the same blocking finding ID recurs twice, stop and record `NEEDS_REDESIGN`, even if the round limit has not otherwise been reached.
