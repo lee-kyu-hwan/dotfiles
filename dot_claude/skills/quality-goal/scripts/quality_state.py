@@ -419,6 +419,16 @@ def _validate_transition_request(state, target, reason):
         verification = state.get("verification")
         code_reviews = reviews.get("code") if isinstance(reviews, dict) else None
         last_review = code_reviews[-1] if isinstance(code_reviews, list) and code_reviews else None
+        reviewed_digest = (
+            last_review.get("artifact_digest")
+            if isinstance(last_review, dict)
+            else None
+        )
+        verified_fingerprint = (
+            verification.get("workspace_fingerprint")
+            if isinstance(verification, dict)
+            else None
+        )
         if (
             not isinstance(rounds, dict)
             or not isinstance(rounds.get("code"), int)
@@ -431,10 +441,14 @@ def _validate_transition_request(state, target, reason):
             or open_finding_ids.get("code") != []
             or not isinstance(verification, dict)
             or verification.get("valid") is not True
+            or not isinstance(reviewed_digest, str)
+            or not reviewed_digest
+            or reviewed_digest != verified_fingerprint
         ):
             raise TransitionError(
                 "CODE_REVIEW -> COMPLETED requires a passing final review, "
-                "no open findings, and valid verification"
+                "no open findings, and verification tied to the reviewed "
+                "code state"
             )
 
 
@@ -500,12 +514,29 @@ def approve_plan(state, plan_path, approved_at):
         is None
     ):
         raise StateError("approved_at must be an RFC3339 UTC timestamp")
-    _, artifact_path = _mode_appropriate_artifact(state)
+    artifact_key, artifact_path = _mode_appropriate_artifact(state)
     if _resolved_path(artifact_path) is None:
         raise StateError("the mode-appropriate plan artifact must be set")
     if _resolved_path(plan_path) != _resolved_path(artifact_path):
         raise StateError("plan approval path must match the current plan artifact")
     digest = _file_digest(plan_path)
+    if artifact_key == "plan":
+        artifact_digests = state.get("artifact_digests")
+        reviewed_digest = (
+            artifact_digests.get("plan")
+            if isinstance(artifact_digests, dict)
+            else None
+        )
+        if not isinstance(reviewed_digest, str) or not reviewed_digest:
+            raise StateError(
+                "the plan must have a recorded passing review digest "
+                "before approval"
+            )
+        if digest != reviewed_digest:
+            raise StateError(
+                "plan approval content does not match the reviewed plan "
+                "digest"
+            )
     state["plan_approval"] = {
         "path": str(plan_path),
         "digest": digest,
@@ -910,6 +941,16 @@ def record_verification(state, verification_path, workspace_fingerprint):
     ):
         raise StateError(
             "workspace_fingerprint must be a lowercase SHA-256 hexdigest"
+        )
+    try:
+        is_regular_file = Path(verification_path).is_file()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise StateError(
+            f"verification path is not a regular file: {verification_path!s}"
+        ) from exc
+    if not is_regular_file:
+        raise StateError(
+            f"verification path is not a regular file: {verification_path!s}"
         )
     state["verification"] = {
         "path": str(verification_path),

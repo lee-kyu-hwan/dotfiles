@@ -414,9 +414,16 @@ class TransitionTests(unittest.TestCase):
                         result = quality_state.transition(state, target, reason)
                     elif source == "CODE_REVIEW" and target == "COMPLETED":
                         state["rounds"]["code"] = 1
-                        state["reviews"]["code"] = [{"verdict": "PASS", "blockers": []}]
+                        state["reviews"]["code"] = [
+                            {
+                                "verdict": "PASS",
+                                "blockers": [],
+                                "artifact_digest": VALID_DIGEST,
+                            }
+                        ]
                         state["open_finding_ids"]["code"] = []
                         state["verification"]["valid"] = True
+                        state["verification"]["workspace_fingerprint"] = VALID_DIGEST
                         result = quality_state.transition(state, target, reason)
                     elif (source, target) in {
                         ("SPEC_REVIEW", "SPEC_PASSED"),
@@ -432,6 +439,7 @@ class TransitionTests(unittest.TestCase):
                             plan_path = Path(directory) / "plan.md"
                             plan_path.write_text("approved plan\n", encoding="utf-8")
                             state["artifacts"]["plan"] = str(plan_path)
+                            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
                             if source == "CODE_REVIEW":
                                 state["stage"] = "AWAITING_PLAN_APPROVAL"
                             quality_state.approve_plan(
@@ -487,6 +495,52 @@ class TransitionTests(unittest.TestCase):
                 )
                 self.assertEqual(target, result["stage"])
                 self.assertEqual("operator supplied reason", result["status_reason"])
+
+    def test_completed_requires_verification_tied_to_the_reviewed_code_digest(self):
+        """The verified workspace fingerprint must match the digest of the
+        code that was actually reviewed, not merely be present and valid."""
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": "a" * 64,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": "b" * 64,
+            "valid": True,
+        }
+        before = deepcopy(state)
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "COMPLETED")
+
+        self.assertEqual(before, state)
+
+    def test_completed_accepts_verification_matching_the_reviewed_code_digest(self):
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": "c" * 64,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": "c" * 64,
+            "valid": True,
+        }
+
+        result = quality_state.transition(state, "COMPLETED")
+
+        self.assertEqual("COMPLETED", result["stage"])
 
     def test_classified_transition_targets_require_the_matching_mode(self):
         for mode, target in (("strict", "AWAITING_PLAN_APPROVAL"), ("light", "SPEC_REVIEW")):
@@ -572,6 +626,64 @@ class ArtifactTests(unittest.TestCase):
 
 
 class PlanApprovalGuardTests(unittest.TestCase):
+    def test_approve_plan_rejects_content_changed_since_the_passing_review(self):
+        """A Plan edited after PLAN_PASSED but before approval, at the same
+        path, must not be silently approved with its new content."""
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("reviewed plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            plan_path.write_text("tampered after review, never reviewed\n", encoding="utf-8")
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertIsNone(state["plan_approval"])
+
+    def test_approve_plan_rejects_when_no_review_digest_was_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            self.assertIsNone(state["artifact_digests"]["plan"])
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertIsNone(state["plan_approval"])
+
+    def test_approve_plan_accepts_content_matching_the_passing_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("reviewed plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+
+            result = quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertEqual(
+                quality_state._file_digest(plan_path),
+                result["plan_approval"]["digest"],
+            )
+
+    def test_light_compact_plan_approval_needs_no_review_digest(self):
+        """Light never reviews its compact Plan, so approval has no reviewed
+        digest to compare against."""
+        with tempfile.TemporaryDirectory() as directory:
+            compact_plan = Path(directory) / "compact-plan.md"
+            compact_plan.write_text("compact plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="light")
+            state["artifacts"]["compact_plan"] = str(compact_plan)
+            self.assertIsNone(state["artifact_digests"]["compact_plan"])
+
+            result = quality_state.approve_plan(state, compact_plan, "2026-08-25T12:00:00Z")
+
+            self.assertIsNotNone(result["plan_approval"])
+
     def test_approval_must_target_the_current_mode_appropriate_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
@@ -600,6 +712,7 @@ class PlanApprovalGuardTests(unittest.TestCase):
             replacement.write_text("replacement\n", encoding="utf-8")
             state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
             state["artifacts"]["plan"] = str(original)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(original)
             quality_state.approve_plan(state, original, "2026-08-25T12:00:00Z")
             state["stage"] = "CODE_REVIEW"
             state["artifacts"]["plan"] = str(replacement)
@@ -621,6 +734,7 @@ class PlanApprovalGuardTests(unittest.TestCase):
             plan_path.write_text("plan\n", encoding="utf-8")
             state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
             state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
             quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
             state["verification"]["valid"] = True
             plan_path.unlink()
@@ -666,6 +780,7 @@ class PlanApprovalGuardTests(unittest.TestCase):
             plan_path.write_text("approved plan\n", encoding="utf-8")
             state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
             state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
 
             result = quality_state.approve_plan(
                 state,
@@ -706,6 +821,7 @@ class PlanApprovalGuardTests(unittest.TestCase):
             plan_path.write_text("approved plan\n", encoding="utf-8")
             state = state_at("CODE_REVIEW", mode="standard")
             state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
             state["stage"] = "AWAITING_PLAN_APPROVAL"
             quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
             state["stage"] = "CODE_REVIEW"
@@ -725,6 +841,7 @@ class PlanApprovalGuardTests(unittest.TestCase):
             plan_path.write_text("approved plan\n", encoding="utf-8")
             state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
             state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
             quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
             state["verification"]["valid"] = True
             state["verification"]["workspace_fingerprint"] = OLD_FINGERPRINT
@@ -811,10 +928,12 @@ class RecordReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             review_path = write_json(directory, "plan-review.json", valid_review())
+            verification_path = directory / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
             state = state_at("CODE_REVIEW")
             quality_state.record_verification(
                 state,
-                directory / "verification.json",
+                verification_path,
                 OLD_FINGERPRINT,
             )
             quality_state.invalidate_stale_verification(state, NEW_FINGERPRINT)
@@ -1413,6 +1532,7 @@ class VerificationTests(unittest.TestCase):
     def test_record_verification_sets_the_path_fingerprint_and_valid_flag(self):
         with tempfile.TemporaryDirectory() as directory:
             verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
             result = quality_state.record_verification(
                 state_at("CODE_REVIEW"),
                 verification_path,
@@ -1427,6 +1547,32 @@ class VerificationTests(unittest.TestCase):
             },
             result["verification"],
         )
+
+    def test_record_verification_rejects_a_nonexistent_verification_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing_path = Path(directory) / "never-written.json"
+            state = state_at("CODE_REVIEW")
+            before = deepcopy(state["verification"])
+
+            with self.assertRaises(StateError):
+                quality_state.record_verification(
+                    state,
+                    missing_path,
+                    VALID_FINGERPRINT,
+                )
+
+            self.assertEqual(before, state["verification"])
+
+    def test_record_verification_rejects_a_directory_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+
+            with self.assertRaises(StateError):
+                quality_state.record_verification(
+                    state,
+                    Path(directory),
+                    VALID_FINGERPRINT,
+                )
 
     def test_record_verification_rejects_invalid_inputs_and_leaves_verification_invalid(self):
         invalid_cases = (
@@ -1456,10 +1602,13 @@ class VerificationTests(unittest.TestCase):
                 self.assertFalse(state["verification"]["valid"])
 
     def test_stale_verification_is_invalidated_without_touching_spec_review_data(self):
-        state = state_at("CODE_REVIEW")
-        state["reviews"]["spec"] = [{"round": 1, "path": "spec-review.json"}]
-        state["artifact_digests"]["spec"] = "spec-digest"
-        quality_state.record_verification(state, "verification.json", OLD_FINGERPRINT)
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW")
+            state["reviews"]["spec"] = [{"round": 1, "path": "spec-review.json"}]
+            state["artifact_digests"]["spec"] = "spec-digest"
+            quality_state.record_verification(state, verification_path, OLD_FINGERPRINT)
         reviews_before = deepcopy(state["reviews"]["spec"])
         digest_before = state["artifact_digests"]["spec"]
 
@@ -1470,29 +1619,35 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(digest_before, result["artifact_digests"]["spec"])
 
     def test_matching_verification_fingerprint_is_left_valid(self):
-        state = state_at("CODE_REVIEW")
-        quality_state.record_verification(state, "verification.json", VALID_FINGERPRINT)
-        before = deepcopy(state)
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW")
+            quality_state.record_verification(state, verification_path, VALID_FINGERPRINT)
+            before = deepcopy(state)
 
-        result = quality_state.invalidate_stale_verification(state, VALID_FINGERPRINT)
+            result = quality_state.invalidate_stale_verification(state, VALID_FINGERPRINT)
 
-        self.assertEqual(before, result)
+            self.assertEqual(before, result)
 
     def test_invalidate_stale_verification_rejects_malformed_fingerprints(self):
-        for fingerprint in (None, "a" * 63, "A" * 64):
-            with self.subTest(fingerprint=fingerprint):
-                state = state_at("CODE_REVIEW")
-                quality_state.record_verification(
-                    state,
-                    "verification.json",
-                    VALID_FINGERPRINT,
-                )
-                before = deepcopy(state["verification"])
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            for fingerprint in (None, "a" * 63, "A" * 64):
+                with self.subTest(fingerprint=fingerprint):
+                    state = state_at("CODE_REVIEW")
+                    quality_state.record_verification(
+                        state,
+                        verification_path,
+                        VALID_FINGERPRINT,
+                    )
+                    before = deepcopy(state["verification"])
 
-                with self.assertRaises(StateError):
-                    quality_state.invalidate_stale_verification(state, fingerprint)
+                    with self.assertRaises(StateError):
+                        quality_state.invalidate_stale_verification(state, fingerprint)
 
-                self.assertEqual(before, state["verification"])
+                    self.assertEqual(before, state["verification"])
 
 
 class PassedTransitionGuardTests(unittest.TestCase):
@@ -1938,6 +2093,7 @@ class CLITests(unittest.TestCase):
             state_path = directory / "state.json"
             state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
             state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
             quality_state.save_state(state_path, state)
 
             result, _ = self.invoke_main([
@@ -2080,6 +2236,9 @@ class CLITests(unittest.TestCase):
                 state["rounds"][artifact] = 1
                 state["reviews"][artifact] = [{"verdict": "PASS", "blockers": []}]
                 state["open_finding_ids"][artifact] = []
+            # approve-plan below also requires a recorded review digest for
+            # the plan content it is about to approve.
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
             quality_state.save_state(state_path, state)
             for target in ("SPEC_REVIEW", "SPEC_PASSED", "PLAN_REVIEW", "PLAN_PASSED", "AWAITING_PLAN_APPROVAL"):
                 self.assertEqual(
@@ -2246,7 +2405,7 @@ class CLITests(unittest.TestCase):
                 "--review",
                 str(code_review_path),
                 "--artifact-digest",
-                hashlib.sha256((project_root / "app.txt").read_bytes()).hexdigest(),
+                fingerprint,
             ])
             self.assert_cli_success([
                 "transition",
@@ -2432,7 +2591,7 @@ class CLITests(unittest.TestCase):
                 "--review",
                 str(code_review_path),
                 "--artifact-digest",
-                hashlib.sha256((project_root / "app.txt").read_bytes()).hexdigest(),
+                fingerprint,
             ])
             self.assert_cli_success([
                 "transition",

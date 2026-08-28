@@ -202,7 +202,11 @@ are allowed to resolve requirements but are not approval gates. Approval occurs
 immediately before implementation;
 record it with approve-plan using the absolute path and SHA-256 digest, then
 confirm that digest before entering IMPLEMENTING. A user cancellation is
-recorded as CANCELLED with a reason.
+recorded as CANCELLED with a reason. For standard and strict, approve-plan
+refuses to approve Plan content that differs from the digest recorded by its
+passing Plan review, so the Plan a user approves cannot silently diverge from
+the Plan that was reviewed; light has no such review digest to compare
+against, since light never reviews its compact Plan.
 
 ### Implementation
 
@@ -320,6 +324,11 @@ verification is valid may the code-review context be built. If scope changes
 after approval, call quality_state.py invalidate-verification --state <state>
 --fingerprint <current>, invalidate the affected Spec or Plan digests and
 downstream verification, then return to the earliest affected review stage.
+record-verification refuses a verification path that is not an existing
+regular file, and CODE_REVIEW -> COMPLETED refuses unless the verified
+workspace fingerprint equals the artifact digest of the last passing code
+review, so a verification recorded for a different code state than the one
+that was reviewed cannot complete the workflow.
 
 ## Safety rules
 

@@ -932,6 +932,31 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             r"(?:a\s+)?prior.{0,100}reviewer(?:\s+context)?",
         )
 
+    def test_completion_guards_verification_integrity_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        self.assertRegex(
+            lower,
+            r"approve-plan\s+refuses\s+to\s+approve\s+plan\s+content.{0,160}"
+            r"digest\s+recorded\s+by\s+its\s+passing\s+plan\s+review",
+        )
+        self.assertRegex(
+            lower,
+            r"light\s+has\s+no\s+such\s+review\s+digest.{0,160}"
+            r"light\s+never\s+reviews\s+its\s+compact\s+plan",
+        )
+        self.assertRegex(
+            lower,
+            r"record-verification\s+refuses\s+a\s+verification\s+path.{0,120}"
+            r"not\s+an\s+existing\s+regular\s+file",
+        )
+        self.assertRegex(
+            lower,
+            r"code_review\s*->\s*completed\s+refuses\s+unless\s+the\s+verified\s+"
+            r"workspace\s+fingerprint\s+equals\s+the\s+artifact\s+digest\s+of\s+the\s+"
+            r"last\s+passing\s+code\s+review",
+        )
+
     def test_passed_transition_guard_contract(self):
         _, body = parse_yaml_frontmatter(self.read_skill())
         lower = self.normalize(body)
