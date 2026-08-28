@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 2.0.0
+version: 3.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -111,7 +111,7 @@ artifact's SHA-256 approval digest via approve-plan.
 |---|---|
 | INTAKE | Parse, run select-resume, preflight Git and Codex, initialize or load state, and capture the baseline |
 | CLASSIFIED | Load routing-rules.md and print the selected mode with concrete evidence |
-| SPEC_REVIEW | Standard and strict only: render templates/spec.md under brainstorming-policy.md, review, validate, gate, with at most 2 review rounds |
+| SPEC_REVIEW | Standard and strict only: render templates/spec.md under brainstorming-policy.md, review, validate, gate, with at most 3 review rounds |
 | SPEC_PASSED | Confirm the passing Spec is registered with set-artifact using its absolute path, then transition to PLAN_REVIEW |
 | PLAN_REVIEW | Standard and strict only: render templates/plan.md, map every acceptance criterion, discover exact commands, review, validate, gate, with at most 2 review rounds |
 | PLAN_PASSED | Confirm the passing Plan is registered with set-artifact using its absolute path, then transition to AWAITING_PLAN_APPROVAL |
@@ -134,7 +134,7 @@ quality_state.py classify, and show the mode and evidence before continuing.
 
 For standard and strict, inspect repository conventions and use the adapted
 brainstorming policy in brainstorming-policy.md. Draft Spec from
-templates/spec.md. The Spec review has at most 2 rounds. Strict retains the
+templates/spec.md. The Spec review has at most 3 rounds. Strict retains the
 template's strict-only blocks; a
 non-strict artifact removes those blocks and records any inapplicable
 requirements with a reason. Immediately after drafting, register the Spec with
@@ -142,7 +142,7 @@ set-artifact --kind spec using its absolute path, before the first reviewer
 round, so record-review's artifact-digest cross-check engages on every round.
 Launch a fresh quality-reviewer round using the Spec rubric, validate the
 result, and run its deterministic gate. Revise only within the Spec limit of
-at most 2 rounds; after each revision, re-register the Spec with
+at most 3 rounds; after each revision, re-register the Spec with
 set-artifact --kind spec using its absolute path so the digest stays current.
 A failed limit or recurring material finding is NEEDS_REDESIGN. On a pass,
 confirm the current registration and transition through SPEC_PASSED.

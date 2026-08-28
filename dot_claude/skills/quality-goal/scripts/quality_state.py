@@ -66,7 +66,7 @@ ALLOWED_TRANSITIONS = {
 }
 
 TERMINAL_STATES = {"COMPLETED", "BLOCKED", "NEEDS_REDESIGN", "CANCELLED"}
-ROUND_LIMITS = {"spec": 2, "plan": 2, "code": 3}
+ROUND_LIMITS = {"spec": 3, "plan": 2, "code": 3}
 
 _REQUESTED_MODES = {"auto", "light", "standard", "strict"}
 _CLASSIFIED_MODES = {"light", "standard", "strict"}

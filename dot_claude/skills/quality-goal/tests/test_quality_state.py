@@ -153,7 +153,7 @@ class ConstantTests(unittest.TestCase):
             quality_state.TERMINAL_STATES,
         )
         self.assertEqual(
-            {"spec": 2, "plan": 2, "code": 3},
+            {"spec": 3, "plan": 2, "code": 3},
             quality_state.ROUND_LIMITS,
         )
 
@@ -1011,27 +1011,45 @@ class RecordReviewTests(unittest.TestCase):
 
 
 class RoundLimitTests(unittest.TestCase):
-    def test_spec_and_plan_round_three_are_rejected_after_two_recorded_rounds(self):
+    def test_plan_round_three_is_rejected_after_two_recorded_rounds(self):
         with tempfile.TemporaryDirectory() as directory:
-            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
-                with self.subTest(artifact=artifact):
-                    state = state_at(stage)
-                    for round_number in (1, 2):
-                        review_path = write_json(
-                            directory,
-                            f"{artifact}-{round_number}.json",
-                            valid_review(artifact=artifact, round_number=round_number),
-                        )
-                        quality_state.record_review(state, review_path, VALID_DIGEST)
+            state = state_at("PLAN_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"plan-{round_number}.json",
+                    valid_review(artifact="plan", round_number=round_number),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
 
-                    round_three = write_json(
-                        directory,
-                        f"{artifact}-3.json",
-                        valid_review(artifact=artifact, round_number=3),
-                    )
-                    with self.assertRaises(StateError):
-                        quality_state.record_review(state, round_three, VALID_DIGEST)
-                    self.assertEqual(2, state["rounds"][artifact])
+            round_three = write_json(
+                directory,
+                "plan-3.json",
+                valid_review(artifact="plan", round_number=3),
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, round_three, VALID_DIGEST)
+            self.assertEqual(2, state["rounds"]["plan"])
+
+    def test_spec_round_four_is_rejected_after_three_recorded_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            for round_number in (1, 2, 3):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(artifact="spec", round_number=round_number),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            round_four = write_json(
+                directory,
+                "spec-4.json",
+                valid_review(artifact="spec", round_number=4),
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, round_four, VALID_DIGEST)
+            self.assertEqual(3, state["rounds"]["spec"])
 
     def test_code_round_four_is_rejected_after_three_recorded_rounds(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1054,16 +1072,28 @@ class RoundLimitTests(unittest.TestCase):
             self.assertEqual(3, state["rounds"]["code"])
 
     def test_nonpassing_final_spec_round_enters_needs_redesign(self):
+        """Rounds 1-2 are REVISE with no blockers so neither the recurring-
+        blocker branch nor a premature limit fires before round 3, the
+        actual final spec round under the 3-round limit."""
         with tempfile.TemporaryDirectory() as directory:
             state = state_at("SPEC_REVIEW")
-            first = write_json(directory, "spec-1.json", valid_review(artifact="spec"))
-            quality_state.record_review(state, first, VALID_DIGEST)
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                    ),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
             final = write_json(
                 directory,
-                "spec-2.json",
+                "spec-3.json",
                 valid_review(
                     artifact="spec",
-                    round_number=2,
+                    round_number=3,
                     verdict="REVISE",
                     blockers=["SPEC-LIMIT-001"],
                 ),
