@@ -377,6 +377,41 @@ def _validate_transition_request(state, target, reason):
             raise TransitionError(
                 "CLASSIFIED -> SPEC_REVIEW requires standard or strict mode"
             )
+    if (current, target) in {
+        ("SPEC_REVIEW", "SPEC_PASSED"),
+        ("PLAN_REVIEW", "PLAN_PASSED"),
+    }:
+        artifact = "spec" if current == "SPEC_REVIEW" else "plan"
+        # Light carries no reviewer round for its compact Plan, so its
+        # documented IMPLEMENTING -> PLAN_REVIEW -> PLAN_PASSED rework path
+        # has no review to require.
+        if not (artifact == "plan" and state.get("mode") == "light"):
+            rounds = state.get("rounds")
+            reviews = state.get("reviews")
+            open_finding_ids = state.get("open_finding_ids")
+            artifact_reviews = (
+                reviews.get(artifact) if isinstance(reviews, dict) else None
+            )
+            last_review = (
+                artifact_reviews[-1]
+                if isinstance(artifact_reviews, list) and artifact_reviews
+                else None
+            )
+            if (
+                not isinstance(rounds, dict)
+                or not isinstance(rounds.get(artifact), int)
+                or isinstance(rounds.get(artifact), bool)
+                or rounds[artifact] < 1
+                or not isinstance(last_review, dict)
+                or last_review.get("verdict") != "PASS"
+                or last_review.get("blockers") != []
+                or not isinstance(open_finding_ids, dict)
+                or open_finding_ids.get(artifact) != []
+            ):
+                raise TransitionError(
+                    f"{current} -> {target} requires a passing final "
+                    f"{artifact} review with no open findings"
+                )
     if current == "CODE_REVIEW" and target == "COMPLETED":
         rounds = state.get("rounds")
         reviews = state.get("reviews")

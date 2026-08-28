@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 1.1.0
+version: 2.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -146,6 +146,9 @@ at most 2 rounds; after each revision, re-register the Spec with
 set-artifact --kind spec using its absolute path so the digest stays current.
 A failed limit or recurring material finding is NEEDS_REDESIGN. On a pass,
 confirm the current registration and transition through SPEC_PASSED.
+quality_state.py refuses SPEC_REVIEW -> SPEC_PASSED unless the last recorded
+spec review is a passing review with no blockers and no open findings, so the
+review gate cannot be skipped by transitioning straight to SPEC_PASSED.
 
 Light creates no durable Spec and skips SPEC_REVIEW.
 
@@ -162,7 +165,10 @@ Launch a fresh quality-reviewer invocation, validate and gate the result. Plan
 review has at most 2 rounds; after each revision, re-register the Plan with
 set-artifact --kind plan using its absolute path so the digest stays current.
 Stop as NEEDS_REDESIGN when its limit or a recurring material finding is
-reached.
+reached. quality_state.py refuses PLAN_REVIEW -> PLAN_PASSED unless the last
+recorded plan review is a passing review with no blockers and no open
+findings. Light is exempt from that plan guard because light has no reviewer
+round for its compact Plan; its rework path stays open without a review.
 
 Light normal path: after CLASSIFIED, inspect repository context, write the
 compact Plan containing intent, affected area, expected verification, and

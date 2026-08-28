@@ -720,7 +720,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "1.1.0",
+            "version": "2.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -930,6 +930,21 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             lower,
             r"(?:never|must not|do not).{0,100}(?:resume|continue).{0,120}"
             r"(?:a\s+)?prior.{0,100}reviewer(?:\s+context)?",
+        )
+
+    def test_passed_transition_guard_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        for artifact in ("spec", "plan"):
+            with self.subTest(artifact=artifact):
+                self.assertRegex(
+                    lower,
+                    rf"(?:refus|reject)\w*\s+{artifact}_review -> {artifact}_passed"
+                    rf".{{0,200}}(?:passing|pass).{{0,120}}review",
+                )
+        self.assertRegex(
+            lower,
+            r"light.{0,240}(?:exempt|no reviewer round|without a review)",
         )
 
     def test_reviewer_launch_mode_contract(self):

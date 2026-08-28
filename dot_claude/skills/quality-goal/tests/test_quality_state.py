@@ -418,6 +418,15 @@ class TransitionTests(unittest.TestCase):
                         state["open_finding_ids"]["code"] = []
                         state["verification"]["valid"] = True
                         result = quality_state.transition(state, target, reason)
+                    elif (source, target) in {
+                        ("SPEC_REVIEW", "SPEC_PASSED"),
+                        ("PLAN_REVIEW", "PLAN_PASSED"),
+                    }:
+                        artifact = "spec" if source == "SPEC_REVIEW" else "plan"
+                        state["rounds"][artifact] = 1
+                        state["reviews"][artifact] = [{"verdict": "PASS", "blockers": []}]
+                        state["open_finding_ids"][artifact] = []
+                        result = quality_state.transition(state, target, reason)
                     elif source in {"AWAITING_PLAN_APPROVAL", "CODE_REVIEW"} and target == "IMPLEMENTING":
                         with tempfile.TemporaryDirectory() as directory:
                             plan_path = Path(directory) / "plan.md"
@@ -1486,6 +1495,109 @@ class VerificationTests(unittest.TestCase):
                 self.assertEqual(before, state["verification"])
 
 
+class PassedTransitionGuardTests(unittest.TestCase):
+    """SPEC_PASSED and PLAN_PASSED must require a passing recorded review."""
+
+    def record(self, state, directory, artifact, verdict="PASS", blockers=None):
+        review_path = write_json(
+            directory,
+            f"{artifact}-{state['rounds'][artifact] + 1}.json",
+            valid_review(
+                artifact=artifact,
+                round_number=state["rounds"][artifact] + 1,
+                verdict=verdict,
+                blockers=blockers,
+            ),
+        )
+        return quality_state.record_review(state, review_path, VALID_DIGEST)
+
+    def test_spec_passed_rejects_a_stage_with_no_recorded_review(self):
+        state = state_at("SPEC_REVIEW")
+
+        with self.assertRaises(quality_state.TransitionError) as context:
+            quality_state.transition(state, "SPEC_PASSED")
+
+        self.assertIn("passing final spec review", str(context.exception))
+        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_a_non_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec", verdict="REVISE")
+
+            with self.assertRaises(quality_state.TransitionError):
+                quality_state.transition(state, "SPEC_PASSED")
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_a_passing_review_that_still_lists_blockers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec", blockers=["SPEC-OPEN-001"])
+
+            with self.assertRaises(quality_state.TransitionError):
+                quality_state.transition(state, "SPEC_PASSED")
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_stale_blockers_even_with_no_open_findings(self):
+        """The guard checks the recorded review's blockers independently of
+        open_finding_ids, so a state where only one of the two was cleared is
+        still refused."""
+        state = state_at("SPEC_REVIEW")
+        state["rounds"]["spec"] = 1
+        state["reviews"]["spec"] = [
+            {"verdict": "PASS", "blockers": ["SPEC-STALE-001"]}
+        ]
+        state["open_finding_ids"]["spec"] = []
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "SPEC_PASSED")
+        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_accepts_a_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec")
+
+            result = quality_state.transition(state, "SPEC_PASSED")
+
+            self.assertEqual("SPEC_PASSED", result["stage"])
+
+    def test_plan_passed_rejects_a_stage_with_no_recorded_review(self):
+        state = state_at("PLAN_REVIEW")
+
+        with self.assertRaises(quality_state.TransitionError) as context:
+            quality_state.transition(state, "PLAN_PASSED")
+
+        self.assertIn("passing final plan review", str(context.exception))
+        self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_plan_passed_accepts_a_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            self.record(state, directory, "plan")
+
+            result = quality_state.transition(state, "PLAN_PASSED")
+
+            self.assertEqual("PLAN_PASSED", result["stage"])
+
+    def test_light_plan_passed_needs_no_review_round(self):
+        """SKILL.md gives light no reviewer round for the compact Plan, so its
+        documented IMPLEMENTING -> PLAN_REVIEW -> PLAN_PASSED rework path must
+        stay open."""
+        state = state_at("PLAN_REVIEW", mode="light")
+
+        result = quality_state.transition(state, "PLAN_PASSED")
+
+        self.assertEqual("PLAN_PASSED", result["stage"])
+        self.assertEqual(0, result["rounds"]["plan"])
+
+    def test_light_spec_passed_still_requires_a_review(self):
+        state = state_at("SPEC_REVIEW", mode="light")
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "SPEC_PASSED")
+
+
 class ResumeSelectionTests(unittest.TestCase):
     def persist_candidate(self, state_root, task_id, state):
         path = Path(state_root) / task_id / "state.json"
@@ -1961,6 +2073,13 @@ class CLITests(unittest.TestCase):
             state = quality_state.load_state(state_path)
             state["artifacts"]["plan"] = str(plan_path)
             state["verification"]["valid"] = True
+            # SPEC_PASSED and PLAN_PASSED each require a passing recorded
+            # review; this test is about persistence on a later transition
+            # error, so seed the minimum state those guards demand.
+            for artifact in ("spec", "plan"):
+                state["rounds"][artifact] = 1
+                state["reviews"][artifact] = [{"verdict": "PASS", "blockers": []}]
+                state["open_finding_ids"][artifact] = []
             quality_state.save_state(state_path, state)
             for target in ("SPEC_REVIEW", "SPEC_PASSED", "PLAN_REVIEW", "PLAN_PASSED", "AWAITING_PLAN_APPROVAL"):
                 self.assertEqual(
@@ -2393,7 +2512,32 @@ class CLITests(unittest.TestCase):
             ])
             self.assertEqual(3, result)
 
-            for target in ("SPEC_REVIEW", "SPEC_PASSED", "PLAN_REVIEW"):
+            result, _ = self.invoke_main([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "SPEC_REVIEW",
+            ])
+            self.assertEqual(0, result)
+
+            spec_review_path = write_json(
+                directory,
+                "spec-review.json",
+                valid_review(artifact="spec"),
+            )
+            result, _ = self.invoke_main([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(spec_review_path),
+                "--artifact-digest",
+                hashlib.sha256(b"spec-artifact").hexdigest(),
+            ])
+            self.assertEqual(0, result)
+
+            for target in ("SPEC_PASSED", "PLAN_REVIEW"):
                 result, _ = self.invoke_main([
                     "transition",
                     "--state",
