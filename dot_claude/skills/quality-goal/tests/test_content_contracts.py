@@ -720,7 +720,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "1.0.0",
+            "version": "2.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -930,6 +930,69 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             lower,
             r"(?:never|must not|do not).{0,100}(?:resume|continue).{0,120}"
             r"(?:a\s+)?prior.{0,100}reviewer(?:\s+context)?",
+        )
+
+    def test_completion_guards_verification_integrity_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        self.assertRegex(
+            lower,
+            r"approve-plan\s+refuses\s+to\s+approve\s+plan\s+content.{0,160}"
+            r"digest\s+recorded\s+by\s+its\s+passing\s+plan\s+review",
+        )
+        self.assertRegex(
+            lower,
+            r"light\s+has\s+no\s+such\s+review\s+digest.{0,160}"
+            r"light\s+never\s+reviews\s+its\s+compact\s+plan",
+        )
+        self.assertRegex(
+            lower,
+            r"record-verification\s+refuses\s+a\s+verification\s+path.{0,120}"
+            r"not\s+an\s+existing\s+regular\s+file",
+        )
+        self.assertRegex(
+            lower,
+            r"code_review\s*->\s*completed\s+refuses\s+unless\s+the\s+verified\s+"
+            r"workspace\s+fingerprint\s+equals\s+the\s+artifact\s+digest\s+of\s+the\s+"
+            r"last\s+passing\s+code\s+review",
+        )
+
+    def test_passed_transition_guard_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        for artifact in ("spec", "plan"):
+            with self.subTest(artifact=artifact):
+                self.assertRegex(
+                    lower,
+                    rf"(?:refus|reject)\w*\s+{artifact}_review -> {artifact}_passed"
+                    rf".{{0,200}}(?:passing|pass).{{0,120}}review",
+                )
+        self.assertRegex(
+            lower,
+            r"light.{0,240}(?:exempt|no reviewer round|without a review)",
+        )
+
+    def test_reviewer_launch_mode_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        self.assertRegex(
+            lower,
+            r"(?:never|must not|do not).{0,80}(?:give|assign|pass|supply).{0,60}"
+            r"name.{0,120}review(?:er)?",
+        )
+        self.assertRegex(
+            lower,
+            r"named.{0,160}(?:teammate|in_process_teammate)",
+        )
+        self.assertRegex(
+            lower,
+            r"(?:teammate|named).{0,200}final\s+message.{0,120}"
+            r"(?:not\s+returned|never\s+returned|is\s+not\s+delivered)",
+        )
+        self.assertRegex(
+            lower,
+            r"read-only.{0,200}(?:no\s+other\s+(?:way|channel)|"
+            r"only\s+(?:delivery\s+)?channel)",
         )
 
     def test_prior_supply_rule_contract(self):

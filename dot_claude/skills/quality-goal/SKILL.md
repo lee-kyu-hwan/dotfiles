@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 1.0.0
+version: 2.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -146,6 +146,9 @@ at most 2 rounds; after each revision, re-register the Spec with
 set-artifact --kind spec using its absolute path so the digest stays current.
 A failed limit or recurring material finding is NEEDS_REDESIGN. On a pass,
 confirm the current registration and transition through SPEC_PASSED.
+quality_state.py refuses SPEC_REVIEW -> SPEC_PASSED unless the last recorded
+spec review is a passing review with no blockers and no open findings, so the
+review gate cannot be skipped by transitioning straight to SPEC_PASSED.
 
 Light creates no durable Spec and skips SPEC_REVIEW.
 
@@ -162,7 +165,10 @@ Launch a fresh quality-reviewer invocation, validate and gate the result. Plan
 review has at most 2 rounds; after each revision, re-register the Plan with
 set-artifact --kind plan using its absolute path so the digest stays current.
 Stop as NEEDS_REDESIGN when its limit or a recurring material finding is
-reached.
+reached. quality_state.py refuses PLAN_REVIEW -> PLAN_PASSED unless the last
+recorded plan review is a passing review with no blockers and no open
+findings. Light is exempt from that plan guard because light has no reviewer
+round for its compact Plan; its rework path stays open without a review.
 
 Light normal path: after CLASSIFIED, inspect repository context, write the
 compact Plan containing intent, affected area, expected verification, and
@@ -196,7 +202,11 @@ are allowed to resolve requirements but are not approval gates. Approval occurs
 immediately before implementation;
 record it with approve-plan using the absolute path and SHA-256 digest, then
 confirm that digest before entering IMPLEMENTING. A user cancellation is
-recorded as CANCELLED with a reason.
+recorded as CANCELLED with a reason. For standard and strict, approve-plan
+refuses to approve Plan content that differs from the digest recorded by its
+passing Plan review, so the Plan a user approves cannot silently diverge from
+the Plan that was reviewed; light has no such review digest to compare
+against, since light never reviews its compact Plan.
 
 ### Implementation
 
@@ -249,6 +259,15 @@ code review, pass the CURRENT WORKSPACE FINGERPRINT from
 quality_state.py fingerprint --project-root ... as --artifact-digest; use the
 same value recorded by record-verification so the reviewed code state is tied
 to the verified one. Do not send hidden reasoning or unrelated conversation.
+
+Launch each reviewer round as a one-shot agent task: never assign a name to a
+reviewer invocation. A named agent starts as a persistent teammate
+(`taskKind: in_process_teammate`) whose final message is not returned to the
+orchestrator, and the read-only quality-reviewer holds no write or messaging
+tool, so its final message is its only delivery channel and a named launch
+silently loses the review. Measured 2026-08-28: three named invocations
+returned nothing while an otherwise identical unnamed invocation returned its
+schema-valid JSON as the agent result.
 
 Persist the returned JSON under .claude/quality-state/<task-id>/, then run
 quality_state.py record-review only after
@@ -305,6 +324,11 @@ verification is valid may the code-review context be built. If scope changes
 after approval, call quality_state.py invalidate-verification --state <state>
 --fingerprint <current>, invalidate the affected Spec or Plan digests and
 downstream verification, then return to the earliest affected review stage.
+record-verification refuses a verification path that is not an existing
+regular file, and CODE_REVIEW -> COMPLETED refuses unless the verified
+workspace fingerprint equals the artifact digest of the last passing code
+review, so a verification recorded for a different code state than the one
+that was reviewed cannot complete the workflow.
 
 ## Safety rules
 
