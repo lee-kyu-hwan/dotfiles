@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 1.0.0
+version: 1.1.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -249,6 +249,15 @@ code review, pass the CURRENT WORKSPACE FINGERPRINT from
 quality_state.py fingerprint --project-root ... as --artifact-digest; use the
 same value recorded by record-verification so the reviewed code state is tied
 to the verified one. Do not send hidden reasoning or unrelated conversation.
+
+Launch each reviewer round as a one-shot agent task: never assign a name to a
+reviewer invocation. A named agent starts as a persistent teammate
+(`taskKind: in_process_teammate`) whose final message is not returned to the
+orchestrator, and the read-only quality-reviewer holds no write or messaging
+tool, so its final message is its only delivery channel and a named launch
+silently loses the review. Measured 2026-08-28: three named invocations
+returned nothing while an otherwise identical unnamed invocation returned its
+schema-valid JSON as the agent result.
 
 Persist the returned JSON under .claude/quality-state/<task-id>/, then run
 quality_state.py record-review only after

@@ -720,7 +720,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "1.0.0",
+            "version": "1.1.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -930,6 +930,29 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             lower,
             r"(?:never|must not|do not).{0,100}(?:resume|continue).{0,120}"
             r"(?:a\s+)?prior.{0,100}reviewer(?:\s+context)?",
+        )
+
+    def test_reviewer_launch_mode_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = self.normalize(body)
+        self.assertRegex(
+            lower,
+            r"(?:never|must not|do not).{0,80}(?:give|assign|pass|supply).{0,60}"
+            r"name.{0,120}review(?:er)?",
+        )
+        self.assertRegex(
+            lower,
+            r"named.{0,160}(?:teammate|in_process_teammate)",
+        )
+        self.assertRegex(
+            lower,
+            r"(?:teammate|named).{0,200}final\s+message.{0,120}"
+            r"(?:not\s+returned|never\s+returned|is\s+not\s+delivered)",
+        )
+        self.assertRegex(
+            lower,
+            r"read-only.{0,200}(?:no\s+other\s+(?:way|channel)|"
+            r"only\s+(?:delivery\s+)?channel)",
         )
 
     def test_prior_supply_rule_contract(self):
