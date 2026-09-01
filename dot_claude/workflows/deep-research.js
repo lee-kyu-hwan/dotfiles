@@ -6,7 +6,7 @@ export const meta = {
     { title: "Scope", detail: "Decompose question (from args) into 3-6 search angles" },
     { title: "Search", detail: "One WebSearch agent per angle, in parallel", model: "haiku" },
     { title: "Fetch", detail: "URL-dedup, fetch up to 15 sources, extract falsifiable claims", model: "haiku" },
-    { title: "Verify", detail: "3-vote adversarial verification on top 25 claims (2 refutes kill)" },
+    { title: "Verify", detail: "3-vote adversarial verification on top 25 claims (2 refutes kill)", model: "sonnet" },
     { title: "Synthesize", detail: "Merge semantic dupes, derive confidence from provenance, cite sources" },
   ],
 }
@@ -989,11 +989,18 @@ const panelResults = await parallel(
   rankedClaims.map(claim => guardParallelTask("verifier-panel", async () => {
     const voteResults = await parallel(
       Array.from({ length: VOTES_PER_CLAIM }, (_, v) => guardParallelTask("verifier-vote", async () => {
-        // Verification is this harness's entire point, so these agents inherit the
-        // session model and effort instead of pinning a cheap tier. The prompt
-        // requires an explicit supported/refuted/unverified outcome, so use the
-        // strongest available verifier for merit-based adjudication and reliable
-        // separation of infrastructure failures.
+        // Verification is this harness's entire point, so these agents are pinned to
+        // sonnet rather than the cheap tier Search/Fetch use. The failure modes are
+        // asymmetric in visibility: a false "supported" survives into the report with
+        // its quote and URL, where a reader can check it, but a false "refuted" is
+        // silent — 2 of 3 votes kill the claim and it never appears at all. A weak
+        // verifier therefore deletes true findings unobserved. Opus is not worth its
+        // cost here: each vote is a bounded single-claim adjudication against a strict
+        // schema, and the 2-of-3 majority is itself the error-correcting mechanism, so
+        // three sonnet votes adjudicate more reliably than one stronger vote.
+        // Deliberately no `effort` override — the checklist (quote-vs-claim overreach,
+        // contradicting-source search, recency, and the refuted/unverified split)
+        // degrades under "low", which would cancel out the point of raising the tier.
         const verifyPrompt = VERIFY_PROMPT(claim, v)
         const verifyOptions = {
           // claim.claim is model-extracted web page text: untrusted, same as a
@@ -1001,6 +1008,7 @@ const panelResults = await parallel(
           label: "v" + v + ":" + quotedLabel(claim.claim),
           phase: "Verify",
           schema: VERDICT_SCHEMA,
+          model: "sonnet",
         }
         try {
           return await callAgent(verifyPrompt, verifyOptions)
