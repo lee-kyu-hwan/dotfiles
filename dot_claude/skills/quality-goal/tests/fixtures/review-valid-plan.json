@@ -8,7 +8,8 @@
   "evidence": [
     {
       "claim": "The plan traces acceptance criteria to implementation and verification tasks.",
-      "location": "docs/development/quality-goal/plan.md#Traceability"
+      "location": "docs/development/quality-goal/plan.md#Traceability",
+      "verified": true
     }
   ],
   "required_next_action": null

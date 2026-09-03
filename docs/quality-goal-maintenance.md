@@ -41,9 +41,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dot_claude/skills/qual
 ## 추적 중인 후속 작업
 
 - #36 평가 이관
-- #37 CODE-009
-- #38 CODE-008
 - #39 Codex 모델 리네이밍 대비
+- #43은 이 작업이 의도적으로 손대지 않은 인접 결함이다.
+
+권위 목록은 GitHub의 열린 이슈다. 다음 명령으로 조회한다.
+
+```bash
+gh issue list --state open --search 'quality-goal in:title'
+```
 
 상세 근거는 `docs/development/2026-08-25-quality-goal/deviations.md`(D-1~D-16)와 같은 디렉터리의 `report.md`를 참고한다.
 

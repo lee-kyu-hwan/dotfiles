@@ -38,6 +38,7 @@ def valid_review(artifact="plan", score=87, verdict="PASS"):
             {
                 "claim": "The reviewed artifact is traceable to its acceptance criteria.",
                 "location": "plan.md#Traceability",
+                "verified": True,
             }
         ],
         "required_next_action": None,
@@ -110,7 +111,7 @@ class ValidateReviewTests(unittest.TestCase):
         review = valid_review()
         review["unexpected"] = True
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("unknown top-level field: 'unexpected'", validate_review(review, "plan"))
 
     def test_unknown_finding_level_key_is_rejected(self):
         finding = high_finding("PLAN-001")
@@ -118,17 +119,24 @@ class ValidateReviewTests(unittest.TestCase):
         review = valid_review()
         review["findings"] = [finding]
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("findings[0] has unknown field: 'unexpected'", validate_review(review, "plan"))
 
     def test_wrong_artifact_is_rejected_against_expected_artifact(self):
         review = valid_review(artifact="spec")
 
-        self.assertTrue(validate_review(review, expected_artifact="plan"))
+        self.assertIn(
+            "artifact 'spec' does not match expected artifact 'plan'",
+            validate_review(review, expected_artifact="plan"),
+        )
 
     def test_score_must_be_an_integer_between_zero_and_one_hundred(self):
-        for score in (101, -1, 87.5):
+        for score, expected_error in (
+            (101, "score must be between 0 and 100"),
+            (-1, "score must be between 0 and 100"),
+            (87.5, "score must be an integer"),
+        ):
             with self.subTest(score=score):
-                self.assertTrue(validate_review(valid_review(score=score), "plan"))
+                self.assertIn(expected_error, validate_review(valid_review(score=score), "plan"))
 
     def test_duplicate_finding_ids_are_rejected(self):
         review = valid_review()
@@ -137,13 +145,16 @@ class ValidateReviewTests(unittest.TestCase):
             high_finding("PLAN-001"),
         ]
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("duplicate finding ID: 'PLAN-001'", validate_review(review, "plan"))
 
     def test_blocker_id_must_resolve_to_a_finding(self):
         review = valid_review(verdict="REVISE")
         review["blockers"] = ["PLAN-001"]
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn(
+            "blockers[0] does not resolve to a finding: 'PLAN-001'",
+            validate_review(review, "plan"),
+        )
 
     def test_medium_finding_cannot_be_listed_as_a_blocker(self):
         finding = high_finding("PLAN-001")
@@ -152,13 +163,16 @@ class ValidateReviewTests(unittest.TestCase):
         review["findings"] = [finding]
         review["blockers"] = ["PLAN-001"]
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn(
+            "blocker 'PLAN-001' must resolve to a Critical or High finding",
+            validate_review(review, "plan"),
+        )
 
     def test_pass_with_required_next_action_is_rejected(self):
         review = valid_review()
         review["required_next_action"] = "Revise the traceability table."
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("PASS reviews must have no required_next_action", validate_review(review, "plan"))
 
     def test_pass_verdict_with_blockers_is_valid_but_fails_the_gate(self):
         review = valid_review(verdict="PASS")
@@ -179,7 +193,10 @@ class ValidateReviewTests(unittest.TestCase):
         review["blockers"] = ["PLAN-NEW"]
         prior = {"open_finding_ids": ["PLAN-OLD"]}
 
-        self.assertTrue(validate_review(review, "plan", prior))
+        self.assertIn(
+            "new blocker 'PLAN-NEW' at blockers[0] requires non-empty new_blocker_evidence",
+            validate_review(review, "plan", prior),
+        )
 
         review["findings"][0]["new_blocker_evidence"] = (
             "The revised plan introduced a new unmapped acceptance criterion."
@@ -190,13 +207,13 @@ class ValidateReviewTests(unittest.TestCase):
         review = valid_review()
         review.pop("evidence")
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("missing required field: evidence", validate_review(review, "plan"))
 
     def test_blockers_must_contain_strings(self):
         review = valid_review(verdict="REVISE")
         review["blockers"] = [123]
 
-        self.assertTrue(validate_review(review, "plan"))
+        self.assertIn("blockers[0] must be a string", validate_review(review, "plan"))
 
     def test_duplicate_blocker_ids_are_rejected(self):
         review = valid_review(verdict="REVISE")
@@ -232,6 +249,96 @@ class ValidateReviewTests(unittest.TestCase):
         review["round"] = 2
 
         self.assertEqual([], validate_review(review, "plan", {"open_finding_ids": []}))
+
+
+class PriorPayloadTests(unittest.TestCase):
+    def prior(self):
+        return {
+            "open_finding_ids": ["PLAN-001"],
+            "open_findings": [{
+                "id": "PLAN-001", "severity": "High", "description": "description",
+                "evidence_location": "plan.md:1", "required_resolution": "fix it",
+                "resolution_claim": None, "resolution_evidence": None,
+            }],
+            "resolved_finding_ids": ["PLAN-000"],
+        }
+
+    def test_structured_prior_accepts_an_open_finding_superset(self):
+        prior = self.prior()
+        prior["open_findings"].append({
+            "id": "PLAN-002", "severity": "Low", "description": "advisory",
+            "evidence_location": "plan.md:2", "required_resolution": "consider it",
+            "resolution_claim": "noted", "resolution_evidence": "plan.md:3",
+        })
+        review = valid_review(verdict="REVISE")
+        review["round"] = 2
+        self.assertEqual(validate_review(review, prior=prior), [])
+
+    def test_structured_prior_rejects_malformed_and_inconsistent_fields(self):
+        cases = []
+        for field in ("id", "severity", "description", "evidence_location", "required_resolution", "resolution_claim", "resolution_evidence"):
+            prior = self.prior()
+            del prior["open_findings"][0][field]
+            cases.append((f"missing {field}", prior, f"missing required field: {field}"))
+        prior = self.prior(); prior["open_findings"][0]["extra"] = True; cases.append(("unknown", prior, "has unknown field: 'extra'"))
+        prior = self.prior(); prior["open_findings"].append(dict(prior["open_findings"][0])); cases.append(("duplicate", prior, "duplicate prior open finding ID"))
+        prior = self.prior(); prior["open_finding_ids"] = ["PLAN-404"]; cases.append(("coverage", prior, "entry missing from open_findings"))
+        prior = self.prior(); prior["resolved_finding_ids"] = ["PLAN-001"]; cases.append(("overlap", prior, "overlaps open finding"))
+        prior = self.prior(); prior["resolved_finding_ids"] = ["PLAN-000", "PLAN-000"]; cases.append(("duplicate resolved", prior, "duplicate prior.resolved_finding_ids entry"))
+        prior = self.prior(); prior["resolved_finding_ids"] = [1]; cases.append(("nonstring resolved", prior, "prior.resolved_finding_ids[0] must be a string"))
+        prior = self.prior(); prior["open_finding"] = []; cases.append(("unknown prior", prior, "prior has unknown field: 'open_finding'"))
+        for label, prior, expected_error in cases:
+            with self.subTest(label=label):
+                review = valid_review(verdict="REVISE")
+                review["round"] = 2
+                self.assertTrue(
+                    any(expected_error in error for error in validate_review(review, prior=prior)),
+                    expected_error,
+                )
+
+    def test_structured_prior_rejects_invalid_open_finding_severity(self):
+        prior = self.prior()
+        prior["open_findings"][0]["severity"] = "Trivial"
+        review = valid_review(verdict="REVISE")
+        review["round"] = 2
+
+        self.assertTrue(any(
+            "severity must be one of" in error
+            for error in validate_review(review, prior=prior)
+        ))
+
+    def test_structured_prior_rejects_empty_and_whitespace_string_fields(self):
+        for field in (
+            "id", "severity", "description", "evidence_location", "required_resolution",
+        ):
+            for value in ("", "   "):
+                with self.subTest(field=field, value=repr(value)):
+                    prior = self.prior()
+                    prior["open_findings"][0][field] = value
+                    review = valid_review(verdict="REVISE")
+                    review["round"] = 2
+                    self.assertTrue(any(
+                        f"prior.open_findings[0].{field} must be a non-empty string" in error
+                        for error in validate_review(review, prior=prior)
+                    ))
+
+    def test_structured_prior_allows_null_and_rejects_integer_resolution_fields(self):
+        for field in ("resolution_claim", "resolution_evidence"):
+            with self.subTest(field=field, value="null"):
+                prior = self.prior()
+                prior["open_findings"][0][field] = None
+                review = valid_review(verdict="REVISE")
+                review["round"] = 2
+                self.assertEqual([], validate_review(review, prior=prior))
+            with self.subTest(field=field, value="integer"):
+                prior = self.prior()
+                prior["open_findings"][0][field] = 1
+                review = valid_review(verdict="REVISE")
+                review["round"] = 2
+                self.assertTrue(any(
+                    f"prior.open_findings[0].{field} must be a string or null" in error
+                    for error in validate_review(review, prior=prior)
+                ))
 
 
 class EvaluateGateTests(unittest.TestCase):
@@ -338,6 +445,46 @@ class EvaluateGateTests(unittest.TestCase):
         self.assertIn("critical_or_high_finding", decision["reasons"])
 
 
+class EvidenceVerificationTests(unittest.TestCase):
+    def test_verified_is_required_boolean_and_blocks_pass_when_false(self):
+        missing = valid_review()
+        del missing["evidence"][0]["verified"]
+        self.assertTrue(any(
+            "evidence[0] missing required field: verified" in error
+            for error in validate_review(missing)
+        ))
+        string_value = valid_review()
+        string_value["evidence"][0]["verified"] = "false"
+        self.assertTrue(any(
+            "evidence[0].verified must be a boolean" in error
+            for error in validate_review(string_value)
+        ))
+        integer_value = valid_review()
+        integer_value["evidence"][0]["verified"] = 0
+        self.assertTrue(any(
+            "evidence[0].verified must be a boolean" in error
+            for error in validate_review(integer_value)
+        ))
+        false_pass = valid_review()
+        false_pass["evidence"][0]["verified"] = False
+        self.assertTrue(any(
+            "PASS reviews must not contain unverified evidence" in error
+            for error in validate_review(false_pass)
+        ))
+        revise = valid_review(verdict="REVISE")
+        revise["evidence"][0]["verified"] = False
+        self.assertEqual(validate_review(revise), [])
+
+    def test_verified_evidence_still_requires_a_non_empty_claim(self):
+        review = valid_review()
+        review["evidence"][0]["claim"] = ""
+
+        self.assertTrue(any(
+            "evidence[0].claim must be a non-empty string" in error
+            for error in validate_review(review)
+        ))
+
+
 class SchemaDriftTests(unittest.TestCase):
     def test_schema_required_fields_and_enums_match_python_constants(self):
         import json
@@ -367,6 +514,7 @@ class SchemaDriftTests(unittest.TestCase):
         self.assertIs(schema["additionalProperties"], False)
         self.assertIs(finding_schema["additionalProperties"], False)
         self.assertIs(evidence_schema["additionalProperties"], False)
+        self.assertEqual("boolean", evidence_schema["properties"]["verified"]["type"])
         self.assertIs(schema["properties"]["blockers"]["uniqueItems"], True)
         self.assertIs(schema["properties"]["evidence"]["uniqueItems"], True)
         self.assertEqual(0, schema["properties"]["score"]["minimum"])

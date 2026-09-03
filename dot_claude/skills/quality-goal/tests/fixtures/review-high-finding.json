@@ -20,7 +20,8 @@
   "evidence": [
     {
       "claim": "The plan has a traceability gap despite its high numeric score.",
-      "location": "docs/development/quality-goal/plan.md#Traceability"
+      "location": "docs/development/quality-goal/plan.md#Traceability",
+      "verified": true
     }
   ],
   "required_next_action": "Add the missing acceptance-criterion mapping."

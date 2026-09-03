@@ -76,10 +76,20 @@ def valid_review(artifact="plan", round_number=1, verdict="PASS", blockers=None)
             {
                 "claim": "The reviewed artifact is traceable to its acceptance criteria.",
                 "location": "artifact.md#Traceability",
+                "verified": True,
             }
         ],
         "required_next_action": None,
     }
+
+
+def unverified_review(artifact="plan", round_number=1, claim=None):
+    review = valid_review(artifact, round_number, "REVISE")
+    review["evidence"][0]["verified"] = False
+    if claim is not None:
+        review["evidence"][0]["claim"] = claim
+    review["required_next_action"] = "Supply the missing evidence."
+    return review
 
 
 def state_at(stage, mode="standard", project_root=None, goal="Build the quality workflow"):
@@ -208,6 +218,7 @@ class NewStateTests(unittest.TestCase):
                 "reviews",
                 "open_finding_ids",
                 "review_validation_retry",
+                "review_unverified_retry",
                 "plan_approval",
                 "verification",
                 "status_reason",
@@ -242,6 +253,7 @@ class NewStateTests(unittest.TestCase):
             state["open_finding_ids"],
         )
         self.assertIsNone(state["review_validation_retry"])
+        self.assertIsNone(state["review_unverified_retry"])
         self.assertIsNone(state["plan_approval"])
         self.assertEqual(
             {"path": None, "workspace_fingerprint": None, "valid": False},
@@ -1008,6 +1020,349 @@ class RecordReviewTests(unittest.TestCase):
 
             with self.assertRaises(StateError):
                 quality_state.record_review(state_at("PLAN_REVIEW"), review_path, VALID_DIGEST)
+
+
+class RecordReviewUnverifiedTests(unittest.TestCase):
+    def test_unverified_revise_is_accounted_without_consuming_a_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review = valid_review(verdict="REVISE")
+            review["evidence"][0]["verified"] = False
+            review["required_next_action"] = "Supply the missing evidence."
+            review_path = write_json(directory, "review.json", review)
+            state = state_at("PLAN_REVIEW")
+
+            result = quality_state.record_review_unverified(state, review_path, VALID_DIGEST)
+
+            self.assertEqual(0, result["rounds"]["plan"])
+            self.assertEqual({
+                "artifact": "plan", "round": 1, "attempts": 1, "exhausted": False,
+                "artifact_digest": VALID_DIGEST,
+                "unverified_claims": [review["evidence"][0]["claim"]],
+                "discarded_reviews": [str(review_path)],
+            }, result["review_unverified_retry"])
+
+    def test_unverified_retry_is_digest_bound_and_record_review_clears_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unverified = valid_review(verdict="REVISE")
+            unverified["evidence"][0]["verified"] = False
+            unverified["required_next_action"] = "Supply evidence."
+            unverified_path = write_json(directory, "unverified.json", unverified)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, unverified_path, VALID_DIGEST)
+            normal_path = write_json(directory, "normal.json", valid_review())
+
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, normal_path, "b" * 64)
+            result = quality_state.record_review(state, normal_path, VALID_DIGEST)
+            self.assertIsNone(result["review_unverified_retry"])
+
+    def test_rejects_blockers_or_fully_verified_evidence(self):
+        cases = []
+        blocked = unverified_review()
+        blocked["blockers"] = ["PLAN-001"]
+        blocked["findings"] = [high_finding("PLAN-001")]
+        cases.append(("blockers", blocked))
+        verified = unverified_review()
+        verified["evidence"][0]["verified"] = True
+        cases.append(("all verified", verified))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for label, review in cases:
+                with self.subTest(condition=label):
+                    path = write_json(directory, f"{label}.json", review)
+                    with self.assertRaisesRegex(
+                        StateError, "review is not an unverified REVISE",
+                    ):
+                        quality_state.record_review_unverified(
+                            state_at("PLAN_REVIEW"), path, VALID_DIGEST,
+                        )
+
+    def test_rejects_pass_and_blocked_verdicts(self):
+        cases = []
+        passed = unverified_review()
+        passed["verdict"] = "PASS"
+        passed["evidence"][0]["verified"] = True
+        passed["required_next_action"] = None
+        cases.append(("PASS", passed))
+        blocked = unverified_review()
+        blocked["verdict"] = "BLOCKED"
+        cases.append(("BLOCKED", blocked))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for verdict, review in cases:
+                with self.subTest(verdict=verdict):
+                    path = write_json(directory, f"{verdict}.json", review)
+                    with self.assertRaisesRegex(
+                        StateError, "review is not an unverified REVISE",
+                    ):
+                        quality_state.record_review_unverified(
+                            state_at("PLAN_REVIEW"), path, VALID_DIGEST,
+                        )
+
+    def test_rejects_wrong_review_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_json(directory, "review.json", unverified_review())
+
+            with self.assertRaisesRegex(StateError, "requires stage PLAN_REVIEW"):
+                quality_state.record_review_unverified(
+                    state_at("IMPLEMENTING"), path, VALID_DIGEST,
+                )
+
+    def test_rejects_non_next_round_before_round_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrong_round = unverified_review(round_number=2)
+            wrong_path = write_json(directory, "wrong-round.json", wrong_round)
+            with self.assertRaisesRegex(StateError, "review round must be 1"):
+                quality_state.record_review_unverified(
+                    state_at("PLAN_REVIEW"), wrong_path, VALID_DIGEST,
+                )
+
+            beyond_limit = unverified_review("spec", round_number=9)
+            beyond_path = write_json(directory, "beyond-limit.json", beyond_limit)
+            with self.assertRaisesRegex(StateError, "review round must be 1"):
+                quality_state.record_review_unverified(
+                    state_at("SPEC_REVIEW"), beyond_path, VALID_DIGEST,
+                )
+
+    def test_schema_invalid_review_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review = unverified_review()
+            del review["evidence"][0]["claim"]
+            path = write_json(directory, "invalid.json", review)
+            state = state_at("PLAN_REVIEW")
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(StateError, "missing required field: claim"):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_registered_spec_digest_mismatch_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            path = write_json(directory, "review.json", unverified_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(StateError, "spec artifact digest mismatch"):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_round_limit_after_matching_round_raises_transition_error_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = quality_state.ROUND_LIMITS["plan"]
+            path = write_json(
+                directory,
+                "limit.json",
+                unverified_review("plan", quality_state.ROUND_LIMITS["plan"] + 1),
+            )
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "review round limit exhausted",
+            ):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_second_unverified_retry_is_exhausted_without_consuming_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = unverified_review(claim="First condition was not verified.")
+            second = unverified_review(claim="Second condition was not verified.")
+            first_path = write_json(directory, "first.json", first)
+            second_path = write_json(directory, "second.json", second)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+
+            result = quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+
+            retry = result["review_unverified_retry"]
+            self.assertEqual(2, retry["attempts"])
+            self.assertTrue(retry["exhausted"])
+            self.assertEqual([str(first_path), str(second_path)], retry["discarded_reviews"])
+            self.assertEqual(
+                [first["evidence"][0]["claim"], second["evidence"][0]["claim"]],
+                retry["unverified_claims"],
+            )
+            self.assertEqual(0, result["rounds"]["plan"])
+
+    def test_third_unverified_retry_raises_persists_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = write_json(directory, "first.json", unverified_review())
+            second_path = write_json(directory, "second.json", unverified_review())
+            third_path = write_json(directory, "third.json", unverified_review())
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+            quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "REVIEWER_UNVERIFIED_PERSISTS",
+            ):
+                quality_state.record_review_unverified(state, third_path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_exhausted_unverified_retry_can_register_report_then_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            first_path = write_json(directory, "first.json", unverified_review("spec"))
+            second_path = write_json(directory, "second.json", unverified_review("spec"))
+            third_path = write_json(directory, "third.json", unverified_review("spec"))
+            report_path = directory / "report.md"
+            report_path.write_text("blocked review report\n", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+            quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "REVIEWER_UNVERIFIED_PERSISTS",
+            ):
+                quality_state.record_review_unverified(state, third_path, VALID_DIGEST)
+
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+            self.assertNotIn(state["stage"], quality_state.TERMINAL_STATES)
+            quality_state.set_artifact(state, "report", report_path)
+            quality_state.transition(
+                state, "BLOCKED", "REVIEWER_UNVERIFIED_PERSISTS:spec",
+            )
+            self.assertEqual("BLOCKED", state["stage"])
+
+    def test_retry_digest_binding_precedes_registered_spec_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            digest = quality_state._file_digest(spec)
+            unverified_path = write_json(
+                directory, "unverified.json", unverified_review("spec"),
+            )
+            normal_path = write_json(directory, "normal.json", valid_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            quality_state.record_review_unverified(state, unverified_path, digest)
+
+            with self.assertRaisesRegex(
+                StateError, "unverified review retry artifact digest mismatch",
+            ):
+                quality_state.record_review(state, normal_path, "b" * 64)
+            self.assertEqual(0, state["rounds"]["spec"])
+
+            second_path = write_json(
+                directory, "second-unverified.json", unverified_review("spec"),
+            )
+            with self.assertRaisesRegex(StateError, "spec artifact digest mismatch"):
+                quality_state.record_review_unverified(state, second_path, "b" * 64)
+
+    def test_retry_digest_binding_rejects_recomputed_revised_spec_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            initial_digest = quality_state._file_digest(spec)
+            unverified_path = write_json(
+                directory, "unverified.json", unverified_review("spec"),
+            )
+            normal_path = write_json(directory, "normal.json", valid_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            quality_state.record_review_unverified(state, unverified_path, initial_digest)
+            spec.write_text("revised spec\n", encoding="utf-8")
+            revised_digest = quality_state._file_digest(spec)
+
+            with self.assertRaisesRegex(
+                StateError, "unverified review retry artifact digest mismatch",
+            ):
+                quality_state.record_review(state, normal_path, revised_digest)
+
+    def test_pass_with_unverified_evidence_does_not_record_a_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_json(directory, "pass.json", valid_review())
+            review = json.loads(path.read_text(encoding="utf-8"))
+            review["evidence"][0]["verified"] = False
+            write_json(directory, "pass.json", review)
+            state = state_at("PLAN_REVIEW")
+
+            with self.assertRaisesRegex(
+                StateError, "PASS reviews must not contain unverified evidence",
+            ):
+                quality_state.record_review(state, path, VALID_DIGEST)
+
+            self.assertEqual(0, state["rounds"]["plan"])
+
+    def test_round_two_unverified_review_assembles_prior_from_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            round_one = valid_review("spec", 1, "REVISE", ["SPEC-A"])
+            round_one["required_next_action"] = "Resolve SPEC-A."
+            first_path = write_json(directory, "round-one.json", round_one)
+            unverified_path = write_json(
+                directory, "round-two.json", unverified_review("spec", 2),
+            )
+            state = state_at("SPEC_REVIEW")
+            quality_state.record_review(state, first_path, VALID_DIGEST)
+
+            result = quality_state.record_review_unverified(
+                state, unverified_path, VALID_DIGEST,
+            )
+
+            self.assertEqual(1, result["rounds"]["spec"])
+            self.assertEqual(["SPEC-A"], result["open_finding_ids"]["spec"])
+
+    def test_parser_rejects_prior_for_record_review_unverified(self):
+        parser = quality_state._build_parser()
+
+        with self.assertRaisesRegex(StateError, "unrecognized arguments: --prior"):
+            parser.parse_args([
+                "record-review-unverified", "--state", "state.json",
+                "--review", "review.json", "--artifact-digest", VALID_DIGEST,
+                "--prior", "prior.json",
+            ])
+
+    def test_stale_unverified_retry_is_replaced_by_the_next_unverified_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            state["rounds"]["spec"] = 1
+            state["review_unverified_retry"] = {
+                "artifact": "spec", "round": 1, "attempts": 2, "exhausted": True,
+                "artifact_digest": "a" * 64, "unverified_claims": ["stale"],
+                "discarded_reviews": ["stale.json"],
+            }
+            path = write_json(
+                directory, "round-two.json", unverified_review("spec", 2),
+            )
+
+            result = quality_state.record_review_unverified(state, path, "b" * 64)
+
+            self.assertEqual(1, result["review_unverified_retry"]["attempts"])
+            self.assertFalse(result["review_unverified_retry"]["exhausted"])
+            self.assertEqual("b" * 64, result["review_unverified_retry"]["artifact_digest"])
+            self.assertEqual(
+                ["The reviewed artifact is traceable to its acceptance criteria."],
+                result["review_unverified_retry"]["unverified_claims"],
+            )
+            self.assertEqual(
+                [str(path)], result["review_unverified_retry"]["discarded_reviews"],
+            )
+
+    def test_stale_unverified_retry_does_not_bind_normal_next_round_and_is_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            state["rounds"]["spec"] = 1
+            state["review_unverified_retry"] = {
+                "artifact": "spec", "round": 1, "attempts": 2, "exhausted": True,
+                "artifact_digest": "a" * 64, "unverified_claims": ["stale"],
+                "discarded_reviews": ["stale.json"],
+            }
+            path = write_json(directory, "round-two.json", valid_review("spec", 2))
+
+            result = quality_state.record_review(state, path, "b" * 64)
+
+            self.assertEqual(2, result["rounds"]["spec"])
+            self.assertIsNone(result["review_unverified_retry"])
 
 
 class RoundLimitTests(unittest.TestCase):

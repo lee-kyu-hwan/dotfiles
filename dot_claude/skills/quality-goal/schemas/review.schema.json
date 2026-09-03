@@ -49,7 +49,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["claim", "location"],
+        "required": ["claim", "location", "verified"],
         "properties": {
           "claim": {
             "type": "string",
@@ -58,6 +58,9 @@
           "location": {
             "type": "string",
             "minLength": 1
+          },
+          "verified": {
+            "type": "boolean"
           }
         }
       }
