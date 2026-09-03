@@ -242,7 +242,8 @@ PR worktree 생성 뒤에는 `git -C "{worktree경로}" rev-parse HEAD`가 `head
 
 기존 창은 이번 호출에서 파생한 이름으로 찾지 않는다. 다음 순서로 탐지한다.
 
-1. `workmux list --json`의 handle 항목에서 `is_open`을 확인한다.
+1. `workmux list --json`의 handle 항목에서 `is_open`을 확인한다. 이 값은 단서이며 최종
+   판정이 아니다(아래 참조).
 2. `workmux.worktree.{handle}.window-session` 저장값으로 세션 후보를 좁힌다.
 3. `workmux.worktree.{handle}.target-window` 저장값으로 창 후보를 좁힌다. 저장값은 실제
    창 이름의 접미사다. `nerdfont` 설정에 따라 글리프와 공백이 앞에 붙을 수 있으므로
@@ -259,14 +260,22 @@ tmux list-panes -a -F '#{session_name}:#{window_index} #{window_id} #{pane_id} #
 경로에 공백이 있으면 위 매칭은 신뢰할 수 없고 pane cwd는 사용자가 `cd`로 바꿀 수 있다.
 
 `window-session` 또는 `target-window`가 없으면 그 단서만 제외하고 나머지와 pane 경로로
-진행한다. 둘 다 없어도 pane 매칭이 정확히 하나면 사용하되 결과에 기록한다. 저장값과
+진행한다. 둘 다 없어도 pane 매칭이 정확히 하나면 사용하되 결과에 기록한다.
+
+`is_open`도 같은 방식으로 다룬다. `is_open`이 거짓이라도 4단계 pane 매칭이 정확히 하나면
+창이 열려 있는 것으로 판정한다. workmux는 `is_open`을 git config의
+`workmux.worktree.{handle}.window-token`과 tmux 창의 `@workmux_token` 대조로 정하므로,
+페인이 다른 handle의 창에 얹혀 있거나 `break-pane`으로 만든 창에 토큰이 없으면 살아 있는
+창도 거짓이 된다. 이때는 메타데이터가 실측과 어긋난 것이므로 그 사실을 보고하고, 사용자
+확인 후 `window-token`·`window-session`·`target-window` 키를 실측대로 복구한다. pane 매칭이
+없을 때만 창이 닫혀 있다고 확정한다. 저장값과
 pane 실측이 다르면 실측을 신뢰하고 차이를 보고한다. 단, `target-window` 앞의 글리프·공백
 접두사 때문에 생기는 차이는 "저장값과 실측이 다르다"에 해당하지 않는다. 그 보고는 저장
 세션이나 창 자체가 어긋났을 때만 한다. `is_open`인데 pane 매칭이 없거나 서로 다른
 `window_id`가 둘 이상이면 추측하지 않는다. 저장된 세션·창 이름 후보를 보여 주고
 확인받으며, 실제 위치를 확정하지 못했으면 `window-session`을 갱신하지 않는다.
 
-- 창이 닫혀 있으면 선택 세션으로 연다.
+- 창이 닫혀 있으면(`is_open`이 거짓이고 pane 매칭도 없으면) 선택 세션으로 연다.
 - 창이 열려 있고 실제 세션이 선택 세션과 같으면 중복 창을 만들지 않고 기존 위치를
   안내한다.
 - 창이 열려 있고 사용자가 세션을 명시하지 않았으면 다른 세션에 있어도 옮기지 않는다.
