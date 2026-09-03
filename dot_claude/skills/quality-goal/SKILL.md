@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 3.0.0
+version: 4.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -253,7 +253,12 @@ Every review round launches a NEW quality-reviewer agent invocation in a
 fresh context; never resume or continue a prior reviewer context. Send only
 these contract inputs: artifact type, round, target artifact path or
 unified diff, the ABSOLUTE rubric path for that artifact, repository evidence
-paths, and prior open finding IDs on rounds >= 2. For code also send the base
+paths, and structured prior findings on rounds >= 2. Build `open_findings` from
+the prior review JSON at `reviews[artifact][*].path`: send each open finding's
+ID, severity, description, evidence location, required resolution, and the
+orchestrator's resolution claim and resolution evidence. Send confirmed
+resolutions as IDs only in `resolved_finding_ids`; do not depend on
+`open_finding_ids`, which preserves blockers only. For code also send the base
 revision, changed-file list, unified diff, and verification JSON path. For a
 code review, pass the CURRENT WORKSPACE FINGERPRINT from
 quality_state.py fingerprint --project-root ... as --artifact-digest; use the
@@ -279,6 +284,17 @@ validate_review.py gate --input <review> --artifact <artifact> --checks
 <checks>. The checks JSON records the orchestrator's own deterministic
 findings, using the gate-check keys annotated in each rubric. Never ask the
 reviewer to waive a failed deterministic command.
+
+For a well-formed unverified REVISE (`verdict == REVISE`, `blockers == []`, and
+any evidence has `verified == false`), call `record-review-unverified` rather
+than `record-review`. It does not consume a round: relaunch on the same round
+with evidence paths for each unverified condition and the discarded review's
+full non-blocking findings. On round 2+, include those findings in prior
+`open_findings`. Do not revise the artifact or workspace during this retry.
+At most two discarded reviews are allowed (one free retry); after `exhausted`,
+register the report then transition to BLOCKED with
+`REVIEWER_UNVERIFIED_PERSISTS`. Record that outcome as a reviewer capability
+limit, not a code or design failure.
 
 On validation failure, call quality_state.py record-review-error and retry
 once, sending only the validation errors added to the same contract inputs.

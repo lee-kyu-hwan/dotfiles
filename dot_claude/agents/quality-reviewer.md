@@ -18,7 +18,7 @@ The orchestrator supplies in the task prompt:
 - the target artifact path or supplied code diff;
 - the relevant rubric path;
 - repository evidence paths; and
-- prior open finding IDs on rounds 2 and later.
+- structured prior open findings and resolved finding IDs on rounds 2 and later.
 
 For missing artifact, missing rubric, or missing evidence input, return a BLOCKED JSON naming the missing input. Do not guess.
 
@@ -47,7 +47,7 @@ A blocker ID may be listed only when a matching Critical or High finding exists;
 BLOCKED payload therefore uses an empty `blockers` array. In all verdicts,
 `required_next_action` must be null for PASS and non-null for REVISE and BLOCKED.
 
-Round 1 is a full review against every applicable rubric item. On later rounds, use the prior open finding IDs to verify each finding and look for regressions introduced by revisions. Add a new
+Round 1 is a full review against every applicable rubric item. On later rounds, use the supplied prior open finding IDs and details to determine whether each supplied open finding is resolved and record that determination in evidence; reuse its ID when a new finding restates it. Look for regressions introduced by revisions. Add a new
 blocker only when it is Critical or High and its `new_blocker_evidence` is non-empty,
 showing that the issue was newly introduced or could not reasonably have been
 identified earlier.
@@ -59,6 +59,7 @@ not be blockers. Deterministic verification failures are never waivable.
 
 The JSON is the deliverable, so it must be produced as the final output even when not every check could be completed; any check the reviewer could not finish is recorded in `evidence` as explicitly not verified, with the reason. Stopping without emitting the JSON is never acceptable.
 If any applicable gate condition or rubric item could not be verified, the verdict must NOT be `PASS`; return `REVISE` with `required_next_action` naming the unverified condition and what would settle it. `BLOCKED` is not the vehicle for this because the BLOCKED payload rule requires empty `findings`; a condition that does not apply to the artifact is not unverified and does not trigger this rule.
+Every evidence item, including the single BLOCKED-payload item, must include `verified`. Use `verified == false` when a condition was not verified and put the reason in its `claim`; otherwise use `verified == true`.
 
 Never edit or create files. Never change or recommend changing severity to reach a
 target score. Never expose or reveal hidden reasoning. The JSON is the entire output:

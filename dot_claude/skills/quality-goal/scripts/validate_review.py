@@ -45,7 +45,16 @@ FINDING_FIELDS = (
     "required_resolution",
     "new_blocker_evidence",
 )
-EVIDENCE_FIELDS = ("claim", "location")
+EVIDENCE_FIELDS = ("claim", "location", "verified")
+EVIDENCE_STRING_FIELDS = ("claim", "location")
+PRIOR_FIELDS = ("open_finding_ids", "open_findings", "resolved_finding_ids")
+OPEN_FINDING_FIELDS = (
+    "id", "severity", "description", "evidence_location",
+    "required_resolution", "resolution_claim", "resolution_evidence",
+)
+OPEN_FINDING_STRING_FIELDS = (
+    "id", "severity", "description", "evidence_location", "required_resolution",
+)
 
 
 def _is_integer(value):
@@ -76,6 +85,8 @@ def _prior_open_finding_ids(prior, errors):
     if "open_finding_ids" not in prior:
         errors.append("prior is missing required field: open_finding_ids")
         return []
+    for key in _unknown_keys(prior, set(PRIOR_FIELDS)):
+        errors.append(f"prior has unknown field: {_format_key(key)}")
 
     open_ids = prior["open_finding_ids"]
     if not isinstance(open_ids, list):
@@ -83,6 +94,7 @@ def _prior_open_finding_ids(prior, errors):
         return []
 
     valid_ids = []
+    seen_ids = set()
     for index, finding_id in enumerate(open_ids):
         if not isinstance(finding_id, str):
             errors.append(
@@ -90,6 +102,58 @@ def _prior_open_finding_ids(prior, errors):
             )
         else:
             valid_ids.append(finding_id)
+            if finding_id in seen_ids:
+                errors.append(f"duplicate prior.open_finding_ids entry: {finding_id!r}")
+            seen_ids.add(finding_id)
+
+    open_findings = prior.get("open_findings")
+    if open_findings is not None:
+        if not isinstance(open_findings, list):
+            errors.append("prior.open_findings must be a list")
+        else:
+            finding_ids = set()
+            for index, finding in enumerate(open_findings):
+                prefix = f"prior.open_findings[{index}]"
+                if not isinstance(finding, dict):
+                    errors.append(f"{prefix} must be a dict")
+                    continue
+                for field in OPEN_FINDING_FIELDS:
+                    if field not in finding:
+                        errors.append(f"{prefix} missing required field: {field}")
+                for key in _unknown_keys(finding, set(OPEN_FINDING_FIELDS)):
+                    errors.append(f"{prefix} has unknown field: {_format_key(key)}")
+                for field in OPEN_FINDING_STRING_FIELDS:
+                    if field in finding and not _is_non_empty_string(finding[field]):
+                        errors.append(f"{prefix}.{field} must be a non-empty string")
+                if "severity" in finding and finding["severity"] not in SEVERITIES:
+                    errors.append(f"{prefix}.severity must be one of: Critical, High, Low, Medium")
+                for field in ("resolution_claim", "resolution_evidence"):
+                    if field in finding and finding[field] is not None and not isinstance(finding[field], str):
+                        errors.append(f"{prefix}.{field} must be a string or null")
+                finding_id = finding.get("id")
+                if isinstance(finding_id, str):
+                    if finding_id in finding_ids:
+                        errors.append(f"duplicate prior open finding ID: {finding_id!r}")
+                    finding_ids.add(finding_id)
+            for finding_id in valid_ids:
+                if finding_id not in finding_ids:
+                    errors.append(f"prior.open_finding_ids entry missing from open_findings: {finding_id!r}")
+
+    resolved_ids = prior.get("resolved_finding_ids")
+    if resolved_ids is not None:
+        if not isinstance(resolved_ids, list):
+            errors.append("prior.resolved_finding_ids must be a list")
+        else:
+            seen_resolved = set()
+            for index, finding_id in enumerate(resolved_ids):
+                if not isinstance(finding_id, str):
+                    errors.append(f"prior.resolved_finding_ids[{index}] must be a string")
+                    continue
+                if finding_id in seen_resolved:
+                    errors.append(f"duplicate prior.resolved_finding_ids entry: {finding_id!r}")
+                seen_resolved.add(finding_id)
+                if finding_id in valid_ids:
+                    errors.append(f"prior resolved finding overlaps open finding: {finding_id!r}")
     return valid_ids
 
 
@@ -248,11 +312,13 @@ def validate_review(payload, expected_artifact=None, prior=None):
             for key in _unknown_keys(item, set(EVIDENCE_FIELDS)):
                 errors.append(f"{prefix} has unknown field: {_format_key(key)}")
 
-            for field in EVIDENCE_FIELDS:
+            for field in EVIDENCE_STRING_FIELDS:
                 if field in item and not _is_non_empty_string(item[field]):
                     errors.append(
                         f"{prefix}.{field} must be a non-empty string"
                     )
+            if "verified" in item and not isinstance(item["verified"], bool):
+                errors.append(f"{prefix}.verified must be a boolean")
 
             if item in seen_evidence:
                 errors.append(f"duplicate evidence entry at {prefix}")
@@ -266,6 +332,10 @@ def validate_review(payload, expected_artifact=None, prior=None):
     if verdict == "PASS":
         if "required_next_action" in payload and required_next_action is not None:
             errors.append("PASS reviews must have no required_next_action")
+        if evidence_valid and any(
+            item.get("verified") is False for item in evidence if isinstance(item, dict)
+        ):
+            errors.append("PASS reviews must not contain unverified evidence")
 
     if round_valid and review_round >= 2:
         if prior is None:

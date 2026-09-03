@@ -608,13 +608,23 @@ def parse_yaml_frontmatter(text):
     return values, "\n".join(lines[fences[1] + 1 :])
 
 
+QUALITY_REVIEWER_AGENT_PATH = (
+    find_repo_root(Path(__file__).resolve())
+    / "dot_claude" / "agents" / "quality-reviewer.md"
+)
+
+
+def read_quality_reviewer_agent():
+    if not QUALITY_REVIEWER_AGENT_PATH.is_file():
+        raise AssertionError(f"missing agent file: {QUALITY_REVIEWER_AGENT_PATH}")
+    return QUALITY_REVIEWER_AGENT_PATH.read_text(encoding="utf-8")
+
+
 class QualityReviewerAgentContentTests(unittest.TestCase):
-    REPO_ROOT = find_repo_root(Path(__file__).resolve())
-    AGENT_PATH = REPO_ROOT / "dot_claude" / "agents" / "quality-reviewer.md"
+    AGENT_PATH = QUALITY_REVIEWER_AGENT_PATH
 
     def read_agent(self):
-        self.assertTrue(self.AGENT_PATH.is_file(), f"missing agent file: {self.AGENT_PATH}")
-        return self.AGENT_PATH.read_text(encoding="utf-8")
+        return read_quality_reviewer_agent()
 
     def test_frontmatter_contract(self):
         frontmatter, _ = parse_yaml_frontmatter(self.read_agent())
@@ -721,6 +731,61 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         )
         return self.SKILL_PATH.read_text(encoding="utf-8")
 
+    def test_structured_prior_and_unverified_retry_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        lower = body.casefold()
+        self.assertRegex(
+            lower,
+            r"build `open_findings` from\s+the prior review json at "
+            r"`reviews\[artifact\]\[\*\]\.path`",
+        )
+        self.assertRegex(
+            lower,
+            r"send each open finding's\s+id, severity, description, evidence location,\s+"
+            r"required resolution, and the\s+orchestrator's resolution claim and resolution evidence",
+        )
+        self.assertRegex(
+            lower,
+            r"send confirmed\s+resolutions as ids only in `resolved_finding_ids`",
+        )
+        self.assertRegex(
+            lower,
+            r"well-formed unverified revise \(`verdict == revise`, `blockers == \[\]`, and\s+"
+            r"any evidence has `verified == false`\)[\s\S]{0,220}does not consume a round: "
+            r"relaunch on the same round",
+        )
+        self.assertRegex(
+            lower,
+            r"at most two discarded reviews are allowed \(one free retry\); after `exhausted`,\s+"
+            r"register the report then transition to blocked with\s+`reviewer_unverified_persists`",
+        )
+        self.assertRegex(
+            lower,
+            r"record that outcome as a reviewer capability\s+limit, not a code or design failure",
+        )
+        self.assertRegex(
+            lower,
+            r"evidence paths for each unverified condition and the discarded review's\s+"
+            r"full non-blocking findings\. on round 2\+, include those findings in prior\s+"
+            r"`open_findings`",
+        )
+        self.assertRegex(lower, r"do not revise the artifact or workspace during this retry")
+
+    def test_reviewer_records_verified_evidence_and_reuses_prior_ids(self):
+        _, body = parse_yaml_frontmatter(read_quality_reviewer_agent())
+        lower = body.casefold()
+        self.assertRegex(
+            lower,
+            r"on later rounds.{0,260}each supplied open finding is resolved and "
+            r"record that determination in evidence; reuse its id when a new finding restates it",
+        )
+        self.assertRegex(
+            lower,
+            r"every evidence item, including the single blocked-payload item, must include "
+            r"`verified`\. use `verified == false` when a condition was not verified and put "
+            r"the reason in its `claim`",
+        )
+
     @staticmethod
     def normalize(text):
         return " ".join(text.casefold().split())
@@ -729,7 +794,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "3.0.0",
+            "version": "4.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",

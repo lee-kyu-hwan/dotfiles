@@ -205,6 +205,7 @@ def new_state(
         "reviews": {"spec": [], "plan": [], "code": []},
         "open_finding_ids": {"spec": [], "plan": [], "code": []},
         "review_validation_retry": None,
+        "review_unverified_retry": None,
         "plan_approval": None,
         "verification": {
             "path": None,
@@ -577,6 +578,16 @@ def record_review(state, review_path, artifact_digest):
             f"got {state.get('stage')}"
         )
 
+    rounds = state.get("rounds")
+    if not isinstance(rounds, dict) or not isinstance(rounds.get(artifact), int):
+        raise StateError(f"state rounds missing {artifact}")
+    expected_round = rounds[artifact] + 1
+
+    retry = state.get("review_unverified_retry")
+    if isinstance(retry, dict) and retry.get("artifact") == artifact and retry.get("round") == expected_round:
+        if retry.get("artifact_digest") != artifact_digest:
+            raise StateError("unverified review retry artifact digest mismatch")
+
     if artifact in {"spec", "plan"}:
         artifacts = state.get("artifacts")
         if not isinstance(artifacts, dict):
@@ -585,10 +596,6 @@ def record_review(state, review_path, artifact_digest):
         if artifact_path is not None and _file_digest(artifact_path) != artifact_digest:
             raise StateError(f"{artifact} artifact digest mismatch")
 
-    rounds = state.get("rounds")
-    if not isinstance(rounds, dict) or not isinstance(rounds.get(artifact), int):
-        raise StateError(f"state rounds missing {artifact}")
-    expected_round = rounds[artifact] + 1
     if review.get("round") != expected_round:
         raise StateError(
             f"review round must be {expected_round}, got {review.get('round')!r}"
@@ -649,6 +656,7 @@ def record_review(state, review_path, artifact_digest):
     open_finding_ids[artifact] = list(blockers)
     artifact_digests[artifact] = artifact_digest
     state["review_validation_retry"] = None
+    state["review_unverified_retry"] = None
     state["updated_at"] = _now_timestamp()
 
     recurring = next((blocker for blocker in blockers if blocker in earlier_blockers), None)
@@ -660,6 +668,70 @@ def record_review(state, review_path, artifact_digest):
     ):
         state["stage"] = "NEEDS_REDESIGN"
         state["status_reason"] = f"REVIEW_LIMIT_EXHAUSTED:{artifact}"
+    return state
+
+
+def record_review_unverified(state, review_path, artifact_digest):
+    """Record a bounded no-round-cost retry for unverified REVISE evidence."""
+    state = _require_state(state)
+    if not isinstance(artifact_digest, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_digest) is None:
+        raise StateError("artifact_digest must be a lowercase SHA-256 hexdigest")
+    review = _load_review(review_path)
+    artifact = review.get("artifact")
+    expected_stage = _REVIEW_STAGES.get(artifact) if isinstance(artifact, str) else None
+    if expected_stage is None:
+        raise StateError(f"unknown review artifact: {artifact!r}")
+    if state.get("stage") != expected_stage:
+        raise StateError(f"review for {artifact} requires stage {expected_stage}, got {state.get('stage')}")
+    if artifact in {"spec", "plan"}:
+        artifacts = state.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise StateError("state artifacts storage is malformed")
+        artifact_path = artifacts.get(artifact)
+        if artifact_path is not None and _file_digest(artifact_path) != artifact_digest:
+            raise StateError(f"{artifact} artifact digest mismatch")
+    rounds = state.get("rounds")
+    if not isinstance(rounds, dict) or not isinstance(rounds.get(artifact), int):
+        raise StateError(f"state rounds missing {artifact}")
+    expected_round = rounds[artifact] + 1
+    if review.get("round") != expected_round:
+        raise StateError(f"review round must be {expected_round}, got {review.get('round')!r}")
+    if expected_round > ROUND_LIMITS[artifact]:
+        raise TransitionError(f"review round limit exhausted for {artifact}")
+    prior = None
+    if expected_round >= 2:
+        open_finding_ids = state.get("open_finding_ids")
+        if not isinstance(open_finding_ids, dict) or not isinstance(open_finding_ids.get(artifact), list):
+            raise StateError(f"state open_finding_ids missing {artifact}")
+        prior = {"open_finding_ids": list(open_finding_ids[artifact])}
+    validation_errors = validate_review(review, expected_artifact=artifact, prior=prior)
+    if validation_errors:
+        raise StateError(f"review validation failed: {'; '.join(str(error) for error in validation_errors)}")
+    if not (review["verdict"] == "REVISE" and not review["blockers"] and any(item.get("verified") is False for item in review["evidence"])):
+        raise StateError("review is not an unverified REVISE")
+    retry = state.get("review_unverified_retry")
+    if isinstance(retry, dict) and retry.get("artifact") == artifact and retry.get("round") == expected_round:
+        if retry.get("artifact_digest") != artifact_digest:
+            raise StateError("unverified review retry artifact digest mismatch")
+        if retry.get("attempts") == 2:
+            raise TransitionError("REVIEWER_UNVERIFIED_PERSISTS")
+        attempts = 2
+        exhausted = True
+        claims = list(retry.get("unverified_claims", []))
+        paths = list(retry.get("discarded_reviews", []))
+    else:
+        attempts = 1
+        exhausted = False
+        claims = []
+        paths = []
+    claims.extend(item["claim"] for item in review["evidence"] if item.get("verified") is False)
+    paths.append(str(review_path))
+    state["review_unverified_retry"] = {
+        "artifact": artifact, "round": expected_round, "attempts": attempts,
+        "exhausted": exhausted, "artifact_digest": artifact_digest,
+        "unverified_claims": claims, "discarded_reviews": paths,
+    }
+    state["updated_at"] = _now_timestamp()
     return state
 
 
@@ -1088,6 +1160,11 @@ def _build_parser():
     review_parser.add_argument("--review", required=True)
     review_parser.add_argument("--artifact-digest", required=True)
 
+    unverified_review_parser = subparsers.add_parser("record-review-unverified")
+    unverified_review_parser.add_argument("--state", required=True)
+    unverified_review_parser.add_argument("--review", required=True)
+    unverified_review_parser.add_argument("--artifact-digest", required=True)
+
     review_error_parser = subparsers.add_parser("record-review-error")
     review_error_parser.add_argument("--state", required=True)
     review_error_parser.add_argument("--artifact", required=True)
@@ -1204,6 +1281,13 @@ def main(argv=None):
                     state,
                     args.review,
                     args.artifact_digest,
+                ),
+            )
+        elif args.command == "record-review-unverified":
+            _mutating_result(
+                args.state,
+                lambda state: record_review_unverified(
+                    state, args.review, args.artifact_digest,
                 ),
             )
         elif args.command == "record-review-error":
