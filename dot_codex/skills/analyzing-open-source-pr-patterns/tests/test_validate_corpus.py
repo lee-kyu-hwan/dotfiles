@@ -1,12 +1,12 @@
 import json
+from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
 
-SCRIPT = (
-    "dot_codex/skills/analyzing-open-source-pr-patterns/scripts/validate_corpus.py"
-)
+SKILL_DIR = Path(__file__).resolve().parents[1]
+SCRIPT = SKILL_DIR / "scripts" / "validate_corpus.py"
 
 
 def resolved_record(pr_id="PR-001", node_id="node-001", source_key="source-a"):

@@ -2,7 +2,7 @@
 
 ## Input and validation
 
-Accept only a normalized corpus envelope with `schema_version: "1.0.0"` and `records`. Before analysis, run `python3 scripts/validate_corpus.py CURRENT [--existing PREVIOUS_CORPUS]`. `--existing` accepts only a previous normalized corpus for append-only comparison. Read optional existing enriched PR and PAT outputs separately to preserve IDs and histories; they are not `PREVIOUS_CORPUS` unless an enriched PR corpus independently satisfies the normalized-corpus contract.
+Accept only a normalized corpus envelope with `schema_version: "1.0.0"` and `records`. Before analysis, resolve `SKILL_DIR` to the absolute directory containing `SKILL.md`, then run `python3 "$SKILL_DIR/scripts/validate_corpus.py" CURRENT [--existing PREVIOUS_CORPUS]`. `--existing` accepts only a previous normalized corpus for append-only comparison. Read optional existing enriched PR and PAT outputs separately to preserve IDs and histories; they are not `PREVIOUS_CORPUS` unless an enriched PR corpus independently satisfies the normalized-corpus contract.
 
 An unsupported schema version stops analysis and requires an explicit versioned migration with stated input/output versions and conversion rules. An invalid `1.0.0` corpus stops analysis and requires corrected input. A failed append-only or preservation comparison stops analysis until the conflict is resolved. Never automatically retry, silently repair, downgrade, or reinterpret any of these cases.
 
