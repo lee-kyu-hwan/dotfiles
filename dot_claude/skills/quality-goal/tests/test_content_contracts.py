@@ -794,7 +794,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "4.0.0",
+            "version": "4.1.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -1303,6 +1303,40 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             r"\(absolute\s+path\)\s+before\s+transitioning\s+into\s+"
             r"(?:completed|blocked|needs_redesign|cancelled)",
         )
+
+    def test_terminal_report_registration_ordering_contract(self):
+        _, body = parse_yaml_frontmatter(self.read_skill())
+        terminal_start = body.index("### Terminal")
+        terminal_end = body.index("\n## ", terminal_start)
+        terminal = self.normalize(body[terminal_start:terminal_end])
+        d1 = self.normalize(
+            "When the review you are about to record is expected to end the workflow, "
+            "because it is the last allowed round without a PASS or it repeats a blocking "
+            "finding ID from an earlier round, render report.md and register it with "
+            "set-artifact --kind report before calling record-review, while the stage is "
+            "still non-terminal."
+        )
+        d2 = self.normalize(
+            "Because record-review and record-review-error transition into NEEDS_REDESIGN "
+            "or BLOCKED on their own, set-artifact --kind report is also accepted after the "
+            "state is already terminal; register the report there when the terminal transition "
+            "has already happened. No other artifact kind may be registered once the state is "
+            "terminal."
+        )
+        d3 = self.normalize(
+            "When a helper has already transitioned automatically, register the report in "
+            "the terminal state as the Terminal section describes."
+        )
+        terminal_rows = [
+            line
+            for line in body.splitlines()
+            if line.startswith("| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED |")
+        ]
+
+        self.assertIn(d1, terminal)
+        self.assertIn(d2, terminal)
+        self.assertEqual(1, len(terminal_rows))
+        self.assertIn(d3, self.normalize(terminal_rows[0]))
 
     def test_post_codex_independent_verification_contract(self):
         _, body = parse_yaml_frontmatter(self.read_skill())

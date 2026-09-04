@@ -287,8 +287,16 @@ def classify(state, mode, reasons):
 
 
 def set_artifact(state, kind, path):
-    """Bind an existing regular file to one of the workflow artifacts."""
-    state = _require_active(state)
+    """Bind an existing regular file to one of the workflow artifacts.
+
+    A terminal state remains immutable for every artifact kind except report,
+    because record_review and record_review_validation_failure transition into
+    NEEDS_REDESIGN or BLOCKED by themselves and the report pointer must remain
+    registrable afterwards.
+    """
+    state = _require_state(state)
+    if kind != "report":
+        _require_active(state)
     if not isinstance(kind, str) or kind not in _ARTIFACT_KEYS:
         raise StateError(f"invalid artifact kind: {kind!r}")
     if (

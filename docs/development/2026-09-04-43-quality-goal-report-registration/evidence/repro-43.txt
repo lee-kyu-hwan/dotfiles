@@ -1,0 +1,95 @@
+# #43 실측 재현 (2026-09-04, base 4fd0899fdc8efa32f78f9346eac5d730b0547ac6)
+## 재현 스크립트
+```python
+"""#43 실측 재현: record-review 자동 터미널 전이 → set-artifact 거부."""
+import json, subprocess, sys, tempfile, hashlib
+from pathlib import Path
+
+SKILL = Path("/Users/lee-kyu-hwan/code/dotfiles__worktrees/43-fix-quality-goal-report-registration/dot_claude/skills/quality-goal")
+QS = SKILL / "scripts" / "quality_state.py"
+
+def run(*args, check=True):
+    r = subprocess.run([sys.executable, str(QS), *map(str, args)], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise SystemExit(f"FAILED {args}\n{r.stderr}")
+    return r
+
+def git(root, *a):
+    subprocess.run(["git", "-C", str(root), *a], check=True, capture_output=True)
+
+def review(artifact, rnd, verdict, blockers, findings):
+    return {"artifact": artifact, "round": rnd, "score": 70 if verdict != "PASS" else 92,
+            "verdict": verdict, "blockers": blockers, "findings": findings,
+            "evidence": [{"claim": "checked", "location": "spec.md#L1", "verified": True}],
+            "required_next_action": "revise"}
+
+def finding(fid, new_blocker=None):
+    return {"id": fid, "severity": "High", "description": "material gap in the spec",
+            "evidence_location": "spec.md#Scope", "rubric_item": "Requirement clarity",
+            "required_resolution": "state the requirement concretely",
+            "new_blocker_evidence": new_blocker}
+
+def scenario(name, rounds):
+    tmp = Path(tempfile.mkdtemp())
+    root = tmp / "repo"; root.mkdir()
+    git(root, "init"); git(root, "config", "user.name", "t"); git(root, "config", "user.email", "t@t.invalid")
+    (root / "app.txt").write_text("x\n"); git(root, "add", "app.txt"); git(root, "commit", "-m", "base")
+    sroot = root / ".claude" / "quality-state"
+    out = run("init", "--root", sroot, "--goal", f"repro {name}", "--requested-mode", "standard",
+              "--project-root", root, "--artifact-dir", root / "docs")
+    st = json.loads(out.stdout)
+    state = sroot / st["task_id"] / "state.json"
+    reasons = tmp / "reasons.json"; reasons.write_text(json.dumps(["standard"]))
+    run("classify", "--state", state, "--mode", "standard", "--reasons", reasons)
+    run("capture-baseline", "--state", state)
+    spec = root / "docs" / "spec.md"; spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text("# spec\n")
+    run("set-artifact", "--state", state, "--kind", "spec", "--path", spec)
+    run("transition", "--state", state, "--to", "SPEC_REVIEW")
+    digest = hashlib.sha256(spec.read_bytes()).hexdigest()
+    for i, (verdict, blockers, fs) in enumerate(rounds, start=1):
+        rp = tmp / f"review{i}.json"
+        rp.write_text(json.dumps(review("spec", i, verdict, blockers, fs)))
+        r = run("record-review", "--state", state, "--review", rp, "--artifact-digest", digest, check=False)
+        print(f"  round {i}: exit={r.returncode} {r.stderr.strip()[:80]}")
+    cur = json.loads(state.read_text())
+    print(f"  stage={cur['stage']} status_reason={cur['status_reason']} artifacts.report={cur['artifacts']['report']}")
+    report = root / "docs" / "report.md"; report.write_text("# report\n")
+    r = run("set-artifact", "--state", state, "--kind", "report", "--path", report, check=False)
+    print(f"  set-artifact --kind report: exit={r.returncode} stderr={r.stderr.strip()}")
+    cur = json.loads(state.read_text())
+    print(f"  FINAL artifacts.report={cur['artifacts']['report']}")
+    # 한도 소진 후 다음 라운드 시도가 거부되는지
+    rp = tmp / "review_extra.json"
+    rp.write_text(json.dumps(review("spec", len(rounds)+1, "REVISE", ["SPEC-X"], [finding("SPEC-X")])))
+    r = run("record-review", "--state", state, "--review", rp, "--artifact-digest", digest, check=False)
+    print(f"  extra round attempt: exit={r.returncode} stderr={r.stderr.strip()[:90]}")
+
+print("A) REVIEW_LIMIT_EXHAUSTED (spec 3라운드, 매 라운드 다른 blocker)")
+scenario("limit", [("REVISE", ["SPEC-A"], [finding("SPEC-A")]),
+                   ("REVISE", ["SPEC-B"], [finding("SPEC-B", "newly introduced by the round 1 revision")]),
+                   ("REVISE", ["SPEC-C"], [finding("SPEC-C", "newly introduced by the round 2 revision")])])
+print()
+print("B) RECURRING_BLOCKING_FINDING (spec 2라운드, 같은 blocker 반복)")
+scenario("recur", [("REVISE", ["SPEC-A"], [finding("SPEC-A")]),
+                   ("REVISE", ["SPEC-A"], [finding("SPEC-A")])])
+```
+## 실행 출력
+```
+A) REVIEW_LIMIT_EXHAUSTED (spec 3라운드, 매 라운드 다른 blocker)
+  round 1: exit=0 
+  round 2: exit=0 
+  round 3: exit=0 
+  stage=NEEDS_REDESIGN status_reason=REVIEW_LIMIT_EXHAUSTED:spec artifacts.report=None
+  set-artifact --kind report: exit=3 stderr=error: terminal state is immutable: NEEDS_REDESIGN
+  FINAL artifacts.report=None
+  extra round attempt: exit=2 stderr=error: review for spec requires stage SPEC_REVIEW, got NEEDS_REDESIGN
+
+B) RECURRING_BLOCKING_FINDING (spec 2라운드, 같은 blocker 반복)
+  round 1: exit=0 
+  round 2: exit=0 
+  stage=NEEDS_REDESIGN status_reason=RECURRING_BLOCKING_FINDING:SPEC-A artifacts.report=None
+  set-artifact --kind report: exit=3 stderr=error: terminal state is immutable: NEEDS_REDESIGN
+  FINAL artifacts.report=None
+  extra round attempt: exit=2 stderr=error: review for spec requires stage SPEC_REVIEW, got NEEDS_REDESIGN
+```
