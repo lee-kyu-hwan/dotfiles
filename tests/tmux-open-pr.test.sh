@@ -223,6 +223,40 @@ gone "helper TERM: 감시자 sleep 정리됨"  "${wd_sleep:-}"
 is   "helper TERM: 임시 파일 잔존 없음"  "0" "$(leftovers)"
 
 echo
+echo "== [a] 표식 파일에 기대지 않고 시간 초과를 시간 초과로 보고하는가 =="
+# 예전 구현은 감시자가 `: > <err_file>.timeout` 으로 시간 초과를 알렸다. 그 쓰기가 실패하면
+# TERM 은 그대로 나가 gh 가 143 으로 죽는데 본문은 표식을 못 보고, 빈 err_file 을 읽어
+# "gh 가 사유를 남기지 않았습니다" 로 **엉뚱하게** 보고했다. 그 경로를 그대로 재현한다:
+# err_file 이 생기는 것을 지켜보다가 파생 경로를 **디렉터리로 선점**해 쓰기를 EISDIR 로 만든다.
+# 지금 구현은 표식을 쓰지 않고 감시자의 종료코드로 알리므로 이 선점이 아무 영향이 없어야 한다.
+reset_stub; export TMUX_OPEN_PR_GH="$gh_stubborn"
+(
+  for _ in $(seq 1 200); do
+    for f in "$work"/tmux-open-pr.*; do
+      case "$f" in *.timeout) continue ;; esac
+      [ -f "$f" ] || continue
+      mkdir -p "$f.timeout" 2>/dev/null
+      exit 0
+    done
+    sleep 0.05
+  done
+) &
+squatter=$!
+run_helper
+wait "$squatter" 2>/dev/null
+if grep -q '안에 끝나지 않아' "$work/messages" 2>/dev/null; then
+  ok "표식 경로 선점: 그래도 시간 초과로 보고한다"
+else
+  no "표식 경로 선점: 오보 — $(cat "$work/messages" 2>/dev/null)"
+fi
+if grep -q '사유를 남기지 않았습니다' "$work/messages" 2>/dev/null; then
+  no "표식 경로 선점: '사유를 남기지 않았습니다' 로 잘못 보고했다 (회귀)"
+else
+  ok "표식 경로 선점: 'gh 가 사유를 남기지 않았습니다' 오보가 없다"
+fi
+rm -rf "$work"/tmux-open-pr.*.timeout   # 선점용 디렉터리는 helper 가 지우지 않는다
+
+echo
 echo "== 격리 tmux 서버에서 view-mode 규약 확인 (기본 소켓은 건드리지 않는다) =="
 sock="tmux-open-pr-test-$$"
 T() { command tmux -L "$sock" "$@"; }
