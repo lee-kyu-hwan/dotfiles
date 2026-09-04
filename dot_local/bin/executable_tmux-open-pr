@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# 현재 패인의 Git 브랜치에 연결된 PR을 기본 브라우저에서 연다 (tmux prefix + P).
+#
+#   tmux-open-pr <pane-id> [client-tty]
+#
+# 대상 패인과 호출 클라이언트를 **둘 다 인자로 받는다**. tmux 는 run-shell 의 명령
+# 문자열을 실행 직전에 FORMATS 로 확장하고, 키 바인딩에서는 그 기준이 키를 누른
+# 패인·클라이언트라 `#{pane_id}` 와 `#{client_tty}` 가 정확히 그 시점으로 굳는다.
+# 자식이 알아서 알아낼 수는 없다 — tmux 는 run-shell 자식에게 TMUX 는 주지만
+# TMUX_PANE 은 주지 않는다(실측: 실제 attach 클라이언트로 키를 눌러도 빈 문자열).
+#
+# 왜 굳혀야 하는가. gh 는 네트워크 왕복을 하므로 키를 누른 뒤 메시지가 뜨기까지
+# 0.5~2초가 빈다. 그 사이 창이나 클라이언트가 바뀌면 대상이 흔들린다(전부 실측):
+#   - `display-message` 에 -c 가 없으면 그 세션의 **가장 최근 클라이언트**로 간다.
+#     3초 지연 뒤 메시지를 보내며 그 사이 다른 클라이언트를 건드리면 메시지가
+#     그쪽 터미널에 떴다. -c 를 주면 누른 쪽에 정확히 떴다.
+#   - `run-shell -b` 는 실패 시 view-mode 로 패인을 덮친다. 바인딩이 `-t ':'` 로 대상을
+#     못 박는다 — `-t` 는 **포맷을 확장하지 않아** `#{pane_id}` 로는 타깃이 잡히지 않고,
+#     그러면 run-shell 이 저장해 둔 패인이 없어 완료 시점의 현재 패인으로 흘러간다
+#     (실측: 지연 중 창을 바꾸자 옮겨간 창이 덮였다). 리터럴 `:` 는 시작 시점에
+#     현재 창의 활성 패인으로 해석돼 그대로 고정된다(실측: 창을 바꿔도 누른 창이 덮였다).
+#
+# 경로 대신 패인 ID 를 넘기는 이유: `#{pane_id}` 는 `%12` 꼴이라 공백도 따옴표도 없다.
+# `#{pane_current_path}` 를 넘기면 작은따옴표가 든 경로에서 명령 문자열이 깨진다.
+#
+# 종료코드와 출력 규약이 중요하다. `run-shell -b` 는 자식이 **출력을 내거나 0 이 아닌
+# 코드로 끝나면** 대상 패인을 view-mode 로 전환한다(실측: 출력 없이 exit 1 → 전환,
+# 출력 있고 exit 0 → 전환, 출력 없이 exit 0 → 전환 없음). PR 이 없는 것처럼 흔하고
+# 예상 가능한 실패까지 화면을 뺏는 것은 과하므로, 상태바로 알리는 데 성공하면 출력
+# 없이 exit 0 으로 끝낸다. 키를 누른 클라이언트가 사라져 상태바로 알릴 수 없을 때만
+# 사유를 stdout 으로 내보내고 비정상 종료해, view-mode 에 사유를 남긴다.
+set -u
+
+pane_id=${1:-}
+client_tty=${2:-}
+
+# 이름을 붙여 둔 이유는 테스트에서 갈아끼우기 위해서다 (tests/tmux-open-pr.test.sh 가
+# 가짜 gh 와 짧은 상한으로 시간 초과·신호 경로를 재현한다). 평소에는 손댈 필요가 없다.
+GH_BIN=${TMUX_OPEN_PR_GH:-gh}
+GH_TIMEOUT=${TMUX_OPEN_PR_TIMEOUT:-20}
+GH_KILL_GRACE=${TMUX_OPEN_PR_KILL_GRACE:-2}
+
+# 정리 함수가 참조하므로 트랩보다 먼저 비워 둔다 (set -u).
+gh_pid=
+watchdog_pid=
+err_file=
+cleanup_done=
+killed_by_signal=
+
+# 상태바 알림. 성공하면 브라우저가 뜨는 것이 곧 피드백이라 아무것도 띄우지 않고,
+# 실패 사유만 여기로 보낸다. 상대는 **키를 누른 그 클라이언트 하나뿐이다.**
+#
+# 그 클라이언트가 없을 때 다른 클라이언트를 골라 보내는 폴백은 두지 않는다 — 필요가
+# 없고, 두면 경합만 생긴다.
+#   - 필요가 없다: 같은 세션의 다른 클라이언트는 **같은 창을 보고 있어서** 아래 view-mode
+#     폴백을 그대로 읽는다(실측: 한 세션에 클라이언트 2개를 붙여 두고 view-mode 를 열자
+#     양쪽 화면에 사유가 다 보였다). 다른 세션의 클라이언트는 애초에 알릴 상대가 아니다.
+#   - 경합만 생긴다: 후보를 고르는 순간 "고른 뒤 detach 하면?", "고른 뒤 세션을 옮기면?" 이
+#     따라붙는데 tmux 는 도착 여부를 알려주지 않아 어느 쪽도 닫을 수 없다.
+#
+# **보내는 것은 최대 한 번이다.** 보낸 뒤 다시 확인해 재전송하는 방식은 쓰지 않는다 —
+# 정상 도착 직후 detach 하면 같은 문구를 한 번 더 띄운다. 도착 여부를 물어볼 수 없어
+# 중복과 유실 중 하나를 골라야 하고, 중복을 버린다. 남는 레이스는 "확인 직후 detach"
+# 하나이고 그때는 0회 도착이 되는데, 그 경우는 브라우저가 뜨지 않는 것으로 알아챈다.
+#
+# 문구는 반드시 이스케이프한다. display-message 는 문구를 FORMATS 와 strftime 으로
+# **확장한다**(실측: `%999` → `999`, `#{pane_id}` → `%1`, `#H` → 호스트명). 문구에 패인
+# 경로와 gh 오류가 그대로 들어가므로, `#` 나 `%` 가 든 브랜치명·경로가 조용히 망가진다.
+#
+# 확장을 끄는 `-l` 대신 `#`→`##`, `%`→`%%` 이스케이프를 쓴다. 결과는 같은데(실측: 두
+# 방식의 출력이 동일) `-l` 은 tmux **3.4 에서 추가된** 옵션이라 그보다 낮은 tmux 에서는
+# 호출 자체가 rc=1 로 실패하고, 이 저장소는 Linux 에서 배포판 tmux 를 그대로 설치한다.
+# 이스케이프는 버전을 가리지 않는다.
+#
+# display-time 이 750ms 라 기본값으로는 읽기 전에 사라져 4초로 잡는다. -t 는 주지 않는다 —
+# display-message 의 -t 는 문구의 포맷 확장 기준일 뿐 표시 위치가 아니다. 위치는 -c 가 정한다.
+#
+# 상태바로 알린다. 알릴 수 없으면 1 을 돌려준다.
+msg() {
+  local text
+  [ -n "$client_tty" ] || return 1
+  # -c 에 이미 사라진 클라이언트를 줘도 tmux 는 아무것도 표시하지 않고 조용히 rc=0 을
+  # 돌려준다(실측). 종료코드로는 판정할 수 없어 붙어 있는지 직접 확인한다.
+  #
+  # 식별자는 세션이 아니라 TTY 다. 그 터미널이 그새 다른 세션으로 재attach 했다면 메시지는
+  # 세션이 아니라 **터미널을 따라간다**(실측: A 에서 누른 뒤 같은 TTY 가 B 로 재attach 하자
+  # B 화면에 떴다). tmux 세션은 모두 같은 사용자 것이고 그 터미널이 곧 사용자가 앉아 있는
+  # 자리라, 막지 않고 그대로 둔다 — 막으면 그 경우 사용자는 아무 메시지도 못 받고 볼 일 없는
+  # 패인에 기록만 남는다. 그래서 아래 view-mode 보존은 "그 TTY 가 아무 세션에도 붙어 있지
+  # 않을 때" 로만 보장된다.
+  tmux list-clients -F '#{client_name}' 2>/dev/null | grep -qxF "$client_tty" || return 1
+  text=$(printf '%s' "$1" | sed -e 's/#/##/g' -e 's/%/%%/g')
+  # **rc 를 그대로 돌려준다.** 위 사라진-클라이언트 케이스는 rc 로 판정할 수 없을 뿐,
+  # 호출 자체가 실패하는 경우는 rc 로 잡힌다(실측: 미지원 플래그 → rc=1). 삼키면 알림이
+  # 통째로 사라진 것을 성공으로 오판해, fail() 이 출력 없이 exit 0 하며 사용자에게
+  # 아무 신호도 남지 않는다 — view-mode 폴백까지 함께 죽는다.
+  #
+  # `-d` 는 tmux **3.2 에서 추가된** 옵션이라 그보다 낮은 배포판 tmux(Debian 11 3.1c,
+  # Ubuntu 20.04 3.0a, RHEL/Rocky 8 2.7)에서는 이 호출이 rc=1 로 실패한다. 그때는 -d 없이
+  # 한 번 더 시도한다 — 750ms 로 짧게 뜨지만 무음보다는 낫고, 그마저 실패하면 rc≠0 이
+  # 되어 아래 view-mode 폴백으로 넘어간다.
+  tmux display-message -d 4000 -c "$client_tty" "$text" 2>/dev/null \
+    || tmux display-message -c "$client_tty" "$text" 2>/dev/null
+}
+
+# 대상 패인이 아직 살아 있는가. run-shell 이 `-t ':'` 로 저장하는 것은 패인 참조가 아니라
+# **ID 뿐**이라, 작업 중 그 패인이 닫히면 tmux 는 조회 실패 후 가장 최근 세션의 활성 패인으로
+# 폴백한다. 키 바인딩에서는 `-t ':'` 가 가리키는 패인과 여기 $pane_id 가 같은 패인이다.
+pane_alive() {
+  [ -n "$pane_id" ] && tmux list-panes -a -F '#{pane_id}' 2>/dev/null | grep -qxF "$pane_id"
+}
+
+# 감시자를 거둔다. TERM 을 받은 감시자는 자기 sleep 을 먼저 죽이고 끝낸다(감시자 트랩 참고).
+stop_watchdog() {
+  [ -n "$watchdog_pid" ] || return 0
+  kill -TERM "$watchdog_pid" 2>/dev/null
+  wait "$watchdog_pid" 2>/dev/null
+  watchdog_pid=
+}
+
+# 한 번만 도는 정리. EXIT 와 HUP/INT/TERM 에 함께 걸려 있어 중복 호출된다.
+#
+# 신호로 죽을 때가 문제였다. 정상 경로는 gh 를 wait 으로 거두고 감시자도 정리하는데,
+# 트랩이 임시 파일만 지우던 동안에는 신호로 죽으면 gh(PPID=1, 독립 PGID)·감시자 서브셸·
+# 그 sleep 이 그대로 고아로 남았다(실측: helper 에 TERM → 셋 다 PPID=1 로 생존).
+# tmux 서버가 죽을 때도 같은 경로다(실측: run-shell 자식은 정리되고 gh 만 남았다).
+#
+# 순서가 중요하다. 감시자를 먼저 거두지 않고 gh 그룹을 건드리면 감시자가 그 사이 자기 몫의
+# TERM/KILL 을 또 쏘고, 감시자를 죽이기만 하면 그 sleep 이 상한 시간만큼 고아로 남는다.
+# 그래서 sleep → 감시자 → gh 그룹 순서로 간다.
+#
+# **정상 종료에서는 gh 그룹을 건드리지 않는다.** 그때 gh 는 이미 거둬졌고 그룹에 남아 있을
+# 수 있는 것은 방금 띄운 브라우저다 — 성공했는데 사용자의 브라우저를 죽이는 것은 고아 하나보다
+# 훨씬 나쁘다. 그래서 그룹 정리는 killed_by_signal 일 때만 한다.
+cleanup() {
+  [ -n "$cleanup_done" ] && return 0
+  cleanup_done=1
+
+  stop_watchdog
+
+  if [ -n "$killed_by_signal" ] && [ -n "$gh_pid" ]; then
+    kill -TERM -- -"$gh_pid" 2>/dev/null
+    if kill -0 -- -"$gh_pid" 2>/dev/null; then
+      sleep "$GH_KILL_GRACE"
+      # 점유 확인 뒤에만 승격한다 (근거는 감시자 주석의 PGID 재사용 항목).
+      kill -0 -- -"$gh_pid" 2>/dev/null && kill -KILL -- -"$gh_pid" 2>/dev/null
+    fi
+    wait "$gh_pid" 2>/dev/null
+  fi
+
+  [ -n "$err_file" ] && rm -f "$err_file"
+  return 0
+}
+
+# 신호로 끝날 때도 **출력 없이 exit 0** 이다. 규약상 0 이 아닌 코드는 대상 패인을
+# view-mode 로 덮치는데, 외부에서 중단시킨 작업에는 보여 줄 사유가 없어 빈 view-mode 만
+# 남는다. tmux 서버가 죽는 중이면 더 무의미하다.
+trap 'cleanup' EXIT
+trap 'killed_by_signal=1; cleanup; exit 0' HUP INT TERM
+
+# 알림에 성공했으면 출력 없이 정상 종료한다 (위 종료코드 규약 참고).
+#
+# 알릴 상대가 없을 때만 사유를 stdout 으로 내보내고 비정상 종료한다 — run-shell 이
+# `-t ':'` 로 못 박은 패인에 view-mode 로 남아, 다시 attach 했을 때 읽을 수 있다(실측:
+# view-mode 화면에 사유 문구가 그대로 표시됨). SSH 가 끊긴 채 키가 눌린 경우가 이 경로다.
+#
+# 단 **그 패인이 아직 살아 있을 때만**이다. 닫혔으면 위 폴백 때문에 무관한 창이 덮인다
+# (실측: 대상 패인을 닫자 다른 **세션**의 패인이 view-mode 가 됐다). 남길 곳이 사라진
+# 마당에 남의 화면을 뺏느니 조용히 끝낸다 — 사용자는 브라우저가 안 뜬 것으로 알아챈다.
+#
+# 이 검사는 별도 프로세스의 순간값이라 경합이 남는다. 검사를 통과한 직후·종료 직전에 패인이
+# 닫히면 폴백이 그대로 일어나 **무관한 패인이 view-mode 로 덮인다**. 피해가 사라지는 창이
+# 아니라 남의 창에 간다는 뜻이다. 창은 tmux 서버 안에서 조회와 기록을 원자적으로 하지 않는
+# 한 닫을 수 없고, printf 와 exit 사이 수 마이크로초라 그대로 둔다. 터졌을 때의 결과는
+# 그 패인에 사유 한 줄이 뜨는 것이고 `q` 로 닫힌다.
+fail() {
+  msg "$1" && exit 0
+  if pane_alive; then
+    printf '%s\n' "$1"
+    exit 1
+  fi
+  exit 0
+}
+
+[ -n "$pane_id" ] || fail "PR 열기 실패: 패인 ID 인자가 없습니다 (tmux.conf 의 bind P 확인)"
+
+command -v "$GH_BIN" >/dev/null 2>&1 || fail "PR 열기 실패: gh(GitHub CLI)를 찾을 수 없습니다"
+
+# 키를 누른 뒤 패인이 닫힐 수 있다. 그때 tmux 는 오류를 내지 않고 **빈 줄만 돌려준다**
+# (실측: `display-message -p -t %999` 가 rc=0 에 출력 없음). 종료코드가 아니라 빈 값으로 본다.
+pane_path=$(tmux display-message -p -t "$pane_id" '#{pane_current_path}' 2>/dev/null)
+[ -n "$pane_path" ] || fail "PR 열기 실패: 패인 $pane_id 의 경로를 알 수 없습니다 (닫혔을 수 있습니다)"
+
+cd "$pane_path" 2>/dev/null || fail "PR 열기 실패: 패인 경로로 이동할 수 없습니다 ($pane_path)"
+
+# 파이프(명령 치환) 대신 임시 파일에 받는다. 브라우저 실행기가 stdout 을 물고 있으면
+# 명령 치환은 gh 가 끝난 뒤에도 파이프가 닫힐 때까지 붙잡히는데, 파일은 그런 대기가 없다.
+err_file=$(mktemp "${TMPDIR:-/tmp}/tmux-open-pr.XXXXXX" 2>/dev/null) \
+  || fail "PR 열기 실패: 임시 파일을 만들 수 없습니다"
+
+# gh 에는 자체 시간 제한이 없다 — 옵션도 환경변수도 없고, 내부 http.Client 의 Timeout
+# 기본값이 0(무제한)이다. 연결은 됐는데 응답을 멈춘 프록시나 GHE 를 만나면 브라우저도
+# 오류도 없이 영원히 매달리고, 키를 다시 누를수록 그런 작업이 쌓인다(실측: 무응답 gh 를
+# 흉내내고 3번 누르자 스크립트·gh 가 3벌 그대로 남았다).
+#
+# macOS 기본 bash 3.2 에는 `wait -n` 이 없고 `timeout`(coreutils)도 기본 설치가 아니라,
+# 감시 프로세스로 상한을 둔다.
+
+# 작업 제어 알림("Terminated: 15")이 셸의 stderr 로 나간다. stderr 만으로는 view-mode 가
+# 열리지 않지만(실측: stderr + exit 0 → 전환 없음), 알릴 상대가 없어 exit 1 로 끝나는
+# 경로에서는 view-mode 에 그 잡음이 사유와 섞여 들어간다. 이 스크립트는 stderr 를 쓰지
+# 않으므로 통째로 버린다. gh 의 stderr 는 아래에서 파일로 따로 받는다.
+exec 2>/dev/null
+
+# gh 를 **자기 프로세스 그룹에서** 띄운다. gh 는 브라우저 런처를 자식으로 실행하고 그
+# 종료를 기다리므로, gh 만 죽이면 런처가 고아로 남는다(실측: 멈추는 GH_BROWSER 를 지정하고
+# gh 를 죽였더니 런처가 그대로 살아남았다). `set -m` 이면 백그라운드 작업이 자기 프로세스
+# 그룹에 들어가고, 그러면 `kill -- -PID` 로 자손까지 한 번에 거둘 수 있다(실측: bash 3.2
+# 에서 같은 시나리오에 런처 0개).
+#
+# stdout 은 반드시 버린다 — 성공했는데 한 줄이라도 새어 나가면 view-mode 가 열린다.
+set -m
+"$GH_BIN" pr view --web >/dev/null 2>"$err_file" &
+gh_pid=$!
+set +m
+
+# 감시자. 상한을 넘기면 gh 그룹에 TERM 을 보낸 뒤, 짧은 유예를 두고 KILL 로
+# **승격까지 자기가 끝낸다**. 아래 본문은 시간 초과일 때 감시자를 죽이지 않고 끝날 때까지
+# 기다린다 — 여기서 끊으면 승격이 취소돼 고아가 남는다.
+#
+# 상한을 넘기기 직전에도 `kill -0` 으로 gh 가 아직 살아 있는지 확인한다 — 제때 끝난 gh 를
+# 시간 초과로 오인하지 않기 위해서다.
+#
+# **KILL 승격이 없으면 상한이 상한이 아니다.** 그룹 멤버가 TERM 을 무시하면 아래
+# `wait "$gh_pid"` 가 영원히 돌아오지 않고(실측: 상한 2초로 재현해 14초까지 반환 없음),
+# gh 자신은 TERM 에 죽어도 TERM 을 무시하는 자손은 PPID=1 고아로 남는다(실측). 승격을
+# 두면 상한은 GH_TIMEOUT + GH_KILL_GRACE 로 확정된다.
+#
+# **승격이 무관한 프로세스 그룹을 맞히지 않는 이유.** 그룹에 멤버가 하나라도 살아 있으면
+# PGID 는 재사용되지 않는다(POSIX). 실측: gh 를 reap 한 뒤에도 TERM 을 무시한 자손이 살아
+# 있는 동안 `kill -0 -- -PGID` 가 성공했고, 그 상태에서 KILL 이 정확히 그 자손만 정리했다.
+# 즉 승격이 **필요한** 경우가 곧 그룹이 점유된 경우이므로, 쏘기 직전에 점유를 확인하면
+# 남의 그룹에 닿을 수 없다. 반대로 그룹이 비어 있으면 확인이 실패해 아무것도 쏘지 않는다
+# (거둘 대상도 없다). 예전 주석은 "wait 이 reap 했으니 PGID 가 해방됐다" 고 적었지만
+# 그것은 그룹이 완전히 빈 경우에만 참이고, 그 경우엔 승격할 이유도 없다.
+#
+# 자기 sleep 은 자기가 거둔다 — 부모가 `pkill -P` 로 찾아 죽이는 방식은 busybox pkill 에
+# `-P` 가 없고, 부모가 먼저 사라지면 애초에 찾을 수도 없다(실측: sleep 이 상한 시간만큼
+# 고아로 남았다).
+#
+# **시간 초과를 종료코드로 알린다 — 표식 파일을 쓰지 않는다.** 예전에는 `: > "$timeout_flag"`
+# 로 알렸는데, 그 쓰기가 실패하면 TERM 은 그대로 나가 gh 가 143 으로 죽고, 본문은 시간 초과를
+# 놓친 채 빈 err_file 을 읽어 "gh 가 사유를 남기지 않았습니다" 로 **엉뚱하게** 보고했다.
+# 종료코드에는 실패할 수 있는 지점이 없다. 파생 경로(`<err_file>.timeout`)가 사라지는 것도
+# 덤이다 — mktemp 가 만든 파일이 아니라 그 이름에서 유추한 경로였다.
+#
+# 대신 본문이 gh 를 기다린 뒤 **항상** 감시자를 기다려야 한다. 그러려면 감시자가 gh 의 죽음을
+# 스스로 알아채야 해서, 상한만큼 통째로 자지 않고 1초 간격으로 확인한다. 시간 초과 판정
+# 해상도가 1초로 거칠어지는 대신(상한과 상한+1초 사이에 발화) 알림 경로가 무결해진다.
+watchdog() {
+  local child='' waited=0
+  trap 'kill "$child" 2>/dev/null; exit 0' TERM
+
+  while [ "$waited" -lt "$GH_TIMEOUT" ]; do
+    kill -0 "$gh_pid" 2>/dev/null || exit 0   # gh 가 제때 끝났다
+    sleep 1 & child=$!
+    wait "$child" 2>/dev/null
+    waited=$((waited + 1))
+  done
+  kill -0 "$gh_pid" 2>/dev/null || exit 0
+
+  kill -TERM -- -"$gh_pid" 2>/dev/null
+
+  sleep "$GH_KILL_GRACE" & child=$!
+  wait "$child" 2>/dev/null
+
+  kill -0 -- -"$gh_pid" 2>/dev/null && kill -KILL -- -"$gh_pid" 2>/dev/null
+  exit 1                                      # = 시간 초과로 끊었다
+}
+watchdog &
+watchdog_pid=$!
+
+wait "$gh_pid"
+rc=$?
+
+# 감시자가 시간 초과 처리(TERM → 유예 → KILL)를 **끝낼 때까지** 기다린다 — 여기서 끊으면
+# TERM 을 무시한 자손을 거두는 승격이 취소된다. 정상 경로에서는 감시자가 gh 의 죽음을 1초
+# 안에 알아채고 스스로 0 으로 끝나므로 이 대기는 1초를 넘지 않는다.
+timed_out=0
+if [ -n "$watchdog_pid" ]; then
+  wait "$watchdog_pid"
+  timed_out=$?
+  watchdog_pid=
+fi
+
+if [ "$timed_out" -ne 0 ]; then
+  fail "PR 열기 실패: gh 가 ${GH_TIMEOUT}초 안에 끝나지 않아 중단했습니다"
+fi
+
+if [ "$rc" -ne 0 ]; then
+  # gh 는 실패 사유를 자기 메시지로 이미 구체적으로 알려준다 — 저장소 아님, PR 없음,
+  # 미인증이 각각 다른 문구다. 여기서 다시 분류하면 gh 문구가 바뀔 때마다 어긋나므로
+  # 첫 줄을 그대로 전달한다.
+  reason=$(head -n 1 "$err_file")
+  fail "PR 열기 실패: ${reason:-gh 가 사유를 남기지 않았습니다}"
+fi

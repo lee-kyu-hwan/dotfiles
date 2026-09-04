@@ -33,6 +33,19 @@ if [[ "$(uname)" != "Darwin" ]]; then
         sudo dnf install -y tmux neovim zsh ripgrep fd-find
     fi
 
+    # gh (GitHub CLI) — tmux 의 prefix + P 가 현재 브랜치의 PR 을 열 때 쓴다. macOS 는
+    # Brewfile 이 처리하지만 Linux 는 여기서 챙겨야 한다. 배포판·릴리스에 따라 저장소에
+    # 없을 수 있으므로 실패해도 계속 진행한다 (단축키만 못 쓰고 나머지는 정상).
+    if ! command -v gh &>/dev/null; then
+        echo "  gh 설치..."
+        GH_DOC="https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get install -y gh || echo "  ⚠️ gh 설치 실패 — prefix + P 를 쓰려면 $GH_DOC 참고 (계속 진행)"
+        elif command -v dnf &>/dev/null; then
+            sudo dnf install -y gh || echo "  ⚠️ gh 설치 실패 — prefix + P 를 쓰려면 $GH_DOC 참고 (계속 진행)"
+        fi
+    fi
+
     if ! command -v starship &>/dev/null; then
         echo "  starship 설치..."
         if ! curl -sS https://starship.rs/install.sh | sh -s -- -y; then
