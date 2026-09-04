@@ -2,7 +2,7 @@
 
 - Task ID: 20260828T021938Z-42-claude-codex-이중-리뷰-종합-pr-게시-스킬-추가-55cca675
 - Mode: strict
-- Status: REVISED (round 2)
+- Status: REVISED (round 2 findings applied post-gate)
 - Created: 2026-08-28
 - Updated: 2026-08-28
 - Source goal: #42 Claude+Codex 이중 리뷰 → 종합 → PR 게시 스킬 추가
@@ -41,12 +41,30 @@ Spec 리뷰: 라운드 1 78점 REVISE(High 3) → 라운드 2 93점 PASS(blocker
 | `schemas/publish-plan.schema.json` | `plan.json` 계약 | 루트 object, `additionalProperties: false`, `base_mismatch` 포함 |
 | `scripts/review_state.py` | 상태 머신, 에이전트 선택, 위치 실측, 라운드 판정, 은닉·셔플 | 아래 "review_state.py 인터페이스" |
 | `scripts/publish_findings.py` | `plan`/`apply`, finding_id·병합·lifecycle·3단계 게시 | 아래 "publish_findings.py 인터페이스" |
-| `tests/test_review_state.py` | AC-4, AC-5, AC-17~AC-25, AC-45(프롬프트 출력), AC-50, AC-53 | 임시 git 저장소 픽스처. **Spec Test strategy가 정본이며 이 표가 그 사본이다** |
-| `tests/test_publish_findings.py` | AC-1~AC-3, AC-6~AC-16, AC-39, AC-46, AC-47, AC-49, AC-51, AC-52, AC-54 | fake GitHub 클라이언트. AC-51·AC-54는 이 파일이 담당한다 |
-| `tests/test_content_contracts.py` | AC-26, AC-28~AC-33, AC-38, AC-40~AC-45(계약 문구), AC-48 | 파일 계약 검사. AC-32는 이 파일이 담당한다 |
-| `tests/fixtures/` | 스키마 유효·무효 픽스처, 리뷰어 산출물 표본, **상태 계약 픽스처** `state-*.json` | T2가 생성해 커밋하고 T7·T8이 소비한다. 두 스크립트 사이의 상태 필드 계약을 고정하는 유일한 산출물이다 |
+| `tests/test_review_state.py` | AC-4, AC-5(판정 부분), AC-17~AC-25, AC-41(행동 부분), AC-45(프롬프트 출력), AC-50, AC-53 | 임시 git 저장소 픽스처. AC-41의 행동 단정은 이 파일이 담당한다(Spec 편차 D-2) |
+| `tests/test_publish_findings.py` | AC-1~AC-3, AC-5(강등 부분), AC-6~AC-16, AC-39, AC-46, AC-47, AC-49, AC-51, AC-52, AC-54 | fake GitHub 클라이언트. AC-51·AC-54는 이 파일이 담당한다 |
+| `tests/test_content_contracts.py` | AC-26, AC-28~AC-33, AC-38, AC-40~AC-44, AC-41(계약 문구 부분), AC-45(계약 문구 부분), AC-48 | 파일 계약 검사. AC-32는 이 파일이 담당한다 |
+| `tests/fixtures/` | 스키마 유효·무효 픽스처, 리뷰어 산출물 표본, **상태 계약 픽스처 5종** | 아래 "상태 계약 픽스처" 참조. 두 스크립트 사이의 상태 필드 계약을 고정하는 유일한 산출물이다 |
 | `docs/dual-review-maintenance.md` | 유지보수 runbook 4절 | 갱신 신호, 의존 점검, 테스트 명령, 버전 정책 |
 | `.gitignore` | 런타임 상태 무시 | `.claude/dual-review-state/` 한 줄 추가 |
+
+### 상태 계약 픽스처
+
+`review_state.py`가 만드는 상태 파일이 `publish_findings.py`의 입력이므로, 그 필드 계약을 픽스처로 고정한다. T7·T8은 `review_state.py`를 호출하지 않고 이 파일들만 읽는다.
+
+| 픽스처 | 생성 태스크 | 채우는 태스크 | 담는 상태 |
+|---|---|---|---|
+| `state-minimal.json` | T2 | T3(위치·hunk), T5(synthesis) | 기본 경로. 두 리뷰어 + 교차비평, 정상 base |
+| `state-base-mismatch.json` | T2 | T3, T5 | `--base`가 PR 실제 base와 다름(`base_mismatch` 설정) |
+| `state-scope-reduced.json` | T2 | T3, T5 | 규모 초과 후 범위 축소(`scope_reduction` 기록) |
+| `state-excluded-reviewer.json` | **T4** | T5(synthesis) | 리뷰어 하나가 스키마 위반 2회로 `excluded`, 사유 기록 |
+| `state-single-reviewer.json` | **T4**(승인 기록) | **T5**(`single_source` 분류) | 단일 리뷰 승인 후 `single_source` 분류가 붙은 종합 결과 |
+
+뒤 두 개는 T7의 요약 문구 단정(리뷰어 `excluded` 사유, 단일 리뷰어 사실, `single_source`와 `unresolved`의 구별)에 필요한 입력이다. `state-single-reviewer.json`은 T4가 승인 기록까지 만들고 T5가 분류를 채워 완성한다.
+
+**위치 정보의 출처가 앞 셋과 뒤 둘에서 다르다.** 앞 셋은 T2가 만들 때 T3가 아직 미구현이라 위치 필드가 비어 있고 T3가 나중에 채운다. 뒤 둘은 T4 시점에 T3가 이미 구현돼 있으므로 `record-reviewer`가 생성 시점에 위치 판정을 함께 수행하며, 따라서 처음부터 `location_valid`·`in_diff_range`를 갖는다. T7의 `plan` 호출은 다섯 픽스처 모두가 위치 판정을 마친 상태를 전제하므로 이 비대칭이 T7에는 보이지 않는다.
+
+각 픽스처는 해당 태스크가 `review_state.py`의 **실제 출력**으로 생성해 커밋한다. 손으로 쓰지 않는다 — 그래야 스크립트 출력이 바뀌면 T7·T8 테스트가 즉시 어긋남을 드러낸다.
 
 ### review_state.py 인터페이스
 
@@ -54,7 +72,7 @@ CLI 서브커맨드. 모두 JSON을 stdout으로 낸다.
 
 | 서브커맨드 | 인자 | 반환·효과 |
 |---|---|---|
-| `init` | `--root`, `--repo`, `--pr`, `--base-sha`, `--head-sha`, `--changed-files`, `--requested-base` | 상태 생성. `repo`·`pr_number`·`base_sha`·`head_sha`·`changed_files` 고정, `base_mismatch` 판정 |
+| `init` | `--root`, `--repo`, `--pr`, `--base-sha`, `--head-sha`, `--changed-files`, `--requested-base`(선택) | 상태 생성. `repo`·`pr_number`·`base_sha`·`head_sha`·`changed_files` 고정, `base_mismatch` 판정 |
 | `select-agents` | `--state`, `--diff` | 선택된 에이전트 목록과 유발 신호·매치 건수를 기록하고 반환 |
 | `check-scale` | `--state` | 파일 수·diff 라인 수와 임계값 초과 여부. 초과 시 `requires_user_decision: true` |
 | `reduce-scope` | `--state`, `--paths` | 축소 경로 집합과 제외 파일 수를 기록 |
@@ -76,10 +94,12 @@ CLI 서브커맨드. 모두 JSON을 stdout으로 낸다.
 
 | 서브커맨드 | 인자 | 반환·효과 |
 |---|---|---|
-| `plan` | `--state`, `--synthesis`, `--out`, `--calls-out`(선택), `--client`(선택) | 읽기 전용. 기존 게시물 완전 조회 → lifecycle 분류 → `plan.json` 산출. `--calls-out`은 기록된 `(kind, method, target)` 3튜플 목록을 JSON 배열로 덤프한다 |
-| `apply` | `--plan`, `--state`, `--calls-out`(선택), `--client`(선택) | 계획 스키마 검증 → head SHA 재확인 → 3단계 게시 → 단계별 완료 기록. `--calls-out`은 `plan`과 같은 형식 |
+| `plan` | `--state`, `--synthesis`, `--out`, `--calls-out`(선택), `--client`(선택) | 읽기 전용. **입력 `--synthesis`를 `schemas/synthesis.schema.json`으로 검증**하고 위반 시 종료 코드 != 0으로 중단한다. 이어서 기존 게시물 완전 조회 → lifecycle 분류 → `plan.json` 산출 |
+| `apply` | `--plan`, `--state`, `--calls-out`(선택), `--client`(선택) | 입력 `--plan`을 `schemas/publish-plan.schema.json`으로 검증 → head SHA 재확인 → 3단계 게시 → 단계별 완료 기록 |
 
-GitHub 접근은 `GitHubClient` 프로토콜의 아홉 메서드로만 한다. `--client fake:<경로>`로 테스트에서 주입하고, 생략하면 `gh` CLI 기반 실제 클라이언트를 쓴다. 모든 호출은 실제·fake 구분 없이 `(kind, method, target)` 3튜플로 `client.calls`에 기록되며 `--calls-out`으로 덤프할 수 있다. 이 덤프가 AC-14·AC-37의 쓰기 0건 판정 수단이다.
+GitHub 접근은 `GitHubClient` 프로토콜의 아홉 메서드로만 한다. `--client fake:<경로>`로 테스트에서 주입하고, 생략하면 `gh` CLI 기반 실제 클라이언트를 쓴다. 모든 호출은 실제·fake 구분 없이 `client.calls`에 기록된다.
+
+`--calls-out`이 덤프하는 JSON은 **객체의 배열**이며 각 원소는 정확히 세 키를 갖는다: `{"kind": "rest"|"graphql"|"cli", "method": "GET"|"POST"|"PATCH"|"QUERY"|"MUTATION"|"EXEC", "target": "<경로 템플릿 또는 오퍼레이션명 또는 서브커맨드>"}`. 배열이 아니라 객체인 이유는 소비 측이 `c["method"]`로 쓰기 여부를 판정하기 때문이다(검증 10 스크립트). 이 덤프가 AC-14·AC-37의 쓰기 0건 판정 수단이다.
 
 ## Task dependencies
 
@@ -110,7 +130,25 @@ T10 문서·gitignore ───────────────────�
 
 1. 실패 기록: `tests/test_content_contracts.py`에 스키마 4종의 루트 object 검사, `reviewer-output`의 `uniqueItems`·lookaround 부재 검사, `critique`의 `evidence` `minItems: 1` 검사, `synthesis`의 5축 required·4값 enum 검사를 작성하고 실행한다. 스키마 파일이 없으므로 실패한다.
    - `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dot_claude/skills/dual-review/tests -p 'test_content_contracts.py'` → 실패(파일 없음)
-2. 구현: 네 스키마와 `tests/fixtures/` 아래 유효·무효 픽스처를 작성한다. `synthesis`의 분류 enum은 `["agreed","disputed","unresolved","single_source"]`, 5축은 `truth`·`introduced_by_pr`·`location_validity`·`evidence`·`actionability`.
+2. 구현: 네 스키마와 `tests/fixtures/` 아래 유효·무효 픽스처를 작성한다.
+
+   `synthesis.schema.json`의 **루트 필드 구성을 여기서 고정한다.** 루트는 object, `additionalProperties: false`, required는 다섯이다.
+
+   | 필드 | 타입 | 설명 |
+   |---|---|---|
+   | `reviewed_sha` | string | 상태의 `head_sha` |
+   | `verdict` | string | `"comment"` 고정 (Spec R7.1) |
+   | `summary` | string | 종합 요약 |
+   | `execution_form` | string | `"dual_critique"` / `"dual_no_critique"` / `"single_reviewer"` — Spec R6.3의 실행 형태 |
+   | `findings` | array | 원소마다 `finding_id`, `classification`(4값 enum), `judgment`(5축 전부 required) |
+
+   따라서 **finding이 없는 최소 유효 문서**는 다음과 같고, 검증 10 스크립트가 이것을 그대로 쓴다.
+
+   ```json
+   {"reviewed_sha":"<head_sha>","verdict":"comment","summary":"no findings","execution_form":"dual_critique","findings":[]}
+   ```
+
+   분류 enum은 `["agreed","disputed","unresolved","single_source"]`, 5축은 `truth`·`introduced_by_pr`·`location_validity`·`evidence`·`actionability`.
 3. 통과 기록: 같은 명령 → 통과.
 
 만족 AC: AC-26, AC-41(스키마 부분), AC-42, AC-43, AC-44.
@@ -130,15 +168,26 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
 1. 실패 기록: 임시 git 저장소 픽스처를 만들고 R4.2의 네 조건(파일 부재, `line_start` 초과, `line_end` 초과, `line_start > line_end`) 각각에 대해 `location_valid=false`를, 네 조건 모두 불성립일 때만 `true`를 단정하는 테스트(AC-4)와 diff hunk 범위 밖 라인의 `in_diff_range=false`(AC-5)를 작성해 실행 → 실패.
 2. 구현: `record-reviewer`의 위치 실측·diff 범위 판정을 구현한다. 파일 라인 수는 `git show <head_sha>:<path>`로 얻는다.
 3. 통과 기록.
-4. T2가 만든 상태 픽스처에 `location_valid`·`in_diff_range`·hunk 경계 정보를 실제 출력으로 채워 갱신한다.
+4. T2가 만든 상태 픽스처 세 개에 `location_valid`·`in_diff_range`·hunk 경계 정보를 실제 출력으로 채워 갱신한다.
 
-만족 AC: AC-4, AC-5.
+만족 AC: AC-4, AC-5(판정 부분).
+AC-5는 두 조건을 갖는다 — `in_diff_range=false` 판정(이 태스크)과 그 finding이 inline이 아니라 요약 항목으로 분류되는 것(T7). 후자는 `plan.json`의 `summary_only_findings` 편입이라 `publish_findings.py`의 책임이므로 T7이 단정한다.
 
 ### T4. review_state.py — 리뷰어 등록 재시도와 교차비평 판정
 
-1. 실패 기록: 스키마 위반 1회 재요청 후 2회째 `excluded`와 3회째 재요청 부재(AC-19), 단일 리뷰 승인 없이 다음 단계 전이 거부(AC-20), `build_agent_prompt` 출력에 상대 산출물 부재(AC-18), 새 근거 0건 조기 종료와 첫 라운드 기준선에 1차 리뷰 evidence 포함(AC-21), 추상화 이탈 두 조건과 첫 라운드 미발생(AC-22), `--rounds 0`의 라운드 0회·critique 미생성(AC-53), 빈 `evidence` 반박 미채택(AC-41의 행동 부분)을 작성해 실행 → 실패.
-2. 구현: `record-reviewer`의 재시도·제외, `approve-single-reviewer`, `record-critique`를 구현한다.
+1. 실패 기록: **`tests/test_review_state.py`**에 다음을 단정하는 테스트를 작성해 실행 → 실패.
+   - 스키마 위반 1회 재요청 후 2회째 `excluded`, 3회째 재요청 부재(AC-19)
+   - 단일 리뷰 승인 없이 다음 단계 전이 거부(AC-20)
+   - `build_agent_prompt` 출력에 상대 산출물 경로·내용 부재(AC-18 첫 조건)
+   - **CRITIQUE 이전 단계의 상태 조회가 상대 리뷰어 산출물을 반환하지 않음(AC-18 둘째 조건)**
+   - 새 근거 0건 조기 종료와 첫 라운드 기준선에 1차 리뷰 evidence 포함(AC-21)
+   - **교차비평 라운드 수가 2를 초과할 수 없음 — 3회째 `record-critique` 호출이 거부됨(AC-21 셋째 조건)**
+   - 추상화 이탈 두 조건과 첫 라운드 미발생(AC-22)
+   - `--rounds 0`의 라운드 0회·critique 미생성(AC-53)
+   - 빈 `evidence` 반박 미채택(AC-41 행동 부분)
+2. 구현: `record-reviewer`의 재시도·제외, `approve-single-reviewer`, `record-critique`(라운드 상한 가드 포함)를 구현한다.
 3. 통과 기록.
+4. **픽스처 생성:** `state-excluded-reviewer.json`(리뷰어 하나가 `excluded`, 사유 기록)을 실제 출력으로 만들어 커밋한다. `state-single-reviewer.json`은 이 태스크가 단일 리뷰 승인 기록까지 만들고, T5가 `single_source` 분류를 채워 완성한다.
 
 만족 AC: AC-18, AC-19, AC-20, AC-21, AC-22, AC-41(행동), AC-53.
 
@@ -147,7 +196,7 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
 1. 실패 기록: `normalize` 출력에 `source` 부재와 알려진 식별자 문자열(`codex`, `gpt-5.6`, `pr-review-toolkit`, 에이전트 6종 이름) 부재(AC-23), 동일 입력·동일 `head_sha`의 셔플 재현성과 다른 `head_sha`의 순서 차이(AC-24), 실행 형태별 허용 분류 집합(AC-50)을 작성해 실행 → 실패.
 2. 구현: `normalize`(시드 = `head_sha`)와 `record-synthesis`(실행 형태별 분류 검증)를 구현한다.
 3. 통과 기록.
-4. 상태 픽스처에 `record-synthesis` 결과를 채워 갱신한다. **이 시점에 픽스처가 완성되고 T7이 시작 가능하다.**
+4. **픽스처 완성:** 다섯 픽스처 전부에 `record-synthesis` 결과를 실제 출력으로 채운다. `state-single-reviewer.json`에는 `execution_form: "single_reviewer"`와 `single_source` 분류가 붙은 종합 결과를 넣어 T4가 만든 승인 기록 위에 완성한다. **이 시점에 다섯 픽스처가 모두 완성되고 T7이 시작 가능하다.**
 
 만족 AC: AC-23, AC-24, AC-50.
 
@@ -161,7 +210,7 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
 
 ### T7. publish_findings.py — plan
 
-1. 실패 기록: fake 클라이언트를 작성하고 **T2~T5가 만든 `tests/fixtures/state-*.json`을 입력으로** 다음을 단정하는 테스트를 `tests/test_publish_findings.py`에 작성해 실행 → 실패. `review_state.py`를 호출하지 않고 픽스처만 읽는다.
+1. 실패 기록: fake 클라이언트를 작성하고 **T2·T4·T5가 완성한 상태 계약 픽스처 다섯 개를 입력으로** 다음을 단정하는 테스트를 `tests/test_publish_findings.py`에 작성해 실행 → 실패. `review_state.py`를 호출하지 않고 픽스처만 읽는다. 요약 문구 단정 셋은 `state-excluded-reviewer.json`과 `state-single-reviewer.json`을 입력으로 쓴다.
    - `plan` 경로의 쓰기 호출 0건과 `apply` 미호출(AC-15)
    - 3튜플 화이트리스트 부분집합(AC-14)
    - sticky 마커 존재 시 갱신 계획(AC-12)
@@ -169,7 +218,8 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
    - 요약 첫 줄 형식과 `head_sha` 인용(AC-39)
    - inline 원소 필드 구성과 hunk 경계 축소(AC-46)
    - 조회 결과의 6필드 상태 기록(AC-47)
-   - 2페이지째 마커의 `persisting` 분류와 순회 오류 전파(AC-49)
+   - 2페이지째 마커의 `persisting` 분류, **2페이지째에만 있는 finding이 `resolved`로 오분류되지 않음**, 순회 오류 전파(AC-49)
+   - `in_diff_range=false`인 finding이 `inline_review.comments`가 아니라 `summary_only_findings`에 편입됨(AC-5 강등 부분)
    - `--base` 불일치 시 `inline_review.skip`과 요약 본문 기재(AC-54)
    - 축소 범위의 요약 본문 기재(AC-25의 요약 부분)
    - 상태의 다섯 값만 사용하고 PR 메타 재조회가 없음(AC-51)
@@ -177,7 +227,7 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
 2. 구현: 목록 조회 세 메서드의 전체 페이지 순회, lifecycle 분류, 계획 산출을 구현한다.
 3. 통과 기록.
 
-만족 AC: AC-10, AC-12, AC-14, AC-15, AC-25(요약), AC-39, AC-46, AC-47, AC-49, AC-51, AC-54.
+만족 AC: AC-5(강등 부분), AC-10, AC-12, AC-14, AC-15, AC-25(요약), AC-39, AC-46, AC-47, AC-49, AC-51, AC-54.
 
 ### T8. publish_findings.py — apply
 
@@ -213,7 +263,7 @@ AC-51·AC-54의 단정은 T7의 `test_publish_findings.py`가 담당한다(File 
 
 1. 전체 테스트: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dot_claude/skills/dual-review/tests -p 'test_*.py'` → 종료 코드 0(AC-34).
 2. codex 스키마 수락(AC-27): 아래 "검증 명령"의 명령을 1회 실행해 종료 코드 0과 스키마 만족 결과를 확인한다. 실행 자체가 불가능하면 `blocked`로 기록하고 통과로 적지 않는다.
-3. 배치 확인(AC-35): `chezmoi diff` 출력에 `dual-review` 경로가 포함되는지 확인한다. `chezmoi apply`는 실행하지 않는다.
+3. 배치 확인(AC-35): 검증 7(`chezmoi --source "$PWD" target-path`)을 실행한다. `chezmoi apply`는 실행하지 않는다. Spec이 명시한 `chezmoi diff`와 다른 이유는 "Spec 편차" 절에 있다.
 4. 실 API `plan`(AC-37): `gh pr list --state open --limit 1 --json number`로 얻은 PR에 빈 finding 집합으로 `plan`을 실행해 종료 코드 0, 계획 스키마 유효, 쓰기 3튜플 0건을 확인한다. 열린 PR이 없으면 `not applicable`로 기록한다.
 
 ## Verification commands
@@ -248,7 +298,7 @@ S=dot_claude/skills/dual-review/scripts
 python3 "$S/review_state.py" init --root "$WORK/state" --repo "$REPO" --pr "$PR" \
   --base-sha "$BASE" --head-sha "$HEAD" --changed-files "$FILES" > "$WORK/init.json"
 STATE=$(python3 -c "import json;print(json.load(open('$WORK/init.json'))['state_path'])")
-printf '%s' '{"findings":[],"classification":{}}' > "$WORK/synthesis.json"
+printf '%s' "{\"reviewed_sha\":\"$HEAD\",\"verdict\":\"comment\",\"summary\":\"no findings\",\"execution_form\":\"dual_critique\",\"findings\":[]}" > "$WORK/synthesis.json"
 python3 "$S/publish_findings.py" plan --state "$STATE" --synthesis "$WORK/synthesis.json" \
   --out "$WORK/plan.json" --calls-out "$WORK/calls.json"
 python3 - "$WORK" <<'PY'
@@ -269,6 +319,15 @@ PY
 ```
 
 `plan`은 읽기 전용이므로 이 스크립트는 GitHub에 아무것도 쓰지 않는다. 마지막 단정이 그것을 3튜플 기록으로 증명한다.
+
+### Spec 편차
+
+Spec이 명시한 검증 수단·배정을 이 Plan이 바꾼 곳 둘이다. 어느 쪽도 AC의 **문언**을 바꾸지 않고 판정 **수단**만 바꾼다.
+
+| # | Spec 명시 | Plan이 쓰는 것 | 근거 |
+|---|---|---|---|
+| D-1 | AC-35 "검증: `chezmoi diff` 출력에 해당 경로가 포함된다" | 검증 7 `chezmoi --source "$PWD" target-path dot_claude/skills/dual-review/SKILL.md` | `chezmoi source-path`가 `/Users/lee-kyu-hwan/code/dotfiles`(main 체크아웃)를 가리켜 이 워크트리의 새 파일을 보지 못한다(실측). `--source`를 붙인 `diff`도 가능하나 워크트리 전체 diff를 출력해 `grep` 카운트가 다른 변경에 오염된다. `target-path`는 대상 파일 하나에 대해 종료 코드와 배치 경로를 직접 내므로 더 결정적이다. AC-35의 문언("`~/.claude/skills/dual-review/`로 배치되는 것으로 나타난다")은 그대로 충족된다 |
+| D-2 | Test strategy가 AC-41을 `test_content_contracts.py`(계약 문구)에만 배정 | 행동 단정(빈 `evidence` 반박 미채택)은 `test_review_state.py`, 스키마 계약 단정은 `test_content_contracts.py` | AC-41은 두 조건을 갖는데(스키마가 `minItems: 1`을 강제 + 빈 반박이 채택되지 않음) Spec Test strategy는 앞의 것만 배정했다. 뒤의 것은 `review_state.py`의 런타임 행동이라 계약 테스트로 판정할 수 없다. 파일을 나누되 두 조건 모두 강제된다 |
 
 미구성 검증 범주와 그 근거:
 
@@ -319,7 +378,7 @@ Spec의 Failure behavior 표 각 행이 어느 산출물·태스크의 책임인
 | AC-2 | T6 | 검증 1 | 라인 변경 시 동일, 경로·카테고리 변경 시 상이 |
 | AC-3 | T6 | 검증 1 | 라인 번호 무관하게 동일 `anchor_fingerprint` |
 | AC-4 | T3 | 검증 1 | 네 조건 각각 `location_valid=false`, 전부 불성립 시 `true` |
-| AC-5 | T3 | 검증 1 | hunk 밖 라인 `in_diff_range=false`, 요약으로 분류 |
+| AC-5 | T3, T7 | 검증 1 | T3가 hunk 밖 라인의 `in_diff_range=false`를, T7이 그 finding의 `summary_only_findings` 편입과 `inline_review.comments` 부재를 단정 |
 | AC-6 | T6 | 검증 1 | 병합 1건, 대표 위치 최소, 나머지 `additional_locations` |
 | AC-7 | T8 | 검증 1 | 2회째 `apply`의 쓰기 0건, 종료 코드 0 |
 | AC-8 | T8 | 검증 1 | 마커 대조 후 단일 호출 1건 또는 0건 |
@@ -332,10 +391,10 @@ Spec의 Failure behavior 표 각 행이 어느 산출물·태스크의 책임인
 | AC-15 | T7 | 검증 1 | `plan` 쓰기 0건, AST상 `apply` 호출 경로 없음 |
 | AC-16 | T8 | 검증 1 | `--no-publish` 시 쓰기 0건 |
 | AC-17 | T2 | 검증 1 | 매핑 표와 일치, `code-simplifier` 미선택, 신호·건수 기록 |
-| AC-18 | T4 | 검증 1 | 프롬프트에 상대 산출물 경로·내용 부재 |
+| AC-18 | T4 | 검증 1 | 두 조건 모두: 프롬프트에 상대 산출물 경로·내용 부재 + CRITIQUE 이전 상태 조회가 상대 산출물을 반환하지 않음 |
 | AC-19 | T4 | 검증 1 | 2회째 `excluded`, 3회째 재요청 없음 |
 | AC-20 | T4 | 검증 1 | 승인 없으면 전이 거부 |
-| AC-21 | T4 | 검증 1 | `no_new_evidence` 기록, 라운드 ≤ 2, 첫 라운드 성립 |
+| AC-21 | T4 | 검증 1 | 세 조건 모두: `no_new_evidence` 기록 + 3회째 `record-critique` 거부로 라운드 상한 2 강제 + 첫 라운드 기준선 성립 |
 | AC-22 | T4 | 검증 1 | 두 조건 참에서만 `abstraction_drift`, 첫 라운드 미발생 |
 | AC-23 | T5 | 검증 1 | `source` 부재, 식별자 문자열 0건 |
 | AC-24 | T5 | 검증 1 | 동일 시드 재현, 다른 시드 상이 |
@@ -355,7 +414,7 @@ Spec의 Failure behavior 표 각 행이 어느 산출물·태스크의 책임인
 | AC-38 | T10 | 검증 1 | 4절 존재, 버전 정책이 세 자리 기술 |
 | AC-39 | T7 | 검증 1 | 첫 줄 형식 일치, `head_sha` 인용 |
 | AC-40 | T9 | 검증 1 | 한계 2건 명시 |
-| AC-41 | T1, T4 | 검증 1 | `evidence` required·`minItems: 1`, 빈 반박 미채택 |
+| AC-41 | T1, T4 | 검증 1 | 스키마 계약(`evidence` required·`minItems: 1`)은 `test_content_contracts.py`, 행동(빈 반박 미채택)은 `test_review_state.py` — Spec 편차 D-2 |
 | AC-42 | T1 | 검증 1 | 5축 required, 누락 픽스처 실패 |
 | AC-43 | T1 | 검증 1 | 4값 enum, 그 밖의 값 실패 |
 | AC-44 | T1 | 검증 1 | `uniqueItems` 부재, lookaround 부재 |
@@ -363,7 +422,7 @@ Spec의 Failure behavior 표 각 행이 어느 산출물·태스크의 책임인
 | AC-46 | T7 | 검증 1 | 단일/여러 줄/hunk 경계 세 경우, `position` 부재 |
 | AC-47 | T7 | 검증 1 | 6필드 상태 기록 |
 | AC-48 | T9 | 검증 3 + 검증 1 | 3이 `0`, 1의 계약 테스트가 여섯 플래그 존재를 별도 단정 |
-| AC-49 | T7 | 검증 1 | 2페이지 마커 `persisting`, 오분류 없음, 오류 전파 |
+| AC-49 | T7 | 검증 1 | 세 조건 모두: 2페이지째 마커가 `persisting` + 그 finding이 `resolved`로 오분류되지 않음 + 순회 오류 전파 |
 | AC-50 | T5 | 검증 1 | 세 실행 형태 각각 허용 분류만 산출 |
 | AC-51 | T7 | 검증 1 | 다섯 값 기록, PR 메타 재조회 부재 |
 | AC-52 | T8 | 검증 1 | 종료 코드 != 0, 쓰기 0건 |
@@ -379,6 +438,21 @@ Spec 라운드 2의 SPEC-007(Medium)은 R10.3의 "리포트에 명시" 하위 �
 **리포트 산문 절반만 문서 지시로 남긴다.** 리포트는 스킬 실행 시 오케스트레이터가 대화형으로 산출하는 산문이고 스크립트가 만드는 파일이 아니므로 단위 테스트의 대상이 아니다. 이 범위 구분을 `references/publish-contract.md`에 명시해 구현자가 게시 요약 쪽을 누락으로 오해하지 않게 한다.
 
 라운드 1의 PLAN-006이 지적한 것이 정확히 이 구분의 부재였다. 원래 서술은 네 조항을 일괄해 문서 지시로 취급했는데, 그중 게시 요약 절반은 스크립트 산출물이라 판정 가능했다.
+
+## 개정 조합 검토
+
+라운드 2에서 새로 제기된 셋(PLAN-009·010·012)이 전부 라운드 1 해소 과정에서 생긴 회귀였다. 특히 PLAN-010은 PLAN-002와 PLAN-006을 각각 옳게 고치면서 그 교차점을 놓친 결과다. 이번 개정은 7건이 네 지점에서 겹치므로, 겹치는 영역을 부분 치환하지 않고 통째로 재작성한 뒤 아래를 점검했다.
+
+| 겹치는 지점 | 관련 finding | 점검 결과 |
+|---|---|---|
+| T4 | PLAN-003(AC-18·AC-21 단정), PLAN-004(AC-41 파일명), PLAN-010(픽스처 생성) | 태스크를 통째로 다시 써 단정 목록·파일명·픽스처 생성이 한 서술 안에 있다. `state-excluded-reviewer.json` 생성에 필요한 `excluded` 경로는 같은 태스크가 구현하므로 순환이 없다 |
+| File map | PLAN-004(AC-41 분할), PLAN-010(픽스처 2종) | 테스트 3행과 픽스처 행을 함께 다시 썼다. AC-5·AC-41이 두 파일에 나뉘는 것을 양쪽 행에 모두 표기해 한쪽만 보고 누락하는 경우를 없앴다 |
+| 인터페이스 표 | PLAN-011(`--calls-out` 객체, `--requested-base` 선택), PLAN-012(`--synthesis` 검증) | 표와 설명 문단을 함께 다시 썼다. `--calls-out`이 객체 배열이라는 규정이 검증 10 스크립트의 `c["method"]` 키 접근을 성립시킨다 |
+| 검증 10 스크립트 | PLAN-011(덤프 형태), PLAN-012(synthesis 리터럴) | 리터럴을 T1이 고정한 최소 유효 문서로 바꿨고, 그 문서가 required 다섯 필드를 모두 갖는다. `$HEAD`는 스크립트 앞부분에서 정의되므로 참조가 유효하다 |
+
+교차 점검에서 하나를 새로 발견해 함께 고쳤다: T2가 만드는 픽스처 셋과 T4가 만드는 픽스처 둘은 **위치 정보의 출처가 다르다**(T2 시점엔 T3 미구현, T4 시점엔 구현 완료). 명시하지 않으면 구현자가 뒤 둘에도 T3의 갱신 단계가 필요하다고 오해할 수 있어 픽스처 절에 비대칭을 기록했다.
+
+검증 번호 참조는 전수 대조했다. 현재 문서에서 "검증 9"를 참조하는 곳은 AC-27 추적표 행(검증 8 + 검증 9)과 프로덕션 무변경 확인 절뿐이며 둘 다 로컬 스키마 검사를 가리키는 정확한 참조다.
 
 <!-- strict-only:start -->
 
@@ -415,7 +489,7 @@ Spec 라운드 2의 SPEC-007(Medium)은 R10.3의 "리포트에 명시" 하위 �
 |---|---|---|
 | `pr-review-toolkit` 에이전트 이름 6종 | 설치본 `agents/*.md` 파일명 | T9 계약 테스트가 참조 이름을 상수로 고정 |
 | `codex exec` 플래그·모델 | 검증 8 | 종료 코드 0 |
-| GitHub REST/GraphQL 필드 | 검증 9 | 계획 스키마 유효 |
+| GitHub REST/GraphQL 필드 | 검증 10 | 계획 스키마 유효, 쓰기 3튜플 0건 |
 
 롤백은 위 "Rollout and rollback" 표를 따른다. 게시된 코멘트의 자동 롤백이 없다는 것이 유일한 비가역 지점이며, 이 워크플로에서는 실제 게시를 하지 않으므로 발생하지 않는다.
 
@@ -431,11 +505,11 @@ Spec 라운드 2의 SPEC-007(Medium)은 R10.3의 "리포트에 명시" 하위 �
 고위험 경로는 PR 게시다. 셋으로 나눈다.
 
 1. **fake 클라이언트 통합 검증(자동, 필수).** 검증 1이 AC-7~AC-16과 AC-49를 실행한다. lifecycle 전체, 단계별 부분 실패 후 재실행 멱등, head SHA 불일치 중단, 화이트리스트 준수, verdict 고정, 다중 페이지 순회를 포함한다. **중단 조건: 하나라도 실패하면 구현을 진행하지 않고 원인을 고친 뒤 다시 돌린다.**
-2. **읽기 전용 실 API 검증(자동, 조건부).** 검증 9. 열린 PR이 없으면 `not applicable`로 기록하고 리포트에 남긴다.
+2. **읽기 전용 실 API 검증(자동, 조건부).** 검증 10. 열린 PR이 없으면 `not applicable`로 기록하고 리포트에 남긴다.
 3. **실 게시 E2E(이 워크플로에서 실행하지 않음).** 실제 `apply`는 외부 비가역 쓰기이므로 자동 검증에 포함하지 않는다. 사용자가 스킬을 처음 실전 사용할 때 승인 게이트를 거쳐 수행한다. **이 항목이 검증되지 않은 채 남는다는 사실을 리포트에 명시한다.**
 
 ### No production mutation confirmation
 
-이 구현 워크플로는 프로덕션을 변경하지 않는다. 산출물은 `dot_claude/skills/dual-review/` 아래 파일들, `docs/dual-review-maintenance.md`, `.gitignore` 한 줄이다. 구현 중 자동 커밋·푸시·머지·배포를 하지 않고 `chezmoi apply`도 실행하지 않는다. 검증 8은 `codex exec`를 실행하지만 `--sandbox read-only`라 저장소를 바꾸지 않는다. 검증 9는 GitHub를 읽기만 하고 쓰기 3튜플이 0건임을 함께 단정한다.
+이 구현 워크플로는 프로덕션을 변경하지 않는다. 산출물은 `dot_claude/skills/dual-review/` 아래 파일들, `docs/dual-review-maintenance.md`, `.gitignore` 한 줄이다. 구현 중 자동 커밋·푸시·머지·배포를 하지 않고 `chezmoi apply`도 실행하지 않는다. 검증 8은 `codex exec`를 실행하지만 `--sandbox read-only`라 저장소를 바꾸지 않는다. 검증 9는 로컬 파일 두 개를 읽는 스키마 검사이므로 GitHub에 접근하지 않는다. GitHub를 건드리는 유일한 검증은 10이며, 그것은 읽기 전용 `plan`만 실행하고 쓰기 3튜플이 0건임을 스크립트 마지막 단정으로 증명한다.
 
 <!-- strict-only:end -->
