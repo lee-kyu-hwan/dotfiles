@@ -2,7 +2,9 @@
 
 ## Input and validation
 
-Accept only a normalized corpus envelope with `schema_version: "1.0.0"` and `records`. Before analysis, run `scripts/validate_corpus.py CURRENT`; when prior corpus data exists, run `scripts/validate_corpus.py CURRENT --existing EXISTING`. An unsupported version, invalid document, or failed preservation comparison stops analysis and requires an explicit migration with stated input/output versions and conversion rules. Never silently repair, downgrade, or reinterpret a version.
+Accept only a normalized corpus envelope with `schema_version: "1.0.0"` and `records`. Before analysis, run `python3 scripts/validate_corpus.py CURRENT [--existing PREVIOUS_CORPUS]`. `--existing` accepts only a previous normalized corpus for append-only comparison. Read optional existing enriched PR and PAT outputs separately to preserve IDs and histories; they are not `PREVIOUS_CORPUS` unless an enriched PR corpus independently satisfies the normalized-corpus contract.
+
+An unsupported schema version stops analysis and requires an explicit versioned migration with stated input/output versions and conversion rules. An invalid `1.0.0` corpus stops analysis and requires corrected input. A failed append-only or preservation comparison stops analysis until the conflict is resolved. Never automatically retry, silently repair, downgrade, or reinterpret any of these cases.
 
 ## Identity and append-only state
 
@@ -16,4 +18,4 @@ Keep observed facts and their sources separate from analysis. Record changed fac
 
 ## Side effects and recovery
 
-The analyzer reads supplied local artifacts and may write only requested enriched local outputs. It never edits input in place or creates external state. It does not automatically retry a failed validation, migration, identity conflict, or unavailable evidence; report the limitation and stop or await corrected input.
+The analyzer reads supplied local artifacts and may write only requested enriched local outputs. It never edits input in place or creates external state. It does not automatically retry or silently repair a version, validation, identity, preservation, or unavailable-evidence failure; report the limitation and await the required migration, corrected input, resolved conflict, or evidence.
