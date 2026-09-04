@@ -637,6 +637,201 @@ class ArtifactTests(unittest.TestCase):
                 self.assertEqual(before, state)
 
 
+class TerminalReportRegistrationTests(unittest.TestCase):
+    def test_report_registers_after_review_limit_exhausted_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            cases = (
+                ("spec", "SPEC_REVIEW", 3),
+                ("plan", "PLAN_REVIEW", 2),
+                ("code", "CODE_REVIEW", 3),
+            )
+            for artifact, stage, limit in cases:
+                with self.subTest(artifact=artifact):
+                    state = state_at(stage)
+                    digest = VALID_DIGEST
+                    if artifact in {"spec", "plan"}:
+                        artifact_path = directory / f"{artifact}.md"
+                        artifact_path.write_text(f"{artifact}\n", encoding="utf-8")
+                        quality_state.set_artifact(state, artifact, artifact_path)
+                        digest = quality_state._file_digest(artifact_path)
+
+                    for round_number in range(1, limit + 1):
+                        review_path = write_json(
+                            directory,
+                            f"{artifact}-{round_number}.json",
+                            valid_review(
+                                artifact=artifact,
+                                round_number=round_number,
+                                verdict="REVISE",
+                                blockers=[f"{artifact.upper()}-LIMIT-{round_number}"],
+                            ),
+                        )
+                        quality_state.record_review(state, review_path, digest)
+
+                    report_path = directory / f"{artifact}-report.md"
+                    report_path.write_text("report\n", encoding="utf-8")
+                    quality_state.set_artifact(state, "report", report_path)
+
+                    self.assertEqual("NEEDS_REDESIGN", state["stage"])
+                    self.assertEqual(
+                        f"REVIEW_LIMIT_EXHAUSTED:{artifact}", state["status_reason"]
+                    )
+                    self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_report_registers_after_recurring_blocking_finding_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("SPEC_REVIEW")
+            blocker = "SPEC-RECURRING"
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[blocker],
+                    ),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            report_path = directory / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            quality_state.set_artifact(state, "report", report_path)
+
+            self.assertEqual("NEEDS_REDESIGN", state["stage"])
+            self.assertEqual(
+                f"RECURRING_BLOCKING_FINDING:{blocker}", state["status_reason"]
+            )
+            self.assertEqual(2, state["rounds"]["spec"])
+            self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_report_registration_succeeds_in_every_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                with self.subTest(terminal=terminal):
+                    state = state_at(terminal)
+                    quality_state.set_artifact(state, "report", report_path)
+                    self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_non_report_kinds_stay_immutable_in_every_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "artifact.md"
+            artifact_path.write_text("artifact\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                for kind in ("spec", "plan", "compact_plan"):
+                    with self.subTest(terminal=terminal, kind=kind):
+                        state = state_at(terminal)
+                        before = deepcopy(state)
+                        with self.assertRaises(quality_state.TransitionError) as context:
+                            quality_state.set_artifact(state, kind, artifact_path)
+                        self.assertIs(type(context.exception), quality_state.TransitionError)
+                        self.assertEqual(before, state)
+
+    def test_terminal_report_registration_still_validates_the_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            invalid_paths = (directory / "missing.md", directory, "")
+            for terminal in quality_state.TERMINAL_STATES:
+                for path in invalid_paths:
+                    with self.subTest(terminal=terminal, path=path):
+                        state = state_at(terminal)
+                        before = deepcopy(state)
+                        with self.assertRaises(StateError) as context:
+                            quality_state.set_artifact(state, "report", path)
+                        self.assertIs(type(context.exception), StateError)
+                        self.assertEqual(before, state)
+            for path in invalid_paths:
+                with self.subTest(stage="CLASSIFIED", path=path):
+                    state = state_at("CLASSIFIED")
+                    before = deepcopy(state)
+                    with self.assertRaises(StateError) as context:
+                        quality_state.set_artifact(state, "report", path)
+                    self.assertIs(type(context.exception), StateError)
+                    self.assertEqual(before, state)
+
+    def test_terminal_unknown_kind_is_rejected_as_transition_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "artifact.md"
+            artifact_path.write_text("artifact\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                with self.subTest(terminal=terminal):
+                    with self.assertRaises(quality_state.TransitionError) as context:
+                        quality_state.set_artifact(
+                            state_at(terminal), "unknown", artifact_path
+                        )
+                    self.assertIs(type(context.exception), quality_state.TransitionError)
+
+    def test_record_review_is_rejected_after_each_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            limit_state = state_at("PLAN_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"plan-{round_number}.json",
+                    valid_review(
+                        artifact="plan",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[f"PLAN-LIMIT-{round_number}"],
+                    ),
+                )
+                quality_state.record_review(limit_state, review_path, VALID_DIGEST)
+            limit_retry = write_json(
+                directory, "plan-3.json", valid_review(artifact="plan", round_number=3)
+            )
+
+            recurring_state = state_at("SPEC_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=["SPEC-RECURRING"],
+                    ),
+                )
+                quality_state.record_review(recurring_state, review_path, VALID_DIGEST)
+            recurring_retry = write_json(
+                directory, "spec-3.json", valid_review(artifact="spec", round_number=3)
+            )
+
+            for state, review_path in (
+                (limit_state, limit_retry),
+                (recurring_state, recurring_retry),
+            ):
+                with self.subTest(stage=state["stage"]):
+                    with self.assertRaises(StateError) as context:
+                        quality_state.record_review(state, review_path, VALID_DIGEST)
+                    self.assertIn("requires stage", str(context.exception))
+
+    def test_report_registers_after_review_output_invalid_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_validation_failure(
+                state, "plan", 1, ["error"]
+            )
+            quality_state.record_review_validation_failure(
+                state, "plan", 1, ["error"]
+            )
+            report_path = directory / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+
+            quality_state.set_artifact(state, "report", report_path)
+
+            self.assertEqual("BLOCKED", state["stage"])
+            self.assertEqual("REVIEW_OUTPUT_INVALID", state["status_reason"])
+            self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+
 class PlanApprovalGuardTests(unittest.TestCase):
     def test_approve_plan_rejects_content_changed_since_the_passing_review(self):
         """A Plan edited after PLAN_PASSED but before approval, at the same
@@ -2575,6 +2770,121 @@ class CLITests(unittest.TestCase):
             self.assertEqual(0, second)
             self.assertEqual(2, persisted["rounds"]["plan"])
             self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+
+    def test_cli_registers_report_after_limit_exhausted_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            project_root = make_git_repo(self)
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("spec\n", encoding="utf-8")
+            report_path = artifact_dir / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root", str(state_root),
+                "--goal", "Register report after review limit",
+                "--requested-mode", "standard",
+                "--project-root", str(project_root),
+                "--artifact-dir", str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+            self.assert_cli_success([
+                "classify", "--state", str(state_path), "--mode", "standard",
+                "--reasons", str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "spec",
+                "--path", str(spec_path),
+            ])
+            self.assert_cli_success([
+                "transition", "--state", str(state_path), "--to", "SPEC_REVIEW",
+            ])
+            digest = quality_state._file_digest(spec_path)
+            for round_number in (1, 2, 3):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[f"SPEC-LIMIT-{round_number}"],
+                    ),
+                )
+                self.assert_cli_success([
+                    "record-review", "--state", str(state_path), "--review", str(review_path),
+                    "--artifact-digest", digest,
+                ])
+
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "report",
+                "--path", str(report_path),
+            ])
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+            self.assertEqual(str(report_path), persisted["artifacts"]["report"])
+
+    def test_cli_registers_report_after_recurring_finding_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            project_root = make_git_repo(self)
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("spec\n", encoding="utf-8")
+            report_path = artifact_dir / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root", str(state_root),
+                "--goal", "Register report after recurring finding",
+                "--requested-mode", "standard",
+                "--project-root", str(project_root),
+                "--artifact-dir", str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+            self.assert_cli_success([
+                "classify", "--state", str(state_path), "--mode", "standard",
+                "--reasons", str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "spec",
+                "--path", str(spec_path),
+            ])
+            self.assert_cli_success([
+                "transition", "--state", str(state_path), "--to", "SPEC_REVIEW",
+            ])
+            digest = quality_state._file_digest(spec_path)
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=["SPEC-RECURRING"],
+                    ),
+                )
+                self.assert_cli_success([
+                    "record-review", "--state", str(state_path), "--review", str(review_path),
+                    "--artifact-digest", digest,
+                ])
+
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "report",
+                "--path", str(report_path),
+            ])
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+            self.assertEqual(2, persisted["rounds"]["spec"])
+            self.assertEqual(str(report_path), persisted["artifacts"]["report"])
 
     def test_cli_persists_mutations_before_a_transition_error(self):
         with tempfile.TemporaryDirectory() as directory:

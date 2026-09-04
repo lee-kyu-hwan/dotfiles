@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 4.0.0
+version: 4.1.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -118,7 +118,7 @@ artifact's SHA-256 approval digest via approve-plan.
 | AWAITING_PLAN_APPROVAL | Show the final Plan or the light compact Plan and ask exactly once for explicit implementation approval |
 | IMPLEMENTING | Confirm the approval digest and invoke the exact Codex route for the selected mode |
 | CODE_REVIEW | Independently verify each Codex round, create the review context, review, validate, gate, and fix at most three rounds |
-| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED | Render report.md from templates/report.md and register it with set-artifact --kind report (absolute path) BEFORE transitioning into the terminal state; then transition and explain the terminal outcome |
+| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED | Render report.md from templates/report.md and register it with set-artifact --kind report (absolute path) BEFORE transitioning into the terminal state; then transition and explain the terminal outcome. When a helper has already transitioned automatically, register the report in the terminal state as the Terminal section describes. |
 
 ## Stage procedures
 
@@ -241,11 +241,25 @@ verification, or model recovery path.
 
 For every terminal outcome, render report.md from templates/report.md and
 register it with set-artifact --kind report (absolute path) BEFORE
-transitioning into COMPLETED, BLOCKED, NEEDS_REDESIGN, or CANCELLED. Then
+transitioning into COMPLETED, BLOCKED, NEEDS_REDESIGN, or CANCELLED, unless a
+helper has already transitioned automatically, in which case register the
+report in the terminal state as described below. Then
 transition into the selected terminal state and only then explain the
 outcome, evidence, unresolved advisory findings, and any next decision. The
 state file remains the authoritative record of the terminal status and status
 reason.
+
+When the review you are about to record is expected to end the workflow,
+because it is the last allowed round without a PASS or it repeats a blocking
+finding ID from an earlier round, render report.md and register it with
+set-artifact --kind report before calling record-review, while the stage is
+still non-terminal.
+
+Because record-review and record-review-error transition into NEEDS_REDESIGN
+or BLOCKED on their own, set-artifact --kind report is also accepted after the
+state is already terminal; register the report there when the terminal
+transition has already happened. No other artifact kind may be registered once
+the state is terminal.
 
 ## Review invocation contract
 

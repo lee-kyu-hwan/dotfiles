@@ -1,0 +1,10 @@
+# 변경 전 기준선 스위트 (base 4fd0899fdc8efa32f78f9346eac5d730b0547ac6)
+```
+$ cd dot_claude/skills/quality-goal && python3 -m unittest discover -s tests
+..error: artifact 'code' does not match expected artifact 'plan'
+..........................................
+----------------------------------------------------------------------
+Ran 229 tests in 1.835s
+
+OK
+```
