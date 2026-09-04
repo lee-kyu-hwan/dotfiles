@@ -115,6 +115,30 @@ class ValidateCorpusTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("pr_id", result.stderr)
 
+    def test_existing_resolved_record_cannot_acquire_pr_id(self):
+        previous = corpus([resolved_record(pr_id=None)])
+        current = corpus([resolved_record(pr_id="PR-001")])
+
+        result = self.run_validator(current, previous)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("pr_id", result.stderr)
+
+    def test_existing_unresolved_record_may_become_resolved(self):
+        previous_record = unresolved_record()
+        current_record = resolved_record(pr_id="PR-001", node_id="node-002")
+        current_record["pull_request"]["url"] = previous_record["pull_request"]["url"]
+        current_record["state_history"] = [
+            {"state": "unknown"},
+            {"state": "open"},
+        ]
+
+        result = self.run_validator(
+            corpus([current_record]), corpus([previous_record])
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_existing_rejects_removed_records(self):
         previous = corpus([resolved_record(), unresolved_record()])
         current = corpus([resolved_record()])

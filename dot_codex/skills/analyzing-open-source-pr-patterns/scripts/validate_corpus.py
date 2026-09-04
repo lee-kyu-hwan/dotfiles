@@ -146,7 +146,7 @@ def _compare_documents(previous, current):
             continue
 
         old_pr_id = old_record.get("pr_id")
-        if old_pr_id is not None and current_record.get("pr_id") != old_pr_id:
+        if old_status == "resolved" and current_record.get("pr_id") != old_pr_id:
             errors.append(
                 "existing.records["
                 + str(index)
