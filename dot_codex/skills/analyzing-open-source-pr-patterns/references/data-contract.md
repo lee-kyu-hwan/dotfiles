@@ -17,11 +17,11 @@ An unsupported schema version stops analysis and requires an explicit versioned 
 
 `identity_status` is `resolved` only when the PR and repository identities are verified. A resolved record uses `record_key: github-pr:<pull_request_node_id>`; an unresolved record retains its observed URL but has no PR ID and is not automatically merged by guesswork.
 
-Existing resolved identity mappings and IDs win. Never fill gaps, recycle, renumber, or reorder IDs. Existing `PAT-*` IDs follow the same stable rule. Preserve `state_history`, `analysis_history`, pattern history, and evidence snapshots exactly as prefixes.
+Existing resolved identity mappings and IDs win. Never fill gaps, recycle, renumber, or reorder IDs. Existing `PAT-*` IDs follow the same stable rule. Preserve `state_history`, `analysis_history`, pattern history, and evidence snapshots exactly as prefixes, including every JSON value type; a number and a boolean are not equal.
 
 For normalized-corpus `--existing` comparison, the previous `sources[].source_key` sequence must be an exact prefix of the current sequence: new sources append only. For each prior source, every field other than `observations` is immutable and deep-equal. Its previous `observations` array must be an exact prefix of the current array. Reordering sources, inserting before them, or rewriting `kind`, `run_key`, URLs, node IDs, or other metadata is invalid.
 
-Analysis output preserves every normalized field and type. Resolved records match by `pull_request_node_id`; unresolved records match only by the observed `pull_request.url`. The only analysis additions are the current `analysis` projection and append-only `analysis_history` described in the analysis contract.
+Analysis output preserves every normalized field and JSON value type. Resolved records match by `pull_request_node_id`; unresolved current records match by the observed `pull_request.url`. For prior analysis, consume exact identity matches first. A prior unresolved record without an exact match may transition to exactly one still-unmatched current resolved record with the same observed URL, preserving its complete `analysis_history`. Zero matches are removal, multiple matches are ambiguity, and both stop validation. Never use URL fallback for a previously resolved identity. The only analysis additions are the current `analysis` projection and append-only `analysis_history` described in the analysis contract.
 
 ## Deterministic analysis revision
 

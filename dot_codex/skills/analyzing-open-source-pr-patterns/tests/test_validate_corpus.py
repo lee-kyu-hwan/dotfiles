@@ -354,6 +354,19 @@ class ValidateCorpusTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("source metadata changed", result.stderr)
 
+    def test_existing_rejects_source_metadata_number_changed_to_boolean(self):
+        previous_record = resolved_record()
+        previous_record["sources"][0]["page_count"] = 1
+        current_record = copy.deepcopy(previous_record)
+        current_record["sources"][0]["page_count"] = True
+
+        result = self.run_validator(
+            corpus([current_record]), corpus([previous_record])
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("source metadata changed", result.stderr)
+
     def test_existing_rejects_source_reorder(self):
         previous_record = resolved_record()
         previous_record["sources"].append(
@@ -453,6 +466,29 @@ class ValidateCorpusTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
 
+    def test_analysis_output_rejects_normalized_number_changed_to_boolean(self):
+        record = resolved_record()
+        record["repository"]["numeric_marker"] = 1
+        current = corpus([record])
+        output = analysis_output(current, self.current_revision())
+        output["records"][0]["repository"]["numeric_marker"] = True
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("normalized field repository changed", result.stderr)
+
+    def test_analysis_output_rejects_copied_metadata_number_changed_to_boolean(self):
+        current = corpus([resolved_record()])
+        current["generated_by"]["numeric_marker"] = 1
+        output = analysis_output(current, self.current_revision())
+        output["generated_by"]["numeric_marker"] = True
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("generated_by must exactly copy", result.stderr)
+
     def test_analysis_output_rejects_missing_or_mismatched_current_snapshot(self):
         current = corpus([resolved_record()])
         revision = self.current_revision()
@@ -473,6 +509,23 @@ class ValidateCorpusTests(unittest.TestCase):
                 result = self.run_analysis_validator(current, output)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(message, result.stderr)
+
+    def test_analysis_output_rejects_snapshot_number_changed_to_boolean(self):
+        current = corpus([resolved_record()])
+        output = analysis_output(current, self.current_revision())
+        output["records"][0]["analysis"]["evidence_manifest"] = {
+            "files": {"numeric_marker": 1}
+        }
+        snapshot = output["records"][0]["analysis_history"][-1]
+        snapshot["evidence_manifest"] = {"files": {"numeric_marker": True}}
+        snapshot["conclusion"]["evidence_manifest"] = {
+            "files": {"numeric_marker": True}
+        }
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("evidence_manifest must equal current analysis", result.stderr)
 
     def test_analysis_output_preserves_existing_pattern_history_prefix(self):
         current = corpus([resolved_record()])
@@ -538,6 +591,68 @@ class ValidateCorpusTests(unittest.TestCase):
         output["records"][0]["analysis_history"][0]["revision"] = (
             "sha256:" + "0" * 64
         )
+
+        result = self.run_analysis_validator(current, output, previous)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("analysis_history is not an exact prefix", result.stderr)
+
+    def test_existing_analysis_preserves_unresolved_history_when_identity_resolves(self):
+        url = "https://github.com/example/repo/pull/7"
+        revision = self.current_revision()
+        previous_input = corpus([unresolved_record(url)])
+        previous = analysis_output(previous_input, revision)
+
+        current_record = resolved_record(pr_id="PR-007", node_id="node-007")
+        current_record["pull_request"]["url"] = url
+        current_record.pop("analysis_history")
+        current = corpus([current_record])
+        output = analysis_output(current, revision, existing=previous)
+        current_snapshot = output["records"][0]["analysis_history"][-1]
+        output["records"][0]["analysis_history"] = copy.deepcopy(
+            previous["records"][0]["analysis_history"]
+        ) + [current_snapshot]
+
+        result = self.run_analysis_validator(current, output, previous)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_existing_analysis_rejects_ambiguous_unresolved_to_resolved_match(self):
+        url = "https://github.com/example/repo/pull/7"
+        revision = self.current_revision()
+        previous_input = corpus([unresolved_record(url)])
+        previous = analysis_output(previous_input, revision)
+
+        first = resolved_record(pr_id="PR-007", node_id="node-007")
+        second = resolved_record(pr_id="PR-008", node_id="node-008")
+        for record in (first, second):
+            record["pull_request"]["url"] = url
+            record.pop("analysis_history")
+        current = corpus([first, second])
+        output = analysis_output(current, revision, existing=previous)
+        current_snapshot = output["records"][0]["analysis_history"][-1]
+        output["records"][0]["analysis_history"] = copy.deepcopy(
+            previous["records"][0]["analysis_history"]
+        ) + [current_snapshot]
+
+        result = self.run_analysis_validator(current, output, previous)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            result.stderr,
+            "existing analyzed record has ambiguous same-URL matches: URL "
+            + url
+            + "\n",
+        )
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_analysis_output_rejects_history_number_changed_to_boolean(self):
+        current = corpus([resolved_record()])
+        revision = self.current_revision()
+        previous = analysis_output(current, revision)
+        previous["records"][0]["analysis_history"][-1]["numeric_marker"] = 1
+        output = analysis_output(current, revision, existing=previous)
+        output["records"][0]["analysis_history"][-2]["numeric_marker"] = True
 
         result = self.run_analysis_validator(current, output, previous)
 

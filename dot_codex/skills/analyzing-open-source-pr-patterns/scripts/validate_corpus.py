@@ -93,8 +93,26 @@ def _identity_description(identity):
     return label + " " + str(identity[1])
 
 
+def _json_equal(left, right):
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return set(left) == set(right) and all(
+            _json_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return left == right
+
+
 def _is_prefix(previous, current):
-    return len(previous) <= len(current) and current[: len(previous)] == previous
+    return len(previous) <= len(current) and all(
+        _json_equal(previous_item, current_item)
+        for previous_item, current_item in zip(previous, current)
+    )
 
 
 def _validate_document(document, label):
@@ -284,7 +302,7 @@ def _compare_documents(previous, current):
                     for key, value in new_source.items()
                     if key != "observations"
                 }
-                if old_metadata != new_metadata:
+                if not _json_equal(old_metadata, new_metadata):
                     errors.append(
                         identity_description
                         + " source "
@@ -358,7 +376,7 @@ def _validate_string_list(value, prefix, errors):
 def _validate_generated_by(value, expected, prefix, errors):
     if not _validate_exact_keys(value, {"name", "revision"}, prefix, errors):
         return
-    if value != expected:
+    if not _json_equal(value, expected):
         errors.append(prefix + " must equal the current analysis generator")
 
 
@@ -432,21 +450,74 @@ def _validate_analysis_snapshot(snapshot, analysis, revision, prefix, errors):
         errors.append(prefix + ".revision must equal analysis_generated_by.revision")
     if not _is_rfc3339(snapshot["generated_at"]):
         errors.append(prefix + ".generated_at must be an RFC3339 string")
-    if snapshot["evidence_manifest"] != analysis.get("evidence_manifest"):
+    if not _json_equal(
+        snapshot["evidence_manifest"], analysis.get("evidence_manifest")
+    ):
         errors.append(prefix + ".evidence_manifest must equal current analysis")
-    if snapshot["conclusion"] != analysis:
+    if not _json_equal(snapshot["conclusion"], analysis):
         errors.append(prefix + ".conclusion must equal current analysis")
 
 
-def _existing_record_map(existing):
+def _match_existing_records(existing, current_records):
     records = existing.get("records", []) if isinstance(existing, dict) else []
     if not isinstance(records, list):
-        return {}
-    return {
+        return {}, []
+
+    current_by_identity = {
         _record_identity(record): record
-        for record in records
+        for record in current_records
         if _record_identity(record) is not None
     }
+    previous = [
+        (index, record, _record_identity(record))
+        for index, record in enumerate(records)
+        if _record_identity(record) is not None
+    ]
+    matched_previous = set()
+    matched_current = set()
+    matches = {}
+    errors = []
+
+    for index, record, identity in previous:
+        if identity in current_by_identity and identity not in matched_current:
+            matches[identity] = record
+            matched_previous.add(index)
+            matched_current.add(identity)
+
+    for index, record, identity in previous:
+        if index in matched_previous:
+            continue
+        identity_description = _identity_description(identity)
+        if identity in current_by_identity:
+            errors.append(
+                "existing analyzed record has ambiguous reused identity: "
+                + identity_description
+            )
+            continue
+        if identity[0] != "url":
+            errors.append("existing analyzed record was removed: " + identity_description)
+            continue
+
+        candidates = [
+            current_identity
+            for current_identity, current_record in current_by_identity.items()
+            if current_identity not in matched_current
+            and _record_url(current_record) == identity[1]
+        ]
+        if not candidates:
+            errors.append("existing analyzed record was removed: " + identity_description)
+        elif len(candidates) > 1:
+            errors.append(
+                "existing analyzed record has ambiguous same-URL matches: "
+                + identity_description
+            )
+        else:
+            current_identity = candidates[0]
+            matches[current_identity] = record
+            matched_previous.add(index)
+            matched_current.add(current_identity)
+
+    return matches, errors
 
 
 def _existing_patterns(existing):
@@ -482,7 +553,7 @@ def _validate_output_record(
     for field, input_value in input_record.items():
         if field in ("analysis", "analysis_history"):
             continue
-        if output_record.get(field) != input_value:
+        if not _json_equal(output_record.get(field), input_value):
             errors.append(prefix + " normalized field " + field + " changed")
 
     analysis = output_record.get("analysis")
@@ -602,7 +673,7 @@ def _validate_pattern_record(pattern, previous_pattern, generator, revision, pre
                 errors.append(snapshot_prefix + ".revision must equal current revision")
             if not _is_rfc3339(snapshot["generated_at"]):
                 errors.append(snapshot_prefix + ".generated_at must be an RFC3339 string")
-            if snapshot["conclusion"] != projection:
+            if not _json_equal(snapshot["conclusion"], projection):
                 errors.append(snapshot_prefix + ".conclusion must equal current pattern")
 
 
@@ -614,7 +685,7 @@ def _validate_analysis_output(current, output, existing, revision):
 
     if output.get("schema_version") != SUPPORTED_SCHEMA_VERSION:
         errors.append("analysis output has unsupported schema_version")
-    if output.get("generated_by") != current.get("generated_by"):
+    if not _json_equal(output.get("generated_by"), current.get("generated_by")):
         errors.append("analysis output.generated_by must exactly copy input generated_by")
 
     generator = {"name": ANALYZER_NAME, "revision": revision}
@@ -631,7 +702,12 @@ def _validate_analysis_output(current, output, existing, revision):
         for record in current.get("records", [])
         if _record_identity(record) is not None
     }
-    previous_records = _existing_record_map(existing)
+    previous_records, matching_errors = _match_existing_records(
+        existing, current.get("records", [])
+    )
+    errors.extend(matching_errors)
+    if matching_errors:
+        return errors
     output_records = output.get("records")
     output_by_identity = {}
     if not isinstance(output_records, list):
