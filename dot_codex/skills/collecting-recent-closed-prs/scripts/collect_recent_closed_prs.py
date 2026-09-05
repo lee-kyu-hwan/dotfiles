@@ -473,6 +473,8 @@ def collect_repository_hits(
     except ApiFailure as failure:
         status = classify_repository_failure(status=failure.status)
         return _empty_repository_search_result(repository, status, status, str(failure))
+    except ValueError as error:
+        return _empty_repository_search_result(repository, "failed", "failed", str(error))
 
     partitions: list[SearchPartition] = []
     safe_hits: list[dict[str, object]] = []
@@ -547,6 +549,18 @@ def collect_repository_hits(
             return
 
         items = list(first_items)
+        if len(items) > total_count:
+            fail_partition(
+                start,
+                end,
+                query,
+                total_count,
+                len(items),
+                incomplete_results,
+                "search page exceeded advertised total_count",
+            )
+            safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
+            return
         page = 1
         while len(items) < total_count:
             page += 1
@@ -555,7 +569,7 @@ def collect_repository_hits(
                     client.get_json("/search/issues", {"q": query, "page": page}),
                     "search response",
                 )
-                _, page_incomplete, page_items = _search_response(page_payload)
+                page_total_count, page_incomplete, page_items = _search_response(page_payload)
             except BudgetExhausted:
                 stopped = True
                 fail_partition(
@@ -565,6 +579,33 @@ def collect_repository_hits(
                 return
             except (ApiFailure, ValueError) as error:
                 fail_partition(start, end, query, total_count, len(items), incomplete_results, str(error))
+                return
+            items.extend(page_items)
+            if page_total_count != total_count:
+                fail_partition(
+                    start,
+                    end,
+                    query,
+                    total_count,
+                    len(items),
+                    page_incomplete,
+                    "search total_count changed from {0} to {1} during pagination".format(
+                        total_count, page_total_count
+                    ),
+                )
+                safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
+                return
+            if len(items) > total_count:
+                fail_partition(
+                    start,
+                    end,
+                    query,
+                    total_count,
+                    len(items),
+                    page_incomplete,
+                    "search pages exceeded advertised total_count",
+                )
+                safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
                 return
             if page_incomplete or not page_items:
                 fail_partition(
@@ -577,7 +618,6 @@ def collect_repository_hits(
                     "search pagination did not return every advertised result",
                 )
                 return
-            items.extend(page_items)
 
         partitions.append(
             SearchPartition(

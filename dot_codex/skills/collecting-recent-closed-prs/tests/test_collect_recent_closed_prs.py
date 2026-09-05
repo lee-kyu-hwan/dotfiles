@@ -752,6 +752,86 @@ class RepositorySearchTests(unittest.TestCase):
         search_calls = [call for call in client.calls if call[0] == "/search/issues"]
         self.assertEqual(len(search_calls), 2)
 
+    def test_first_page_over_return_is_partial_and_keeps_exact_safe_hits(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo"}
+            return {
+                "total_count": 1,
+                "incomplete_results": False,
+                "items": [
+                    {"node_id": "P-one", "number": 1, "closed_at": "2026-09-01T00:00:01Z"},
+                    {"node_id": "P-two", "number": 2, "closed_at": "2026-09-01T00:00:02Z"},
+                ],
+            }
+
+        result = self.collector.collect_repository_hits(
+            client=FakeSearchClient(self.collector, handler),
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.collection_status, "partial")
+        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-two", "P-one"])
+        self.assertEqual(result.partitions[0].returned_count, 2)
+        self.assertFalse(result.partitions[0].pagination_complete)
+        self.assertEqual(result.partitions[0].completion_state, "failed")
+        self.assertIn("exceeded advertised total_count", result.partitions[0].failure)
+
+    def test_later_page_total_count_drift_is_partial_and_stops_pagination(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo"}
+            if params["page"] == 1:
+                return {
+                    "total_count": 2,
+                    "incomplete_results": False,
+                    "items": [{"node_id": "P-one", "number": 1, "closed_at": "2026-09-01T00:00:01Z"}],
+                }
+            if params["page"] == 2:
+                return {
+                    "total_count": 3,
+                    "incomplete_results": False,
+                    "items": [{"node_id": "P-two", "number": 2, "closed_at": "2026-09-01T00:00:02Z"}],
+                }
+            raise AssertionError("a drifted leaf must not request another page")
+
+        client = FakeSearchClient(self.collector, handler)
+        result = self.collector.collect_repository_hits(
+            client=client,
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.collection_status, "partial")
+        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-two", "P-one"])
+        self.assertEqual(result.partitions[0].total_count, 2)
+        self.assertEqual(result.partitions[0].returned_count, 2)
+        self.assertIn("changed from 2 to 3", result.partitions[0].failure)
+        self.assertEqual(
+            [params["page"] for endpoint, params in client.calls if endpoint == "/search/issues"],
+            [1, 2],
+        )
+
+    def test_malformed_successful_preflight_is_recorded_per_repository(self):
+        result = self.collector.collect_repository_hits(
+            client=FakeSearchClient(self.collector, lambda endpoint, params: []),
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.preflight_outcome, "failed")
+        self.assertEqual(result.collection_status, "failed")
+        self.assertEqual(result.partitions, ())
+        self.assertTrue(result.warnings)
+        self.assertIn("preflight payload must be an object", result.warnings[0])
+
     def test_repositories_keep_independent_caps(self):
         def handler(endpoint, params):
             if endpoint.startswith("/repos/"):
