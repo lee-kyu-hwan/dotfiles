@@ -172,6 +172,8 @@ class ResolveIntervalTests(unittest.TestCase):
             "2026-09-01T00:00:00+0900",
             "2026-09-01T00:00+09:00",
             "2026-09-01T00:00:00Z trailing",
+            "2026-09-01T00:00:00+00:60",
+            "2026-09-01T00:00:00+24:00",
         ):
             with self.subTest(timestamp=timestamp):
                 with self.assertRaises(ValueError):

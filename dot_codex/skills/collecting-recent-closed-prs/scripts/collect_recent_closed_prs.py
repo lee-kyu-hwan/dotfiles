@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 RFC3339_TIMESTAMP = re.compile(
-    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z"
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)\Z"
 )
 
 
@@ -187,7 +187,10 @@ def _interval_mode(
 
 
 def _parse_timestamp(value: str | None, field: str) -> datetime:
-    """Accept `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)` only."""
+    """Accept `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)` only.
+
+    Numeric offset hours must be 00--23 and minutes must be 00--59.
+    """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be an RFC 3339 timestamp")
     if RFC3339_TIMESTAMP.fullmatch(value) is None:
