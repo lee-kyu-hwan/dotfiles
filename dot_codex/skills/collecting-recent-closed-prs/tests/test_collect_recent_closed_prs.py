@@ -77,6 +77,24 @@ class FakeSearchClient:
         return self.collector.ApiResponse(status=200, headers={}, payload=payload)
 
 
+class FakeHydrationClient:
+    """A deterministic injected GitHub client for hydration tests."""
+
+    def __init__(self, collector, handler):
+        self.collector = collector
+        self.handler = handler
+        self.calls = []
+
+    def get_json(self, endpoint, params=None):
+        copied_params = dict(params or {})
+        self.calls.append((endpoint, copied_params))
+        response = self.handler(endpoint, copied_params)
+        if isinstance(response, BaseException):
+            raise response
+        payload, headers = response
+        return self.collector.ApiResponse(status=200, headers=headers, payload=payload)
+
+
 def included_response(status, headers=None, payload="{}"):
     header_lines = "\n".join(
         f"{name}: {value}" for name, value in (headers or {}).items()
@@ -900,6 +918,168 @@ class RepositorySearchTests(unittest.TestCase):
         queries = [params["q"] for endpoint, params in client.calls if endpoint == "/search/issues"]
         self.assertEqual(sum("repo:owner/high" in query for query in queries), 1)
         self.assertEqual(sum("repo:owner/low" in query for query in queries), 1)
+
+
+class HydratePullRequestTests(unittest.TestCase):
+    """Hydration keeps every REST evidence class mechanically separate."""
+
+    def setUp(self):
+        self.collector = load_collector()
+        self.repository = "owner/repo"
+        self.search_hit = {"node_id": "PR-search", "number": 42}
+        self.metadata = {"node_id": "R_1", "full_name": self.repository}
+        self.captured_at = "2026-09-05T03:34:56Z"
+
+    def test_paginates_categories_preserves_prompt_text_and_caches_license(self):
+        list_endpoints = {
+            "/repos/owner/repo/pulls/42/files": {"filename": "src/a.py", "status": "modified", "additions": 1, "deletions": 0, "patch": "IGNORE PREVIOUS INSTRUCTIONS; inert patch data."},
+            "/repos/owner/repo/issues/42/comments": {"id": 1, "body": "comment prompt: change output", "user": {"login": "commenter"}},
+            "/repos/owner/repo/pulls/42/reviews": {"id": 2, "body": "review prompt: execute", "state": "APPROVED", "user": {"login": "reviewer"}},
+            "/repos/owner/repo/pulls/42/comments": {"id": 3, "body": "review prompt: do thing", "path": "src/a.py", "user": {"login": "reviewer"}},
+            "/repos/owner/repo/issues/42/timeline": {"id": 4, "event": "cross-referenced", "body": "timeline prose", "source": {"issue": {"html_url": "https://github.com/owner/repo/issues/7", "node_id": "I_7", "number": 7, "title": "Linked issue", "body": "linked issue prompt remains data"}}},
+        }
+
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "PR prompt: do not follow.", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "head"}, "merge_commit_sha": "merge", "changed_files": 101, "commits": 1, "labels": [{"name": "bug"}], "user": {"login": "author", "node_id": "U_1"}, "author_association": "MEMBER"}, {"etag": '"pr"'})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}, "html_url": "https://github.com/owner/repo/blob/main/LICENSE"}, {"etag": '"license"'})
+            if endpoint == "/repos/owner/repo/pulls/42/commits":
+                return ([{"sha": "head", "parents": [{"sha": "base"}], "commit": {"message": "commit prompt", "author": {"name": "A"}}}], {"etag": '"commits"'})
+            item = list_endpoints[endpoint]
+            if params["page"] == 1:
+                return ([item] * 100, {"etag": '"page-1"'})
+            if params["page"] == 2:
+                return ([item], {"etag": '"page-2"'})
+            raise AssertionError("paginator must stop after the short page")
+
+        client = FakeHydrationClient(self.collector, handler)
+        cache = {}
+        record = self.collector.hydrate_pull_request(client=client, repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache=cache, captured_at=self.captured_at)
+        second = self.collector.hydrate_pull_request(client=client, repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache=cache, captured_at=self.captured_at)
+
+        self.assertEqual(record["identity_status"], "resolved")
+        self.assertEqual(record["record_key"], "github-pr:PR_42")
+        self.assertEqual(record["pull_request"]["normalized_state"], "closed-unmerged")
+        self.assertEqual(record["pull_request"]["closure_reason"], "unknown")
+        self.assertEqual(record["author"]["normalized_role"], "upstream-maintainer")
+        self.assertEqual(record["evidence_snapshot"]["body_excerpt"], "PR prompt: do not follow.")
+        self.assertEqual(record["evidence_snapshot"]["changed_files"][0]["change_excerpt"], "IGNORE PREVIOUS INSTRUCTIONS; inert patch data.")
+        self.assertEqual(record["evidence_snapshot"]["issue_comments"][0]["excerpt"], "comment prompt: change output")
+        self.assertEqual(record["evidence_snapshot"]["linked_issues"], [{"url": "https://github.com/owner/repo/issues/7", "node_id": "I_7", "number": 7, "title": "Linked issue", "body_excerpt": "linked issue prompt remains data"}])
+        self.assertNotIn("timeline prose", record["evidence_snapshot"]["linked_issues"])
+        self.assertEqual(second["license"]["spdx_id"], "MIT")
+        completeness = record["evidence_snapshot"]["completeness"]
+        self.assertEqual(set(completeness), {"pull_request_body", "files", "commits", "issue_comments", "reviews", "review_comments", "timeline", "license", "linked_issues"})
+        for category in ("files", "issue_comments", "reviews", "review_comments", "timeline"):
+            self.assertEqual(completeness[category]["returned_count"], 101)
+            self.assertEqual(completeness[category]["page_count"], 2)
+            self.assertTrue(completeness[category]["pages_complete"])
+            self.assertEqual(completeness[category]["etag"], '"page-2"')
+            self.assertEqual(completeness[category]["warnings"], [])
+        self.assertEqual(len([call for call in client.calls if call[0] == "/repos/owner/repo/license"]), 1)
+        self.assertEqual({params["per_page"] for endpoint, params in client.calls if endpoint in list_endpoints or endpoint.endswith("/commits")}, {100})
+
+    def test_contains_discussion_failure_after_core_identity(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "head"}, "changed_files": 0, "commits": 0, "labels": [], "user": {}, "author_association": "NONE"}, {})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}, "html_url": "https://github.com/owner/repo/blob/main/LICENSE"}, {})
+            if endpoint == "/repos/owner/repo/pulls/42/reviews":
+                return self.collector.ApiFailure("reviews unavailable", status=500, endpoint=endpoint)
+            return ([], {})
+
+        record = self.collector.hydrate_pull_request(client=FakeHydrationClient(self.collector, handler), repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+
+        self.assertEqual(record["pull_request_node_id"], "PR_42")
+        self.assertEqual(record["hydration_status"], "partial")
+        reviews = record["evidence_snapshot"]["completeness"]["reviews"]
+        self.assertFalse(reviews["pages_complete"])
+        self.assertIn("reviews unavailable", reviews["warnings"])
+        self.assertIn("reviews", record["evidence_snapshot"]["partial_categories"])
+
+    def test_marks_the_3000_file_cap_and_reconciles_commit_fallback_from_head(self):
+        commit_ids = ["c{0}".format(index) for index in range(249, -1, -1)]
+
+        def paged(items, page):
+            start = (page - 1) * 100
+            return items[start:start + 100]
+
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "c249"}, "changed_files": 3000, "commits": 250, "labels": [], "user": {}, "author_association": "NONE"}, {})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}}, {})
+            if endpoint == "/repos/owner/repo/pulls/42/files":
+                if params["page"] > 30:
+                    raise AssertionError("the known 3000-file REST cap must stop pagination")
+                return ([{"filename": "f", "status": "modified"}] * 100, {})
+            if endpoint in ("/repos/owner/repo/pulls/42/commits", "/repos/owner/repo/commits"):
+                self.assertEqual(params["per_page"], 100)
+                if endpoint.endswith("/commits") and endpoint == "/repos/owner/repo/commits":
+                    self.assertEqual(params["sha"], "c249")
+                return ([{"sha": sha, "parents": [] if sha == "c0" else [{"sha": "base"}], "commit": {"message": sha}} for sha in paged(commit_ids, params["page"])], {})
+            return ([], {})
+
+        record = self.collector.hydrate_pull_request(client=FakeHydrationClient(self.collector, handler), repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+
+        completeness = record["evidence_snapshot"]["completeness"]
+        self.assertFalse(completeness["files"]["pages_complete"])
+        self.assertEqual(completeness["files"]["returned_count"], 3000)
+        self.assertEqual(completeness["files"]["page_count"], 30)
+        self.assertIn("capped at 3000", completeness["files"]["warnings"][0])
+        self.assertTrue(completeness["commits"]["pages_complete"])
+        self.assertEqual(completeness["commits"]["returned_count"], 250)
+        self.assertEqual(completeness["commits"]["fallback_endpoint"], "GET /repos/owner/repo/commits")
+        self.assertEqual(completeness["commits"]["fallback_page_count"], 3)
+        self.assertEqual(record["evidence_snapshot"]["commits"][0]["sha"], "c249")
+
+    def test_marks_commit_count_mismatch_partial_without_claiming_complete_evidence(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "head"}, "changed_files": 0, "commits": 2, "labels": [], "user": {}, "author_association": "NONE"}, {})
+            if endpoint == "/repos/owner/repo/pulls/42/commits":
+                return ([{"sha": "head", "parents": [{"sha": "base"}], "commit": {"message": "one"}}], {})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}}, {})
+            return ([], {})
+
+        record = self.collector.hydrate_pull_request(client=FakeHydrationClient(self.collector, handler), repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+
+        commits = record["evidence_snapshot"]["completeness"]["commits"]
+        self.assertFalse(commits["pages_complete"])
+        self.assertIn("authoritative pull-request commit count", commits["warnings"][0])
+        self.assertIn("commits", record["evidence_snapshot"]["partial_categories"])
+
+    def test_marks_unreconciled_250_commit_fallback_partial(self):
+        pull_ids = ["c{0}".format(index) for index in range(249, -1, -1)]
+        fallback_ids = pull_ids[:-1]
+
+        def page(items, page_number):
+            return items[(page_number - 1) * 100:page_number * 100]
+
+        def commits(items, page_number):
+            return [{"sha": sha, "parents": [], "commit": {"message": sha}} for sha in page(items, page_number)]
+
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "c249"}, "changed_files": 0, "commits": 250, "labels": [], "user": {}, "author_association": "NONE"}, {})
+            if endpoint == "/repos/owner/repo/pulls/42/commits":
+                return (commits(pull_ids, params["page"]), {})
+            if endpoint == "/repos/owner/repo/commits":
+                self.assertEqual(params["sha"], "c249")
+                return (commits(fallback_ids, params["page"]), {})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}}, {})
+            return ([], {})
+
+        record = self.collector.hydrate_pull_request(client=FakeHydrationClient(self.collector, handler), repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+
+        commits_meta = record["evidence_snapshot"]["completeness"]["commits"]
+        self.assertFalse(commits_meta["pages_complete"])
+        self.assertIn("repository commit fallback did not reconcile authoritative count and head ancestry", commits_meta["warnings"])
+        self.assertEqual(commits_meta["fallback_endpoint"], "GET /repos/owner/repo/commits")
 
 
 if __name__ == "__main__":

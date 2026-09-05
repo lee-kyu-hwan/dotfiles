@@ -654,6 +654,376 @@ def collect_repository_hits(
     )
 
 
+_LIST_PAGE_SIZE = 100
+_FILES_LIMIT = 3000
+_PULL_COMMITS_LIMIT = 250
+
+
+def hydrate_pull_request(
+    *,
+    client: Any,
+    repository: str,
+    search_hit: dict[str, object],
+    repository_metadata: dict[str, object],
+    license_cache: dict[str, object],
+    captured_at: str,
+) -> dict[str, object]:
+    """Collect one PR's raw, category-separated evidence without inference.
+
+    A successful search identity remains usable when an individual evidence
+    endpoint is unavailable.  Endpoint failures are therefore represented in
+    that category's completeness metadata rather than raised after identity is
+    established.  Text from GitHub is copied as untrusted data only.
+    """
+    if not isinstance(repository, str) or not repository:
+        raise ValueError("repository must be a non-empty owner/name string")
+    if not isinstance(search_hit, dict):
+        raise ValueError("search_hit must be an object")
+    if not isinstance(repository_metadata, dict):
+        raise ValueError("repository_metadata must be an object")
+    if not isinstance(license_cache, dict):
+        raise ValueError("license_cache must be a dictionary")
+    if not isinstance(captured_at, str) or not captured_at:
+        raise ValueError("captured_at must be a non-empty timestamp string")
+
+    number = search_hit.get("number")
+    if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+        raise ValueError("search_hit must contain a positive pull-request number")
+    root = "/repos/{0}".format(repository)
+    pull_endpoint = root + "/pulls/{0}".format(number)
+    core_payload: dict[str, object] = {}
+    core_warning: Optional[str] = None
+    core_etag: Optional[str] = None
+    try:
+        response = client.get_json(pull_endpoint)
+        payload = _response_payload(response, "pull request response")
+        if not isinstance(payload, dict):
+            raise ValueError("pull request response payload must be an object")
+        core_payload = deepcopy(payload)
+        core_etag = _response_etag(response)
+    except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
+        core_warning = _hydration_warning(error)
+
+    node_id = _first_nonempty_string(core_payload.get("node_id"), search_hit.get("node_id"))
+    repository_node_id = _first_nonempty_string(
+        repository_metadata.get("node_id"),
+        _nested_value(core_payload, "base", "repo", "node_id"),
+    )
+    identity_status = "resolved" if node_id is not None and repository_node_id is not None else "unresolved"
+    pull_url = _first_nonempty_string(
+        core_payload.get("html_url"),
+        search_hit.get("html_url"),
+        _nested_value(search_hit, "pull_request", "html_url"),
+    )
+    if pull_url is None:
+        pull_url = "https://github.com/{0}/pull/{1}".format(repository, number)
+
+    body_meta = _completeness(
+        endpoint="GET " + pull_endpoint,
+        pages_complete=core_warning is None,
+        returned_count=1 if core_warning is None else 0,
+        known_limit=None,
+        captured_at=captured_at,
+        page_count=1 if core_warning is None else 0,
+        etag=core_etag,
+        warnings=[] if core_warning is None else [core_warning],
+    )
+    details = _pull_request_details(core_payload, number, pull_url)
+    category_results: dict[str, tuple[list[object], dict[str, object]]] = {}
+    for category, endpoint, known_limit in (
+        ("files", pull_endpoint + "/files", _FILES_LIMIT),
+        ("commits", pull_endpoint + "/commits", _PULL_COMMITS_LIMIT),
+        ("issue_comments", root + "/issues/{0}/comments".format(number), None),
+        ("reviews", pull_endpoint + "/reviews", None),
+        ("review_comments", pull_endpoint + "/comments", None),
+        ("timeline", root + "/issues/{0}/timeline".format(number), None),
+    ):
+        category_results[category] = _hydrate_list_category(
+            client=client,
+            endpoint=endpoint,
+            known_limit=known_limit,
+            captured_at=captured_at,
+            maximum_items=_FILES_LIMIT if category == "files" else None,
+        )
+
+    files, files_meta = category_results["files"]
+    if len(files) >= _FILES_LIMIT:
+        files_meta["pages_complete"] = False
+        files_meta["warnings"].append("GitHub pull-request files endpoint is capped at 3000 files")
+
+    commits, commits_meta = category_results["commits"]
+    expected_commits = details["commits_count"]
+    if (
+        commits_meta["pages_complete"]
+        and isinstance(expected_commits, int)
+        and not isinstance(expected_commits, bool)
+        and expected_commits >= _PULL_COMMITS_LIMIT
+        and len(commits) >= _PULL_COMMITS_LIMIT
+    ):
+        fallback_endpoint = root + "/commits"
+        fallback, fallback_meta = _hydrate_list_category(
+            client=client,
+            endpoint=fallback_endpoint,
+            known_limit=None,
+            captured_at=captured_at,
+            extra_params={"sha": details["head_sha"]} if isinstance(details["head_sha"], str) else None,
+            maximum_items=expected_commits,
+        )
+        commits_meta["fallback_endpoint"] = "GET " + fallback_endpoint
+        commits_meta["fallback_page_count"] = fallback_meta["page_count"]
+        commits_meta["fallback_etag"] = fallback_meta["etag"]
+        if _commits_reconcile(commits, fallback, details["head_sha"], expected_commits):
+            commits = fallback
+            commits_meta["returned_count"] = len(commits)
+            commits_meta["page_count"] += fallback_meta["page_count"]
+            commits_meta["etag"] = fallback_meta["etag"]
+            commits_meta["warnings"].extend(fallback_meta["warnings"])
+        else:
+            commits_meta["pages_complete"] = False
+            commits_meta["warnings"].extend(fallback_meta["warnings"])
+            commits_meta["warnings"].append(
+                "repository commit fallback did not reconcile authoritative count and head ancestry"
+            )
+    if (
+        commits_meta["pages_complete"]
+        and isinstance(expected_commits, int)
+        and not isinstance(expected_commits, bool)
+        and len(commits) != expected_commits
+    ):
+        commits_meta["pages_complete"] = False
+        commits_meta["warnings"].append(
+            "returned commits do not match the authoritative pull-request commit count"
+        )
+
+    issue_comments, issue_meta = category_results["issue_comments"]
+    reviews, reviews_meta = category_results["reviews"]
+    review_comments, review_comments_meta = category_results["review_comments"]
+    timeline, timeline_meta = category_results["timeline"]
+    license, license_meta = _hydrate_license(
+        client=client,
+        repository=repository,
+        cache=license_cache,
+        captured_at=captured_at,
+    )
+    linked_issues = _linked_issues(timeline)
+    linked_meta = _completeness(
+        endpoint="GET " + root + "/issues/{0}/timeline (cross-referenced issue observations)".format(number),
+        pages_complete=bool(timeline_meta["pages_complete"]),
+        returned_count=len(linked_issues),
+        known_limit=None,
+        captured_at=captured_at,
+        page_count=timeline_meta["page_count"],
+        etag=timeline_meta["etag"],
+        warnings=list(timeline_meta["warnings"]),
+    )
+    completeness = {
+        "pull_request_body": body_meta,
+        "files": files_meta,
+        "commits": commits_meta,
+        "issue_comments": issue_meta,
+        "reviews": reviews_meta,
+        "review_comments": review_comments_meta,
+        "timeline": timeline_meta,
+        "license": license_meta,
+        "linked_issues": linked_meta,
+    }
+    partial_categories = [
+        category for category, metadata in completeness.items()
+        if not metadata["pages_complete"]
+    ]
+    return {
+        "identity_status": identity_status,
+        "record_key": "github-pr:{0}".format(node_id) if identity_status == "resolved" else None,
+        "pr_id": None,
+        "pull_request_node_id": node_id,
+        "repository": {
+            "full_name": _first_nonempty_string(repository_metadata.get("full_name"), repository) or repository,
+            "node_id": repository_node_id,
+            "repository_aliases": [],
+        },
+        "pull_request": details,
+        "author": _author(core_payload),
+        "license": license,
+        "sources": [],
+        "state_history": _state_history(details),
+        "hydration_status": "partial" if partial_categories else "complete",
+        "evidence_snapshot": {
+            "body_excerpt": core_payload.get("body") if isinstance(core_payload.get("body"), str) else None,
+            "changed_files": [_file_evidence(item) for item in files],
+            "commits": [_commit_evidence(item) for item in commits],
+            "issue_comments": [_discussion_evidence(item) for item in issue_comments],
+            "reviews": [_discussion_evidence(item) for item in reviews],
+            "review_comments": [_discussion_evidence(item) for item in review_comments],
+            "timeline_events": [_discussion_evidence(item) for item in timeline],
+            "linked_issues": linked_issues,
+            "partial_categories": partial_categories,
+            "completeness": completeness,
+        },
+    }
+
+
+def _hydrate_list_category(
+    *, client: Any, endpoint: str, known_limit: Optional[int], captured_at: str,
+    extra_params: Optional[dict[str, object]] = None, maximum_items: Optional[int] = None,
+) -> tuple[list[object], dict[str, object]]:
+    """Read consecutive 100-item pages and contain malformed endpoint data."""
+    items: list[object] = []
+    page = 0
+    etag: Optional[str] = None
+    warnings: list[str] = []
+    complete = True
+    try:
+        while maximum_items is None or len(items) < maximum_items:
+            page += 1
+            params: dict[str, object] = {"per_page": _LIST_PAGE_SIZE, "page": page}
+            if extra_params:
+                params.update(extra_params)
+            response = client.get_json(endpoint, params)
+            payload = _response_payload(response, "list endpoint response")
+            if not isinstance(payload, list):
+                raise ValueError("list endpoint response payload must be an array")
+            etag = _response_etag(response)
+            items.extend(deepcopy(payload))
+            if maximum_items is not None and len(items) >= maximum_items:
+                del items[maximum_items:]
+                break
+            if len(payload) < _LIST_PAGE_SIZE:
+                break
+    except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
+        complete = False
+        warnings.append(_hydration_warning(error))
+    return items, _completeness(
+        endpoint="GET " + endpoint,
+        pages_complete=complete,
+        returned_count=len(items),
+        known_limit=known_limit,
+        captured_at=captured_at,
+        page_count=page if not (page == 1 and not items and not complete) else 0,
+        etag=etag,
+        warnings=warnings,
+    )
+
+
+def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], captured_at: str) -> tuple[dict[str, object], dict[str, object]]:
+    cached = cache.get(repository, _MISSING)
+    if cached is not _MISSING:
+        if not isinstance(cached, tuple) or len(cached) != 2:
+            raise ValueError("license cache entry has an invalid shape")
+        return deepcopy(cached[0]), deepcopy(cached[1])
+    endpoint = "/repos/{0}/license".format(repository)
+    license_value: dict[str, object] = {"spdx_id": None, "evidence_url": None, "observed_via": "GET " + endpoint}
+    try:
+        response = client.get_json(endpoint)
+        payload = _response_payload(response, "license response")
+        if not isinstance(payload, dict):
+            raise ValueError("license response payload must be an object")
+        license_payload = payload.get("license")
+        if isinstance(license_payload, dict) and isinstance(license_payload.get("spdx_id"), str):
+            license_value["spdx_id"] = license_payload["spdx_id"]
+        if isinstance(payload.get("html_url"), str):
+            license_value["evidence_url"] = payload["html_url"]
+        metadata = _completeness("GET " + endpoint, True, 1, None, captured_at, 1, _response_etag(response), [])
+    except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
+        metadata = _completeness("GET " + endpoint, False, 0, None, captured_at, 0, None, [_hydration_warning(error)])
+    cache[repository] = (deepcopy(license_value), deepcopy(metadata))
+    return license_value, metadata
+
+
+def _completeness(endpoint: str, pages_complete: bool, returned_count: int, known_limit: Optional[int], captured_at: str, page_count: int, etag: Optional[str], warnings: list[str]) -> dict[str, object]:
+    return {"endpoint": endpoint, "pages_complete": pages_complete, "returned_count": returned_count, "known_limit": known_limit, "captured_at": captured_at, "page_count": page_count, "etag": etag, "warnings": warnings}
+
+
+def _response_etag(response: object) -> Optional[str]:
+    headers = getattr(response, "headers", None)
+    value = headers.get("etag") if isinstance(headers, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _hydration_warning(error: BaseException) -> str:
+    return _redact_diagnostics(str(error)) or error.__class__.__name__
+
+
+def _first_nonempty_string(*values: object) -> Optional[str]:
+    return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _nested_value(value: object, *keys: str) -> object:
+    current = value
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _pull_request_details(payload: dict[str, object], number: int, url: str) -> dict[str, object]:
+    merged_at = payload.get("merged_at") if isinstance(payload.get("merged_at"), str) else None
+    return {"number": number, "url": url, "title": payload.get("title") if isinstance(payload.get("title"), str) else None, "normalized_state": "merged" if merged_at is not None else "closed-unmerged", "closure_reason": "merged" if merged_at is not None else "unknown", "created_at": payload.get("created_at") if isinstance(payload.get("created_at"), str) else None, "closed_at": payload.get("closed_at") if isinstance(payload.get("closed_at"), str) else None, "merged_at": merged_at, "updated_at": payload.get("updated_at") if isinstance(payload.get("updated_at"), str) else None, "base_sha": _nested_value(payload, "base", "sha"), "head_sha": _nested_value(payload, "head", "sha"), "merge_sha": payload.get("merge_commit_sha") if isinstance(payload.get("merge_commit_sha"), str) else None, "labels": [label["name"] for label in payload.get("labels", []) if isinstance(label, dict) and isinstance(label.get("name"), str)] if isinstance(payload.get("labels", []), list) else [], "changed_files_count": payload.get("changed_files") if isinstance(payload.get("changed_files"), int) and not isinstance(payload.get("changed_files"), bool) else None, "commits_count": payload.get("commits") if isinstance(payload.get("commits"), int) and not isinstance(payload.get("commits"), bool) else None}
+
+
+def _author(payload: dict[str, object]) -> dict[str, object]:
+    raw = payload.get("author_association")
+    association = raw if isinstance(raw, str) else "unknown"
+    if association in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        role = "upstream-maintainer"
+    elif association in {"CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER"}:
+        role = "contributor"
+    else:
+        role = "unknown"
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    return {"login": user.get("login") if isinstance(user.get("login"), str) else None, "node_id": user.get("node_id") if isinstance(user.get("node_id"), str) else None, "association": association, "normalized_role": role}
+
+
+def _state_history(details: dict[str, object]) -> list[dict[str, object]]:
+    observed_at = details["merged_at"] or details["closed_at"] or details["updated_at"] or details["created_at"]
+    return [{"state": details["normalized_state"], "observed_at": observed_at, "authority": "GitHub pull request", "evidence_url": details["url"]}]
+
+
+def _file_evidence(item: object) -> dict[str, object]:
+    value = item if isinstance(item, dict) else {}
+    return {"path": value.get("filename") if isinstance(value.get("filename"), str) else None, "status": value.get("status") if isinstance(value.get("status"), str) else None, "additions": value.get("additions") if isinstance(value.get("additions"), int) and not isinstance(value.get("additions"), bool) else None, "deletions": value.get("deletions") if isinstance(value.get("deletions"), int) and not isinstance(value.get("deletions"), bool) else None, "change_excerpt": value.get("patch") if isinstance(value.get("patch"), str) else None}
+
+
+def _commit_evidence(item: object) -> dict[str, object]:
+    value = item if isinstance(item, dict) else {}
+    commit = value.get("commit") if isinstance(value.get("commit"), dict) else {}
+    parents = value.get("parents") if isinstance(value.get("parents"), list) else []
+    return {"sha": value.get("sha") if isinstance(value.get("sha"), str) else None, "parents": [parent["sha"] for parent in parents if isinstance(parent, dict) and isinstance(parent.get("sha"), str)], "message": commit.get("message") if isinstance(commit.get("message"), str) else None, "author": deepcopy(commit.get("author")) if isinstance(commit.get("author"), dict) else None}
+
+
+def _discussion_evidence(item: object) -> dict[str, object]:
+    value = item if isinstance(item, dict) else {}
+    user = value.get("user") if isinstance(value.get("user"), dict) else {}
+    return {"kind": value.get("event") if isinstance(value.get("event"), str) else value.get("state") if isinstance(value.get("state"), str) else "observed", "id": value.get("id") if isinstance(value.get("id"), int) and not isinstance(value.get("id"), bool) else None, "author": user.get("login") if isinstance(user.get("login"), str) else None, "path": value.get("path") if isinstance(value.get("path"), str) else None, "excerpt": value.get("body") if isinstance(value.get("body"), str) else None}
+
+
+def _linked_issues(timeline: list[object]) -> list[dict[str, object]]:
+    observed: list[dict[str, object]] = []
+    seen: set[tuple[object, object]] = set()
+    for event in timeline:
+        issue = _nested_value(event, "source", "issue")
+        if not isinstance(issue, dict):
+            continue
+        url = _first_nonempty_string(issue.get("html_url"), issue.get("url"))
+        node_id = issue.get("node_id") if isinstance(issue.get("node_id"), str) else None
+        key = (url, node_id)
+        if url is None or key in seen:
+            continue
+        seen.add(key)
+        observed.append({"url": url, "node_id": node_id, "number": issue.get("number") if isinstance(issue.get("number"), int) and not isinstance(issue.get("number"), bool) else None, "title": issue.get("title") if isinstance(issue.get("title"), str) else None, "body_excerpt": issue.get("body") if isinstance(issue.get("body"), str) else None})
+    return observed
+
+
+def _commits_reconcile(pull_commits: list[object], fallback: list[object], head_sha: object, expected_count: int) -> bool:
+    fallback_ids = [item.get("sha") for item in fallback if isinstance(item, dict) and isinstance(item.get("sha"), str)]
+    pull_ids = [item.get("sha") for item in pull_commits if isinstance(item, dict) and isinstance(item.get("sha"), str)]
+    if len(fallback) != expected_count or len(fallback_ids) != expected_count or not isinstance(head_sha, str):
+        return False
+    if not fallback_ids or fallback_ids[0] != head_sha or len(pull_ids) != len(pull_commits):
+        return False
+    return fallback_ids[:len(pull_ids)] == pull_ids or fallback_ids[:len(pull_ids)] == list(reversed(pull_ids))
+
+
 def _empty_repository_search_result(
     repository: str,
     preflight_outcome: str,
