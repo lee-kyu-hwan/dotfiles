@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 import sys
@@ -25,6 +26,49 @@ def load_collector():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@dataclass
+class FakeCompletedProcess:
+    returncode: int = 0
+    stdout: str = ""
+    stderr: str = ""
+
+
+class FakeRunner:
+    """A deterministic replacement for subprocess.run."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append((args, kwargs))
+        if not self.responses:
+            raise AssertionError("runner received more calls than expected")
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class FakeSleep:
+    def __init__(self):
+        self.delays = []
+
+    def __call__(self, delay):
+        self.delays.append(delay)
+
+
+def included_response(status, headers=None, payload="{}"):
+    header_lines = "\n".join(
+        f"{name}: {value}" for name, value in (headers or {}).items()
+    )
+    return "HTTP/2 {status} status\n{headers}\n\n{payload}".format(
+        status=status,
+        headers=header_lines,
+        payload=payload,
+    )
 
 
 class ResolveIntervalTests(unittest.TestCase):
@@ -226,6 +270,226 @@ class BuildClosedQueryTests(unittest.TestCase):
     def test_rejects_unknown_outcome(self):
         with self.assertRaises(ValueError):
             self.collector.build_closed_query("owner/repo", self.interval, "unknown")
+
+
+class GhApiClientTests(unittest.TestCase):
+    API_VERSION = "2026-03-10"
+
+    def setUp(self):
+        self.collector = load_collector()
+
+    def make_client(self, responses, *, limit=10, clock=lambda: 1000):
+        self.runner = FakeRunner(responses)
+        self.sleeper = FakeSleep()
+        return self.collector.GhApiClient(
+            api_version=self.API_VERSION,
+            budget=self.collector.RequestBudget(limit),
+            runner=self.runner,
+            sleeper=self.sleeper,
+            clock=clock,
+        )
+
+    def test_get_json_constructs_read_only_command_and_parses_final_included_block(self):
+        client = self.make_client(
+            [
+                FakeCompletedProcess(
+                    stdout=(
+                        "HTTP/1.1 200 Connection established\nProxy: example\n\n"
+                        + included_response(
+                            200,
+                            {"eTAG": '"cached-v1"', "X-RateLimit-Remaining": "99"},
+                            '{"login":"octocat"}',
+                        )
+                    )
+                )
+            ]
+        )
+
+        response = client.get_json("/user")
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["etag"], '"cached-v1"')
+        self.assertEqual(response.headers["x-ratelimit-remaining"], "99")
+        self.assertEqual(response.payload, {"login": "octocat"})
+        self.assertEqual(client.budget.consumed, 1)
+        args, kwargs = self.runner.calls[0]
+        self.assertEqual(
+            args,
+            [
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                "--include",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "X-GitHub-Api-Version: 2026-03-10",
+                "/user",
+                "-f",
+                "per_page=100",
+            ],
+        )
+        self.assertFalse(kwargs.get("shell", False))
+        self.assertNotIn("Authorization", " ".join(args))
+
+    def test_conditional_request_does_not_expose_cache_validator_in_response_metadata(self):
+        client = self.make_client(
+            [FakeCompletedProcess(stdout=included_response(200, {"ETag": '"new"'}, "[]"))]
+        )
+
+        response = client.get_json(
+            "/repos/owner/repo/pulls/1/files",
+            cached_payload=[{"name": "old"}],
+            cached_etag='"old"',
+        )
+
+        args, _ = self.runner.calls[0]
+        self.assertIn("If-None-Match: \"old\"", args)
+        self.assertNotIn("if-none-match", response.headers)
+        self.assertNotIn("authorization", response.headers)
+        self.assertEqual(response.payload, [])
+
+    def test_matching_304_reuses_cached_payload_without_upgrading_completeness(self):
+        client = self.make_client(
+            [FakeCompletedProcess(stdout=included_response(304, {"ETag": '"old"'}, ""))]
+        )
+        cached_payload = {"items": [1], "completeness": {"pages_complete": False}}
+
+        response = client.get_json(
+            "/repos/owner/repo/pulls/1/files",
+            cached_payload=cached_payload,
+            cached_etag='"old"',
+        )
+
+        self.assertEqual(response.status, 304)
+        self.assertIs(response.payload, cached_payload)
+        self.assertFalse(response.payload["completeness"]["pages_complete"])
+
+    def test_304_without_matching_cached_payload_fails(self):
+        client = self.make_client(
+            [FakeCompletedProcess(stdout=included_response(304, {"ETag": '"old"'}, ""))]
+        )
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo", cached_payload={"old": True}, cached_etag='"other"')
+
+        self.assertEqual(raised.exception.status, 304)
+
+    def test_classifies_non_retryable_repository_failures(self):
+        for status, expected in ((401, "unauthorized"), (404, "not-found-or-inaccessible"), (403, "forbidden")):
+            with self.subTest(status=status):
+                self.assertEqual(
+                    self.collector.classify_repository_failure(status=status), expected
+                )
+
+    def test_403_with_retry_after_has_precedence_and_retries_at_most_three_times(self):
+        retry = FakeCompletedProcess(
+            stdout=included_response(403, {"Retry-After": "60", "X-RateLimit-Reset": "3000"}),
+            stderr="Authorization: Bearer ghp_secret-token",
+        )
+        client = self.make_client([retry, retry, retry, retry])
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/user")
+
+        self.assertEqual(len(self.runner.calls), 4)
+        self.assertEqual(client.budget.consumed, 4)
+        self.assertEqual(self.sleeper.delays, [60, 60, 60])
+        self.assertNotIn("ghp_secret-token", raised.exception.diagnostics)
+        self.assertNotIn("authorization", raised.exception.diagnostics.lower())
+
+    def test_rate_limit_reset_precedes_capped_exponential_fallback(self):
+        client = self.make_client(
+            [
+                FakeCompletedProcess(
+                    stdout=included_response(429, {"x-ratelimit-reset": "1125"})
+                ),
+                FakeCompletedProcess(stdout=included_response(200, payload="{}")),
+            ],
+            clock=lambda: 1000,
+        )
+
+        client.get_json("/user")
+
+        self.assertEqual(self.sleeper.delays, [125])
+
+    def test_headerless_secondary_limit_uses_capped_exponential_backoff(self):
+        client = self.make_client(
+            [
+                FakeCompletedProcess(stdout=included_response(403, payload='{"message":"secondary rate limit"}')),
+                FakeCompletedProcess(stdout=included_response(429, payload='{"message":"rate limit"}')),
+                FakeCompletedProcess(stdout=included_response(200, payload="{}")),
+            ]
+        )
+
+        client.get_json("/user")
+
+        self.assertEqual(self.sleeper.delays, [60, 120])
+
+    def test_retryable_server_and_transport_failures_are_bounded(self):
+        client = self.make_client(
+            [
+                FakeCompletedProcess(stdout=included_response(500, payload='{"message":"oops"}')),
+                OSError("network down"),
+                FakeCompletedProcess(stdout=included_response(502, payload='{"message":"again"}')),
+                OSError("still down"),
+            ]
+        )
+
+        with self.assertRaises(self.collector.ApiFailure):
+            client.get_json("/user")
+
+        self.assertEqual(len(self.runner.calls), 4)
+        self.assertEqual(self.sleeper.delays, [1, 2, 4])
+
+    def test_malformed_json_is_not_retried(self):
+        client = self.make_client(
+            [FakeCompletedProcess(stdout=included_response(200, payload="not json"))]
+        )
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/user")
+
+        self.assertEqual(raised.exception.status, 200)
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_budget_is_consumed_before_every_attempt_and_stops_new_requests(self):
+        client = self.make_client(
+            [FakeCompletedProcess(stdout=included_response(500, payload="{}"))], limit=1
+        )
+
+        with self.assertRaises(self.collector.BudgetExhausted):
+            client.get_json("/user")
+
+        self.assertEqual(client.budget.consumed, 1)
+        self.assertEqual(len(self.runner.calls), 1)
+
+    def test_global_preflight_returns_login_and_versions_and_rejects_unsupported_version(self):
+        client = self.make_client(
+            [
+                FakeCompletedProcess(stdout="gh version 2.99.0 (2026-09-01)\n"),
+                FakeCompletedProcess(stdout=included_response(200, payload='{"login":"octocat"}')),
+                FakeCompletedProcess(stdout=included_response(200, payload='["2026-03-10", "2022-11-28"]')),
+            ]
+        )
+
+        preflight = client.global_preflight()
+
+        self.assertEqual(preflight, {"login": "octocat", "client_version": "2.99.0", "api_version": self.API_VERSION})
+        self.assertEqual(self.runner.calls[0][0], ["gh", "--version"])
+        self.assertEqual(client.budget.consumed, 2)
+
+        unsupported = self.make_client(
+            [
+                FakeCompletedProcess(stdout="gh version 2.99.0\n"),
+                FakeCompletedProcess(stdout=included_response(200, payload='{"login":"octocat"}')),
+                FakeCompletedProcess(stdout=included_response(200, payload='["2022-11-28"]')),
+            ]
+        )
+        with self.assertRaises(self.collector.ApiFailure):
+            unsupported.global_preflight()
+        self.assertEqual(unsupported.budget.consumed, 2)
 
 
 class MigrateManifestV1Tests(unittest.TestCase):
