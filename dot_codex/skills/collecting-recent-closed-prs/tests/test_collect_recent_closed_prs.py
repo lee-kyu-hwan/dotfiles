@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from importlib import util
 from pathlib import Path
-from types import SimpleNamespace
 import sys
 import unittest
 
@@ -17,24 +16,14 @@ SCRIPT_PATH = (
 
 
 def load_collector():
-    """Load the production module, with explicit behavior stubs during RED."""
+    """Load the production collector module by its source-file path."""
     spec = util.spec_from_file_location("collect_recent_closed_prs", SCRIPT_PATH)
     if spec is None or spec.loader is None:
         raise AssertionError("could not create a loader for the collector script")
 
     module = util.module_from_spec(spec)
-    if SCRIPT_PATH.exists():
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        return module
-
-    # The initial RED state must fail a behavior assertion, not a raw import
-    # error caused solely by the absent production module.
-    module.resolve_interval = lambda **_kwargs: SimpleNamespace(
-        start_at="", end_at="", timezone="", input_mode={}, as_of="", last_day_partial=False
-    )
-    module.build_closed_query = lambda *_args: ""
-    module.migrate_manifest_v1 = lambda document: document
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
     return module
 
 
@@ -145,6 +134,22 @@ class ResolveIntervalTests(unittest.TestCase):
                 as_of=None,
             )
 
+    def test_rejects_recent_days_that_are_not_positive_integers(self):
+        collector = load_collector()
+
+        for recent_days in (7.0, True, "7", "not-a-number"):
+            with self.subTest(recent_days=recent_days):
+                with self.assertRaises(ValueError):
+                    collector.resolve_interval(
+                        start_at=None,
+                        end_at=None,
+                        start_date=None,
+                        end_date=None,
+                        recent_days=recent_days,
+                        timezone_name="UTC",
+                        as_of=None,
+                    )
+
     def test_rejects_empty_or_reversed_timestamp_interval(self):
         collector = load_collector()
 
@@ -158,6 +163,27 @@ class ResolveIntervalTests(unittest.TestCase):
                 timezone_name="UTC",
                 as_of=None,
             )
+
+    def test_rejects_non_rfc3339_timestamp_grammar(self):
+        collector = load_collector()
+
+        for timestamp in (
+            "2026-09-01 00:00:00+09:00",
+            "2026-09-01T00:00:00+0900",
+            "2026-09-01T00:00+09:00",
+            "2026-09-01T00:00:00Z trailing",
+        ):
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaises(ValueError):
+                    collector.resolve_interval(
+                        start_at=timestamp,
+                        end_at="2026-09-02T00:00:00Z",
+                        start_date=None,
+                        end_date=None,
+                        recent_days=None,
+                        timezone_name="UTC",
+                        as_of=None,
+                    )
 
 
 class BuildClosedQueryTests(unittest.TestCase):
