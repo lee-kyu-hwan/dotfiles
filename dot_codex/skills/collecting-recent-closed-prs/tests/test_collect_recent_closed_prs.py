@@ -465,6 +465,41 @@ class GhApiClientTests(unittest.TestCase):
         self.assertEqual(client.budget.consumed, 1)
         self.assertEqual(len(self.runner.calls), 1)
 
+    def test_rejects_calendar_invalid_api_version_before_runner_call(self):
+        runner = FakeRunner([])
+
+        with self.assertRaises(ValueError):
+            self.collector.GhApiClient(
+                api_version="2026-99-99",
+                budget=self.collector.RequestBudget(1),
+                runner=runner,
+            )
+
+        self.assertEqual(runner.calls, [])
+
+    def test_redacts_conditional_header_values_from_error_messages_and_diagnostics(self):
+        failure = self.collector.ApiFailure(
+            'If-None-Match: "cached-secret"\nrequest failed',
+            diagnostics='retry context\niF-NoNe-MaTcH: "cached-secret"\nkeep this context',
+        )
+
+        self.assertNotIn("cached-secret", str(failure))
+        self.assertNotIn("cached-secret", failure.diagnostics)
+        self.assertNotIn("if-none-match", str(failure).lower())
+        self.assertNotIn("if-none-match", failure.diagnostics.lower())
+        self.assertIn("request failed", str(failure))
+        self.assertIn("retry context", failure.diagnostics)
+        self.assertIn("keep this context", failure.diagnostics)
+
+    def test_rejects_caller_per_page_override_before_runner_call(self):
+        client = self.make_client([], limit=1)
+
+        with self.assertRaises(ValueError):
+            client.get_json("/user", params={"per_page": 1})
+
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(client.budget.consumed, 0)
+
     def test_global_preflight_returns_login_and_versions_and_rejects_unsupported_version(self):
         client = self.make_client(
             [

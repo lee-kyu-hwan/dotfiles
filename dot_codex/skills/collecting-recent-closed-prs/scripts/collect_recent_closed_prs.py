@@ -96,6 +96,10 @@ class GhApiClient:
     ) -> None:
         if not isinstance(api_version, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", api_version) is None:
             raise ValueError("api_version must be YYYY-MM-DD")
+        try:
+            date.fromisoformat(api_version)
+        except ValueError as error:
+            raise ValueError("api_version must be a calendar date") from error
         self.api_version = api_version
         self.budget = budget
         self._runner = runner
@@ -114,6 +118,8 @@ class GhApiClient:
         """Fetch one JSON response, conditionally reusing exact cached evidence."""
         if not isinstance(endpoint, str) or not endpoint.startswith("/"):
             raise ValueError("endpoint must be an absolute GitHub API path")
+        if params is not None and "per_page" in params:
+            raise ValueError("per_page is fixed at 100")
         if cached_etag is not None and not isinstance(cached_etag, str):
             raise ValueError("cached_etag must be a string")
 
@@ -504,7 +510,7 @@ def _redact_diagnostics(value: object) -> str:
     if not isinstance(value, str):
         return ""
     without_secret_headers = re.sub(
-        r"(?im)^.*(?:authorization|token|cookie)[^\r\n]*[\r\n]?", "", value
+        r"(?im)^.*(?:authorization|token|cookie|if-none-match)[^\r\n]*[\r\n]?", "", value
     )
     without_bearer = re.sub(r"(?i)\bbearer\s+\S+", "<credential>", without_secret_headers)
     return re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "<credential>", without_bearer)
