@@ -404,6 +404,312 @@ def classify_repository_failure(*, status: Optional[int]) -> str:
     return "failed"
 
 
+@dataclass(frozen=True)
+class SearchPartition:
+    """Immutable evidence for one final Search API interval partition."""
+
+    repository: str
+    interval: tuple[str, str]
+    query: str
+    total_count: Optional[int]
+    returned_count: int
+    pagination_complete: bool
+    incomplete_results: bool
+    completion_state: str
+    failure: Optional[str]
+
+
+@dataclass(frozen=True)
+class RepositorySearchResult:
+    """Search candidates and fair per-repository selection accounting."""
+
+    repository: str
+    preflight: dict[str, object]
+    preflight_outcome: str
+    collection_status: str
+    partitions: tuple[SearchPartition, ...]
+    hits: tuple[dict[str, object], ...]
+    selected_hits: tuple[dict[str, object], ...]
+    overflow_hits: tuple[dict[str, object], ...]
+    matched_count: int
+    selected_count: int
+    excluded_by_cap: int
+    warnings: tuple[str, ...]
+
+
+def collect_repository_hits(
+    client: Any,
+    repository: str,
+    interval: Interval,
+    outcome: str,
+    max_per_repository: int,
+) -> RepositorySearchResult:
+    """Collect one repository's ordered search candidates without hydration.
+
+    Search's 1,000-result and incompleteness signals are resolved by recursively
+    splitting UTC whole-second partitions. Only safe, fully paginated leaves
+    contribute candidates. The returned overflow remains ordered so hydration
+    can later replace a stale outcome-indexed candidate without another search.
+    """
+    if not isinstance(repository, str) or not repository:
+        raise ValueError("repository must be a non-empty owner/name string")
+    if not isinstance(max_per_repository, int) or isinstance(max_per_repository, bool) or max_per_repository <= 0:
+        raise ValueError("max_per_repository must be a positive integer")
+    if outcome not in {"all", "merged", "closed-unmerged"}:
+        raise ValueError("outcome must be all, merged, or closed-unmerged")
+
+    try:
+        preflight_response = client.get_json("/repos/{0}".format(repository))
+        preflight_payload = _response_payload(preflight_response, "repository preflight")
+        if not isinstance(preflight_payload, dict):
+            raise ValueError("repository preflight payload must be an object")
+    except BudgetExhausted:
+        return _empty_repository_search_result(
+            repository,
+            "partial",
+            "partial",
+            "request budget exhausted before repository preflight",
+        )
+    except ApiFailure as failure:
+        status = classify_repository_failure(status=failure.status)
+        return _empty_repository_search_result(repository, status, status, str(failure))
+
+    partitions: list[SearchPartition] = []
+    safe_hits: list[dict[str, object]] = []
+    warnings: list[str] = []
+    partial = False
+    stopped = False
+
+    root_start = _parse_timestamp(interval.start_at, "interval.start_at")
+    root_end = _parse_timestamp(interval.end_at, "interval.end_at")
+
+    def fail_partition(
+        start: datetime,
+        end: datetime,
+        query: str,
+        total_count: Optional[int],
+        returned_count: int,
+        incomplete_results: bool,
+        failure: str,
+    ) -> None:
+        nonlocal partial
+        partial = True
+        partitions.append(
+            SearchPartition(
+                repository=repository,
+                interval=(_utc_string(start), _utc_string(end)),
+                query=query,
+                total_count=total_count,
+                returned_count=returned_count,
+                pagination_complete=False,
+                incomplete_results=incomplete_results,
+                completion_state="failed",
+                failure=failure,
+            )
+        )
+
+    def collect_partition(start: datetime, end: datetime) -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        partition_interval = _partition_interval(interval, start, end)
+        query = build_closed_query(repository, partition_interval, outcome)
+        try:
+            first_payload = _response_payload(
+                client.get_json("/search/issues", {"q": query, "page": 1}),
+                "search response",
+            )
+            total_count, incomplete_results, first_items = _search_response(first_payload)
+        except BudgetExhausted:
+            stopped = True
+            fail_partition(start, end, query, None, 0, False, "request budget exhausted")
+            return
+        except (ApiFailure, ValueError) as error:
+            fail_partition(start, end, query, None, 0, False, str(error))
+            return
+
+        unsafe = total_count >= 1000 or incomplete_results
+        if unsafe:
+            if end - start <= timedelta(seconds=1):
+                fail_partition(
+                    start,
+                    end,
+                    query,
+                    total_count,
+                    len(first_items),
+                    incomplete_results,
+                    "unsafe one-second search partition",
+                )
+                return
+            midpoint = start + timedelta(seconds=int((end - start).total_seconds()) // 2)
+            collect_partition(start, midpoint)
+            collect_partition(midpoint, end)
+            return
+
+        items = list(first_items)
+        page = 1
+        while len(items) < total_count:
+            page += 1
+            try:
+                page_payload = _response_payload(
+                    client.get_json("/search/issues", {"q": query, "page": page}),
+                    "search response",
+                )
+                _, page_incomplete, page_items = _search_response(page_payload)
+            except BudgetExhausted:
+                stopped = True
+                fail_partition(
+                    start, end, query, total_count, len(items), incomplete_results,
+                    "request budget exhausted",
+                )
+                return
+            except (ApiFailure, ValueError) as error:
+                fail_partition(start, end, query, total_count, len(items), incomplete_results, str(error))
+                return
+            if page_incomplete or not page_items:
+                fail_partition(
+                    start,
+                    end,
+                    query,
+                    total_count,
+                    len(items),
+                    page_incomplete,
+                    "search pagination did not return every advertised result",
+                )
+                return
+            items.extend(page_items)
+
+        partitions.append(
+            SearchPartition(
+                repository=repository,
+                interval=(_utc_string(start), _utc_string(end)),
+                query=query,
+                total_count=total_count,
+                returned_count=len(items),
+                pagination_complete=True,
+                incomplete_results=False,
+                completion_state="complete",
+                failure=None,
+            )
+        )
+        safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
+
+    collect_partition(root_start, root_end)
+    hits = _deduplicated_ordered_hits(safe_hits)
+    selected_hits = hits[:max_per_repository]
+    overflow_hits = hits[max_per_repository:]
+    matched_count = len(hits)
+    selected_count = len(selected_hits)
+    collection_status = "partial" if partial else ("no-results" if not hits else "collected")
+    return RepositorySearchResult(
+        repository=repository,
+        preflight=deepcopy(preflight_payload),
+        preflight_outcome="collected",
+        collection_status=collection_status,
+        partitions=tuple(partitions),
+        hits=tuple(hits),
+        selected_hits=tuple(selected_hits),
+        overflow_hits=tuple(overflow_hits),
+        matched_count=matched_count,
+        selected_count=selected_count,
+        excluded_by_cap=len(overflow_hits),
+        warnings=tuple(warnings),
+    )
+
+
+def _empty_repository_search_result(
+    repository: str,
+    preflight_outcome: str,
+    collection_status: str,
+    warning: str,
+) -> RepositorySearchResult:
+    return RepositorySearchResult(
+        repository=repository,
+        preflight={},
+        preflight_outcome=preflight_outcome,
+        collection_status=collection_status,
+        partitions=(),
+        hits=(),
+        selected_hits=(),
+        overflow_hits=(),
+        matched_count=0,
+        selected_count=0,
+        excluded_by_cap=0,
+        warnings=(warning,),
+    )
+
+
+def _response_payload(response: object, context: str) -> object:
+    payload = getattr(response, "payload", _MISSING)
+    if payload is _MISSING:
+        raise ValueError("{0} has no parsed payload".format(context))
+    return payload
+
+
+def _search_response(payload: object) -> tuple[int, bool, list[dict[str, object]]]:
+    if not isinstance(payload, dict):
+        raise ValueError("search response payload must be an object")
+    total_count = payload.get("total_count")
+    incomplete_results = payload.get("incomplete_results")
+    items = payload.get("items")
+    if not isinstance(total_count, int) or isinstance(total_count, bool) or total_count < 0:
+        raise ValueError("search response total_count must be a non-negative integer")
+    if not isinstance(incomplete_results, bool):
+        raise ValueError("search response incomplete_results must be a boolean")
+    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
+        raise ValueError("search response items must be a list of objects")
+    return total_count, incomplete_results, [deepcopy(item) for item in items]
+
+
+def _partition_interval(source: Interval, start: datetime, end: datetime) -> Interval:
+    return Interval(
+        start_at=_utc_string(start),
+        end_at=_utc_string(end),
+        timezone=source.timezone,
+        input_mode=deepcopy(source.input_mode),
+        as_of=source.as_of,
+        last_day_partial=source.last_day_partial,
+    )
+
+
+def _exact_partition_hits(
+    items: list[dict[str, object]],
+    start: datetime,
+    end: datetime,
+    warnings: list[str],
+) -> list[dict[str, object]]:
+    accepted: list[dict[str, object]] = []
+    for item in items:
+        node_id = item.get("node_id")
+        closed_at = item.get("closed_at")
+        number = item.get("number")
+        if not isinstance(node_id, str) or not node_id or not isinstance(number, int) or isinstance(number, bool):
+            warnings.append("search hit without a usable node_id or pull-request number was excluded")
+            continue
+        try:
+            closed_at_value = _parse_timestamp(closed_at, "search hit closed_at")
+        except ValueError:
+            warnings.append("search hit with an invalid closed_at timestamp was excluded")
+            continue
+        if start <= closed_at_value < end:
+            accepted.append(deepcopy(item))
+    return accepted
+
+
+def _deduplicated_ordered_hits(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    unique: dict[str, dict[str, object]] = {}
+    for item in items:
+        node_id = item["node_id"]
+        if node_id not in unique:
+            unique[node_id] = item
+
+    def sort_key(item: dict[str, object]) -> tuple[float, int, str]:
+        closed_at = _parse_timestamp(item["closed_at"], "search hit closed_at")
+        return (-closed_at.timestamp(), -item["number"], item["node_id"])
+
+    return sorted(unique.values(), key=sort_key)
+
+
 def _parse_included_response(output: object) -> tuple[int, dict[str, str], str]:
     """Select the final HTTP block emitted by ``gh api --include``."""
     if not isinstance(output, str):

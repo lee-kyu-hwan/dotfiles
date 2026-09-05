@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import FrozenInstanceError, dataclass
 from importlib import util
 from pathlib import Path
 import sys
@@ -58,6 +58,23 @@ class FakeSleep:
 
     def __call__(self, delay):
         self.delays.append(delay)
+
+
+class FakeSearchClient:
+    """A deterministic injected GitHub client for repository-search tests."""
+
+    def __init__(self, collector, handler):
+        self.collector = collector
+        self.handler = handler
+        self.calls = []
+
+    def get_json(self, endpoint, params=None):
+        copied_params = dict(params or {})
+        self.calls.append((endpoint, copied_params))
+        payload = self.handler(endpoint, copied_params)
+        if isinstance(payload, BaseException):
+            raise payload
+        return self.collector.ApiResponse(status=200, headers={}, payload=payload)
 
 
 def included_response(status, headers=None, payload="{}"):
@@ -572,6 +589,193 @@ class MigrateManifestV1Tests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             collector.migrate_manifest_v1({"schema_version": "2.0.0", "runs": []})
+
+
+class RepositorySearchTests(unittest.TestCase):
+    def setUp(self):
+        self.collector = load_collector()
+        self.interval = self.collector.resolve_interval(
+            start_at="2026-09-01T00:00:00Z",
+            end_at="2026-09-01T00:00:04Z",
+            start_date=None,
+            end_date=None,
+            recent_days=None,
+            timezone_name="UTC",
+            as_of=None,
+        )
+
+    def test_collects_one_repository_with_exact_filter_dedupe_order_and_cap(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo", "default_branch": "main"}
+            self.assertEqual(endpoint, "/search/issues")
+            self.assertEqual(params["page"], 1)
+            return {
+                "total_count": 6,
+                "incomplete_results": False,
+                "items": [
+                    {"node_id": "P-start", "number": 1, "closed_at": "2026-09-01T00:00:00Z"},
+                    {"node_id": "P-last", "number": 2, "closed_at": "2026-09-01T00:00:03Z"},
+                    {"node_id": "P-excluded", "number": 3, "closed_at": "2026-09-01T00:00:04Z"},
+                    {"node_id": "P-duplicate", "number": 4, "closed_at": "2026-09-01T00:00:02Z"},
+                    {"node_id": "P-duplicate", "number": 99, "closed_at": "2026-09-01T00:00:02Z"},
+                    {"node_id": "P-outside", "number": 6, "closed_at": "2026-08-31T23:59:59Z"},
+                ],
+            }
+
+        client = FakeSearchClient(self.collector, handler)
+        result = self.collector.collect_repository_hits(
+            client=client,
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="merged",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.preflight["node_id"], "R_1")
+        self.assertEqual(result.collection_status, "collected")
+        self.assertEqual(result.matched_count, 3)
+        self.assertEqual(result.selected_count, 2)
+        self.assertEqual(result.excluded_by_cap, 1)
+        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-last", "P-duplicate", "P-start"])
+        self.assertEqual([hit["node_id"] for hit in result.selected_hits], ["P-last", "P-duplicate"])
+        self.assertEqual([hit["node_id"] for hit in result.overflow_hits], ["P-start"])
+        self.assertEqual(result.partitions[0].interval, ("2026-09-01T00:00:00Z", "2026-09-01T00:00:04Z"))
+        self.assertTrue(result.partitions[0].pagination_complete)
+        self.assertEqual(result.partitions[0].completion_state, "complete")
+        with self.assertRaises(FrozenInstanceError):
+            result.partitions[0].failure = "mutated"
+        query = client.calls[1][1]["q"]
+        self.assertEqual(query.count("closed:"), 1)
+        self.assertIn("is:merged", query)
+
+    def test_marks_no_results_after_a_successful_repository_preflight(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/empty":
+                return {"node_id": "R_empty", "full_name": "owner/empty"}
+            return {"total_count": 0, "incomplete_results": False, "items": []}
+
+        result = self.collector.collect_repository_hits(
+            client=FakeSearchClient(self.collector, handler),
+            repository="owner/empty",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.collection_status, "no-results")
+        self.assertEqual(result.matched_count, 0)
+        self.assertEqual(result.selected_count, 0)
+        self.assertEqual(result.excluded_by_cap, 0)
+
+    def test_recursively_splits_unsafe_partitions_and_keeps_safe_hits(self):
+        def item(node_id, number, closed_at):
+            return {"node_id": node_id, "number": number, "closed_at": closed_at}
+
+        first_leaf = [item("P-left-{0}".format(index), index, "2026-09-01T00:00:01Z") for index in range(100)]
+        second_leaf = [item("P-left-100", 100, "2026-09-01T00:00:01Z")]
+
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo"}
+            query = params["q"]
+            page = params["page"]
+            if "closed:2026-09-01T00:00:00Z..2026-09-01T00:00:03Z" in query:
+                return {"total_count": 1000, "incomplete_results": False, "items": []}
+            if "closed:2026-09-01T00:00:00Z..2026-09-01T00:00:01Z" in query:
+                return {
+                    "total_count": 101,
+                    "incomplete_results": False,
+                    "items": first_leaf if page == 1 else second_leaf,
+                }
+            if "closed:2026-09-01T00:00:02Z..2026-09-01T00:00:03Z" in query:
+                return {"total_count": 1000, "incomplete_results": True, "items": []}
+            if "closed:2026-09-01T00:00:02Z..2026-09-01T00:00:02Z" in query:
+                return {"total_count": 1, "incomplete_results": False, "items": [item("P-mid", 101, "2026-09-01T00:00:02Z")]}
+            if "closed:2026-09-01T00:00:03Z..2026-09-01T00:00:03Z" in query:
+                return {"total_count": 1000, "incomplete_results": True, "items": []}
+            raise AssertionError("unexpected search query: {0}".format(query))
+
+        client = FakeSearchClient(self.collector, handler)
+        result = self.collector.collect_repository_hits(
+            client=client,
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="closed-unmerged",
+            max_per_repository=200,
+        )
+
+        self.assertEqual(result.collection_status, "partial")
+        self.assertEqual(
+            [partition.interval for partition in result.partitions],
+            [
+                ("2026-09-01T00:00:00Z", "2026-09-01T00:00:02Z"),
+                ("2026-09-01T00:00:02Z", "2026-09-01T00:00:03Z"),
+                ("2026-09-01T00:00:03Z", "2026-09-01T00:00:04Z"),
+            ],
+        )
+        self.assertTrue(result.partitions[0].pagination_complete)
+        self.assertEqual(result.partitions[2].completion_state, "failed")
+        self.assertTrue(result.partitions[2].failure)
+        self.assertEqual(result.matched_count, 102)
+        self.assertEqual(result.selected_count, 102)
+        self.assertEqual(len({hit["node_id"] for hit in result.hits}), len(result.hits))
+        for endpoint, params in client.calls:
+            if endpoint == "/search/issues":
+                self.assertEqual(params["q"].count("closed:"), 1)
+                self.assertIn("-is:merged", params["q"])
+                self.assertNotIn("per_page", params)
+        leaf_pages = [params["page"] for endpoint, params in client.calls if endpoint == "/search/issues" and "00:00:00Z..2026-09-01T00:00:01Z" in params["q"]]
+        self.assertEqual(leaf_pages, [1, 2])
+
+    def test_budget_stop_records_current_partition_without_starting_its_sibling(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo"}
+            if "00:00:00Z..2026-09-01T00:00:03Z" in params["q"]:
+                return {"total_count": 1000, "incomplete_results": False, "items": []}
+            raise self.collector.BudgetExhausted("request budget exhausted")
+
+        client = FakeSearchClient(self.collector, handler)
+        result = self.collector.collect_repository_hits(
+            client=client,
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.collection_status, "partial")
+        self.assertEqual(len(result.partitions), 1)
+        self.assertEqual(result.partitions[0].completion_state, "failed")
+        self.assertIn("budget exhausted", result.partitions[0].failure)
+        search_calls = [call for call in client.calls if call[0] == "/search/issues"]
+        self.assertEqual(len(search_calls), 2)
+
+    def test_repositories_keep_independent_caps(self):
+        def handler(endpoint, params):
+            if endpoint.startswith("/repos/"):
+                return {"node_id": endpoint, "full_name": endpoint.removeprefix("/repos/")}
+            repository = "high" if "repo:owner/high" in params["q"] else "low"
+            count = 3 if repository == "high" else 2
+            return {
+                "total_count": count,
+                "incomplete_results": False,
+                "items": [
+                    {"node_id": "P-{0}-{1}".format(repository, number), "number": number, "closed_at": "2026-09-01T00:00:0{0}Z".format(number)}
+                    for number in range(count)
+                ],
+            }
+
+        client = FakeSearchClient(self.collector, handler)
+        high = self.collector.collect_repository_hits(client, "owner/high", self.interval, "all", 2)
+        low = self.collector.collect_repository_hits(client, "owner/low", self.interval, "all", 2)
+
+        self.assertEqual((high.selected_count, high.excluded_by_cap), (2, 1))
+        self.assertEqual((low.selected_count, low.excluded_by_cap), (2, 0))
+        queries = [params["q"] for endpoint, params in client.calls if endpoint == "/search/issues"]
+        self.assertEqual(sum("repo:owner/high" in query for query in queries), 1)
+        self.assertEqual(sum("repo:owner/low" in query for query in queries), 1)
 
 
 if __name__ == "__main__":
