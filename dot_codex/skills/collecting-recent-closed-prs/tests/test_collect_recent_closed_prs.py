@@ -752,7 +752,7 @@ class RepositorySearchTests(unittest.TestCase):
         search_calls = [call for call in client.calls if call[0] == "/search/issues"]
         self.assertEqual(len(search_calls), 2)
 
-    def test_first_page_over_return_is_partial_and_keeps_exact_safe_hits(self):
+    def test_first_page_over_return_is_partial_evidence_without_selectable_hits(self):
         def handler(endpoint, params):
             if endpoint == "/repos/owner/repo":
                 return {"node_id": "R_1", "full_name": "owner/repo"}
@@ -774,13 +774,15 @@ class RepositorySearchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.collection_status, "partial")
-        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-two", "P-one"])
+        self.assertEqual(result.hits, ())
+        self.assertEqual(result.selected_hits, ())
+        self.assertEqual(result.overflow_hits, ())
         self.assertEqual(result.partitions[0].returned_count, 2)
         self.assertFalse(result.partitions[0].pagination_complete)
         self.assertEqual(result.partitions[0].completion_state, "failed")
         self.assertIn("exceeded advertised total_count", result.partitions[0].failure)
 
-    def test_later_page_total_count_drift_is_partial_and_stops_pagination(self):
+    def test_later_page_total_count_drift_is_partial_evidence_and_stops_pagination(self):
         def handler(endpoint, params):
             if endpoint == "/repos/owner/repo":
                 return {"node_id": "R_1", "full_name": "owner/repo"}
@@ -808,7 +810,9 @@ class RepositorySearchTests(unittest.TestCase):
         )
 
         self.assertEqual(result.collection_status, "partial")
-        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-two", "P-one"])
+        self.assertEqual(result.hits, ())
+        self.assertEqual(result.selected_hits, ())
+        self.assertEqual(result.overflow_hits, ())
         self.assertEqual(result.partitions[0].total_count, 2)
         self.assertEqual(result.partitions[0].returned_count, 2)
         self.assertIn("changed from 2 to 3", result.partitions[0].failure)
@@ -816,6 +820,46 @@ class RepositorySearchTests(unittest.TestCase):
             [params["page"] for endpoint, params in client.calls if endpoint == "/search/issues"],
             [1, 2],
         )
+
+    def test_completed_sibling_hits_remain_selectable_when_another_leaf_fails(self):
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo":
+                return {"node_id": "R_1", "full_name": "owner/repo"}
+            query = params["q"]
+            if "00:00:00Z..2026-09-01T00:00:03Z" in query:
+                return {"total_count": 1000, "incomplete_results": False, "items": []}
+            if "00:00:00Z..2026-09-01T00:00:01Z" in query:
+                return {
+                    "total_count": 1,
+                    "incomplete_results": False,
+                    "items": [{"node_id": "P-safe", "number": 1, "closed_at": "2026-09-01T00:00:01Z"}],
+                }
+            if "00:00:02Z..2026-09-01T00:00:03Z" in query:
+                return {
+                    "total_count": 1,
+                    "incomplete_results": False,
+                    "items": [
+                        {"node_id": "P-unsafe-one", "number": 2, "closed_at": "2026-09-01T00:00:02Z"},
+                        {"node_id": "P-unsafe-two", "number": 3, "closed_at": "2026-09-01T00:00:03Z"},
+                    ],
+                }
+            raise AssertionError("unexpected search query: {0}".format(query))
+
+        result = self.collector.collect_repository_hits(
+            client=FakeSearchClient(self.collector, handler),
+            repository="owner/repo",
+            interval=self.interval,
+            outcome="all",
+            max_per_repository=2,
+        )
+
+        self.assertEqual(result.collection_status, "partial")
+        self.assertEqual([hit["node_id"] for hit in result.hits], ["P-safe"])
+        self.assertEqual([hit["node_id"] for hit in result.selected_hits], ["P-safe"])
+        self.assertEqual(result.overflow_hits, ())
+        self.assertEqual(result.partitions[0].completion_state, "complete")
+        self.assertEqual(result.partitions[1].completion_state, "failed")
+        self.assertEqual(result.partitions[1].returned_count, 2)
 
     def test_malformed_successful_preflight_is_recorded_per_repository(self):
         result = self.collector.collect_repository_hits(

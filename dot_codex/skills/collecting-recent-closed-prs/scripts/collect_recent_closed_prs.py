@@ -559,7 +559,6 @@ def collect_repository_hits(
                 incomplete_results,
                 "search page exceeded advertised total_count",
             )
-            safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
             return
         page = 1
         while len(items) < total_count:
@@ -593,7 +592,6 @@ def collect_repository_hits(
                         total_count, page_total_count
                     ),
                 )
-                safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
                 return
             if len(items) > total_count:
                 fail_partition(
@@ -605,7 +603,6 @@ def collect_repository_hits(
                     page_incomplete,
                     "search pages exceeded advertised total_count",
                 )
-                safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
                 return
             if page_incomplete or not page_items:
                 fail_partition(
