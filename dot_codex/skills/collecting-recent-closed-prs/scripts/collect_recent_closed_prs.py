@@ -701,6 +701,8 @@ def hydrate_pull_request(
             raise ValueError("pull request response payload must be an object")
         core_payload = deepcopy(payload)
         core_etag = _response_etag(response)
+        if _pull_request_details(payload, number, pull_endpoint)["normalized_state"] == "unknown":
+            core_warning = "pull request response has no authoritative state"
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
         core_warning = _hydration_warning(error)
 
@@ -741,19 +743,36 @@ def hydrate_pull_request(
         category_results[category] = _hydrate_list_category(
             client=client,
             endpoint=endpoint,
+            category=category,
             known_limit=known_limit,
             captured_at=captured_at,
-            maximum_items=_FILES_LIMIT if category == "files" else None,
+            maximum_items=_FILES_LIMIT if category == "files" else _PULL_COMMITS_LIMIT if category == "commits" else None,
         )
 
     files, files_meta = category_results["files"]
     if len(files) >= _FILES_LIMIT:
         files_meta["pages_complete"] = False
         files_meta["warnings"].append("GitHub pull-request files endpoint is capped at 3000 files")
+    expected_files = details["changed_files_count"]
+    if not isinstance(expected_files, int) or isinstance(expected_files, bool):
+        files_meta["pages_complete"] = False
+        files_meta["warnings"].append("pull request has no authoritative changed_files count")
+    elif len(files) != expected_files:
+        files_meta["pages_complete"] = False
+        files_meta["warnings"].append("returned files do not match the authoritative pull-request changed_files count")
+    if any(not isinstance(item, dict) or not isinstance(item.get("patch"), str) for item in files):
+        files_meta["pages_complete"] = False
+        files_meta["warnings"].append("one or more changed files has no complete patch text")
 
     commits, commits_meta = category_results["commits"]
     expected_commits = details["commits_count"]
-    if (
+    if not isinstance(expected_commits, int) or isinstance(expected_commits, bool) or expected_commits < 0:
+        commits_meta["pages_complete"] = False
+        commits_meta["warnings"].append("pull request has no authoritative integer commits count")
+    elif len(commits) >= _PULL_COMMITS_LIMIT and not _first_nonempty_string(details["head_sha"]):
+        commits_meta["pages_complete"] = False
+        commits_meta["warnings"].append("repository commit fallback requires the authoritative PR head SHA")
+    elif (
         commits_meta["pages_complete"]
         and isinstance(expected_commits, int)
         and not isinstance(expected_commits, bool)
@@ -764,19 +783,19 @@ def hydrate_pull_request(
         fallback, fallback_meta = _hydrate_list_category(
             client=client,
             endpoint=fallback_endpoint,
+            category="commits",
             known_limit=None,
             captured_at=captured_at,
-            extra_params={"sha": details["head_sha"]} if isinstance(details["head_sha"], str) else None,
+            extra_params={"sha": details["head_sha"]},
             maximum_items=expected_commits,
         )
         commits_meta["fallback_endpoint"] = "GET " + fallback_endpoint
         commits_meta["fallback_page_count"] = fallback_meta["page_count"]
         commits_meta["fallback_etag"] = fallback_meta["etag"]
-        if _commits_reconcile(commits, fallback, details["head_sha"], expected_commits):
+        commits_meta["fallback_completeness"] = deepcopy(fallback_meta)
+        if fallback_meta["pages_complete"] and _commits_reconcile(commits, fallback, details["head_sha"], details["base_sha"], expected_commits):
             commits = fallback
             commits_meta["returned_count"] = len(commits)
-            commits_meta["page_count"] += fallback_meta["page_count"]
-            commits_meta["etag"] = fallback_meta["etag"]
             commits_meta["warnings"].extend(fallback_meta["warnings"])
         else:
             commits_meta["pages_complete"] = False
@@ -815,6 +834,8 @@ def hydrate_pull_request(
         page_count=timeline_meta["page_count"],
         etag=timeline_meta["etag"],
         warnings=list(timeline_meta["warnings"]),
+        attempted_pages=timeline_meta["attempted_pages"],
+        page_etags=deepcopy(timeline_meta["page_etags"]),
     )
     completeness = {
         "pull_request_body": body_meta,
@@ -863,19 +884,24 @@ def hydrate_pull_request(
 
 
 def _hydrate_list_category(
-    *, client: Any, endpoint: str, known_limit: Optional[int], captured_at: str,
+    *, client: Any, endpoint: str, known_limit: Optional[int], captured_at: str, category: str,
     extra_params: Optional[dict[str, object]] = None, maximum_items: Optional[int] = None,
 ) -> tuple[list[object], dict[str, object]]:
     """Read consecutive 100-item pages and contain malformed endpoint data."""
     items: list[object] = []
+    raw_count = 0
     page = 0
+    attempted_pages = 0
+    successful_pages = 0
+    page_etags: list[dict[str, object]] = []
     etag: Optional[str] = None
     warnings: list[str] = []
     complete = True
     try:
-        while maximum_items is None or len(items) < maximum_items:
+        while maximum_items is None or raw_count < maximum_items:
             page += 1
-            params: dict[str, object] = {"per_page": _LIST_PAGE_SIZE, "page": page}
+            attempted_pages += 1
+            params: dict[str, object] = {"page": page}
             if extra_params:
                 params.update(extra_params)
             response = client.get_json(endpoint, params)
@@ -883,10 +909,21 @@ def _hydrate_list_category(
             if not isinstance(payload, list):
                 raise ValueError("list endpoint response payload must be an array")
             etag = _response_etag(response)
-            items.extend(deepcopy(payload))
-            if maximum_items is not None and len(items) >= maximum_items:
-                del items[maximum_items:]
+            successful_pages += 1
+            page_etags.append({"page": page, "etag": etag})
+            bounded_payload = payload if maximum_items is None else payload[:maximum_items - raw_count]
+            raw_count += len(bounded_payload)
+            for item in bounded_payload:
+                if _valid_hydration_item(category, item):
+                    items.append(deepcopy(item))
+                else:
+                    complete = False
+                    warnings.append("{0} endpoint returned a malformed item".format(category))
+            if maximum_items is not None and raw_count >= maximum_items:
                 break
+            link_header = getattr(response, "headers", {}).get("link", "") if isinstance(getattr(response, "headers", {}), dict) else ""
+            if isinstance(link_header, str) and 'rel="next"' in link_header:
+                continue
             if len(payload) < _LIST_PAGE_SIZE:
                 break
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
@@ -898,10 +935,53 @@ def _hydrate_list_category(
         returned_count=len(items),
         known_limit=known_limit,
         captured_at=captured_at,
-        page_count=page if not (page == 1 and not items and not complete) else 0,
+        page_count=successful_pages,
         etag=etag,
         warnings=warnings,
+        attempted_pages=attempted_pages,
+        page_etags=page_etags,
     )
+
+
+def _valid_hydration_item(category: str, item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if category in {"issue_comments", "reviews", "review_comments", "timeline"}:
+        for key in ("body", "created_at", "updated_at", "submitted_at", "commit_id", "commit_url", "original_commit_id", "diff_hunk", "side", "start_side", "html_url"):
+            if item.get(key) is not None and not isinstance(item[key], str):
+                return False
+        for key in ("line", "original_line", "start_line", "original_start_line", "position", "original_position"):
+            if item.get(key) is not None and (not isinstance(item[key], int) or isinstance(item[key], bool)):
+                return False
+        for key in ("user", "actor", "source"):
+            if item.get(key) is not None and not isinstance(item[key], dict):
+                return False
+        for key in ("user", "actor"):
+            login = _nested_value(item, key, "login")
+            if login is not None and not isinstance(login, str):
+                return False
+    if category == "files":
+        return bool(_first_nonempty_string(item.get("filename"))) and bool(_first_nonempty_string(item.get("status")))
+    if category == "commits":
+        return (
+            bool(_first_nonempty_string(item.get("sha")))
+            and isinstance(item.get("parents"), list)
+            and all(isinstance(parent, dict) and _first_nonempty_string(parent.get("sha")) for parent in item["parents"])
+            and isinstance(_nested_value(item, "commit", "message"), str)
+        )
+    if category in {"issue_comments", "reviews", "review_comments"}:
+        if not isinstance(item.get("id"), int) or isinstance(item.get("id"), bool) or item["id"] <= 0:
+            return False
+        if "body" not in item or (item["body"] is not None and not isinstance(item["body"], str)):
+            return False
+        if category == "reviews":
+            return bool(_first_nonempty_string(item.get("state")))
+        if category == "review_comments":
+            return bool(_first_nonempty_string(item.get("path")))
+        return True
+    if category == "timeline":
+        return bool(_first_nonempty_string(item.get("event")))
+    return True
 
 
 def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], captured_at: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -929,8 +1009,8 @@ def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], 
     return license_value, metadata
 
 
-def _completeness(endpoint: str, pages_complete: bool, returned_count: int, known_limit: Optional[int], captured_at: str, page_count: int, etag: Optional[str], warnings: list[str]) -> dict[str, object]:
-    return {"endpoint": endpoint, "pages_complete": pages_complete, "returned_count": returned_count, "known_limit": known_limit, "captured_at": captured_at, "page_count": page_count, "etag": etag, "warnings": warnings}
+def _completeness(endpoint: str, pages_complete: bool, returned_count: int, known_limit: Optional[int], captured_at: str, page_count: int, etag: Optional[str], warnings: list[str], attempted_pages: Optional[int] = None, page_etags: Optional[list[dict[str, object]]] = None) -> dict[str, object]:
+    return {"endpoint": endpoint, "pages_complete": pages_complete, "returned_count": returned_count, "known_limit": known_limit, "captured_at": captured_at, "page_count": page_count, "attempted_pages": page_count if attempted_pages is None else attempted_pages, "etag": etag, "page_etags": [] if page_etags is None else page_etags, "warnings": warnings}
 
 
 def _response_etag(response: object) -> Optional[str]:
@@ -958,7 +1038,19 @@ def _nested_value(value: object, *keys: str) -> object:
 
 def _pull_request_details(payload: dict[str, object], number: int, url: str) -> dict[str, object]:
     merged_at = payload.get("merged_at") if isinstance(payload.get("merged_at"), str) else None
-    return {"number": number, "url": url, "title": payload.get("title") if isinstance(payload.get("title"), str) else None, "normalized_state": "merged" if merged_at is not None else "closed-unmerged", "closure_reason": "merged" if merged_at is not None else "unknown", "created_at": payload.get("created_at") if isinstance(payload.get("created_at"), str) else None, "closed_at": payload.get("closed_at") if isinstance(payload.get("closed_at"), str) else None, "merged_at": merged_at, "updated_at": payload.get("updated_at") if isinstance(payload.get("updated_at"), str) else None, "base_sha": _nested_value(payload, "base", "sha"), "head_sha": _nested_value(payload, "head", "sha"), "merge_sha": payload.get("merge_commit_sha") if isinstance(payload.get("merge_commit_sha"), str) else None, "labels": [label["name"] for label in payload.get("labels", []) if isinstance(label, dict) and isinstance(label.get("name"), str)] if isinstance(payload.get("labels", []), list) else [], "changed_files_count": payload.get("changed_files") if isinstance(payload.get("changed_files"), int) and not isinstance(payload.get("changed_files"), bool) else None, "commits_count": payload.get("commits") if isinstance(payload.get("commits"), int) and not isinstance(payload.get("commits"), bool) else None}
+    state = payload.get("state")
+    valid_merge_observation = "merged_at" in payload
+    if payload.get("merged_at") is not None:
+        try:
+            _parse_timestamp(merged_at, "merged_at")
+        except ValueError:
+            valid_merge_observation = False
+    normalized_state = "unknown"
+    if valid_merge_observation:
+        normalized_state = "merged" if merged_at is not None else "closed-unmerged" if state == "closed" else "open" if state == "open" else "unknown"
+    else:
+        merged_at = None
+    return {"number": number, "url": url, "title": payload.get("title") if isinstance(payload.get("title"), str) else None, "normalized_state": normalized_state, "closure_reason": "merged" if merged_at is not None else "unknown", "created_at": payload.get("created_at") if isinstance(payload.get("created_at"), str) else None, "closed_at": payload.get("closed_at") if isinstance(payload.get("closed_at"), str) else None, "merged_at": merged_at, "updated_at": payload.get("updated_at") if isinstance(payload.get("updated_at"), str) else None, "base_sha": _nested_value(payload, "base", "sha"), "head_sha": _nested_value(payload, "head", "sha"), "merge_sha": payload.get("merge_commit_sha") if isinstance(payload.get("merge_commit_sha"), str) else None, "labels": [label["name"] for label in payload.get("labels", []) if isinstance(label, dict) and isinstance(label.get("name"), str)] if isinstance(payload.get("labels", []), list) else [], "changed_files_count": payload.get("changed_files") if isinstance(payload.get("changed_files"), int) and not isinstance(payload.get("changed_files"), bool) else None, "commits_count": payload.get("commits") if isinstance(payload.get("commits"), int) and not isinstance(payload.get("commits"), bool) else None}
 
 
 def _author(payload: dict[str, object]) -> dict[str, object]:
@@ -975,7 +1067,11 @@ def _author(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _state_history(details: dict[str, object]) -> list[dict[str, object]]:
-    observed_at = details["merged_at"] or details["closed_at"] or details["updated_at"] or details["created_at"]
+    if details["normalized_state"] == "unknown":
+        return []
+    observed_at = details["updated_at"] or details["created_at"]
+    if details["normalized_state"] != "open":
+        observed_at = details["merged_at"] or details["closed_at"] or observed_at
     return [{"state": details["normalized_state"], "observed_at": observed_at, "authority": "GitHub pull request", "evidence_url": details["url"]}]
 
 
@@ -994,15 +1090,27 @@ def _commit_evidence(item: object) -> dict[str, object]:
 def _discussion_evidence(item: object) -> dict[str, object]:
     value = item if isinstance(item, dict) else {}
     user = value.get("user") if isinstance(value.get("user"), dict) else {}
-    return {"kind": value.get("event") if isinstance(value.get("event"), str) else value.get("state") if isinstance(value.get("state"), str) else "observed", "id": value.get("id") if isinstance(value.get("id"), int) and not isinstance(value.get("id"), bool) else None, "author": user.get("login") if isinstance(user.get("login"), str) else None, "path": value.get("path") if isinstance(value.get("path"), str) else None, "excerpt": value.get("body") if isinstance(value.get("body"), str) else None}
+    evidence = {
+        "kind": _first_nonempty_string(value.get("event"), value.get("state")) or "observed",
+        "author": _first_nonempty_string(user.get("login"), _nested_value(value, "actor", "login")),
+        "source": deepcopy(value.get("source")) if isinstance(value.get("source"), dict) else None,
+        "excerpt": value.get("body") if isinstance(value.get("body"), str) else None,
+    }
+    for key in ("path", "diff_hunk", "state", "submitted_at", "created_at", "updated_at", "commit_id", "original_commit_id", "commit_url", "html_url", "side", "start_side"):
+        evidence[key] = value.get(key) if isinstance(value.get(key), str) else None
+    for key in ("id", "line", "original_line", "start_line", "original_start_line", "position", "original_position"):
+        evidence[key] = value.get(key) if isinstance(value.get(key), int) and not isinstance(value.get(key), bool) else None
+    return evidence
 
 
 def _linked_issues(timeline: list[object]) -> list[dict[str, object]]:
     observed: list[dict[str, object]] = []
     seen: set[tuple[object, object]] = set()
     for event in timeline:
+        if not isinstance(event, dict) or event.get("event") != "cross-referenced":
+            continue
         issue = _nested_value(event, "source", "issue")
-        if not isinstance(issue, dict):
+        if not isinstance(issue, dict) or "pull_request" in issue:
             continue
         url = _first_nonempty_string(issue.get("html_url"), issue.get("url"))
         node_id = issue.get("node_id") if isinstance(issue.get("node_id"), str) else None
@@ -1014,14 +1122,24 @@ def _linked_issues(timeline: list[object]) -> list[dict[str, object]]:
     return observed
 
 
-def _commits_reconcile(pull_commits: list[object], fallback: list[object], head_sha: object, expected_count: int) -> bool:
+def _commits_reconcile(pull_commits: list[object], fallback: list[object], head_sha: object, base_sha: object, expected_count: int) -> bool:
     fallback_ids = [item.get("sha") for item in fallback if isinstance(item, dict) and isinstance(item.get("sha"), str)]
     pull_ids = [item.get("sha") for item in pull_commits if isinstance(item, dict) and isinstance(item.get("sha"), str)]
-    if len(fallback) != expected_count or len(fallback_ids) != expected_count or not isinstance(head_sha, str):
+    if len(fallback) != expected_count or len(fallback_ids) != expected_count or not isinstance(head_sha, str) or not isinstance(base_sha, str):
         return False
-    if not fallback_ids or fallback_ids[0] != head_sha or len(pull_ids) != len(pull_commits):
+    if not fallback_ids or fallback_ids[0] != head_sha or base_sha in fallback_ids or len(set(fallback_ids)) != expected_count or len(pull_ids) != len(pull_commits):
         return False
-    return fallback_ids[:len(pull_ids)] == pull_ids or fallback_ids[:len(pull_ids)] == list(reversed(pull_ids))
+    if list(reversed(fallback_ids))[:len(pull_ids)] != pull_ids:
+        return False
+    for index, item in enumerate(fallback):
+        if not isinstance(item, dict) or not isinstance(item.get("parents"), list):
+            return False
+        if index + 1 < len(fallback_ids):
+            if fallback_ids[index + 1] not in [parent.get("sha") for parent in item["parents"] if isinstance(parent, dict)]:
+                return False
+        elif base_sha not in [parent.get("sha") for parent in item["parents"] if isinstance(parent, dict)]:
+            return False
+    return True
 
 
 def _empty_repository_search_result(

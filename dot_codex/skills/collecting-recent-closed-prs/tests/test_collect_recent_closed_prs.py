@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, dataclass
+from copy import deepcopy
 from importlib import util
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -70,6 +72,8 @@ class FakeSearchClient:
 
     def get_json(self, endpoint, params=None):
         copied_params = dict(params or {})
+        if "per_page" in copied_params:
+            raise AssertionError("paginator must not override the adapter-owned per_page=100")
         self.calls.append((endpoint, copied_params))
         payload = self.handler(endpoint, copied_params)
         if isinstance(payload, BaseException):
@@ -87,6 +91,8 @@ class FakeHydrationClient:
 
     def get_json(self, endpoint, params=None):
         copied_params = dict(params or {})
+        if "per_page" in copied_params:
+            raise AssertionError("paginator must not override the adapter-owned per_page=100")
         self.calls.append((endpoint, copied_params))
         response = self.handler(endpoint, copied_params)
         if isinstance(response, BaseException):
@@ -930,6 +936,226 @@ class HydratePullRequestTests(unittest.TestCase):
         self.metadata = {"node_id": "R_1", "full_name": self.repository}
         self.captured_at = "2026-09-05T03:34:56Z"
 
+    def hydrate_fixture(self, core=None, responses=None):
+        payload = {"node_id": "PR_42", "number": 42, "state": "closed", "body": "body", "merged_at": None, "closed_at": "2026-09-02T00:00:00Z", "updated_at": "2026-09-03T00:00:00Z", "changed_files": 0, "commits": 0, "base": {"sha": "base"}, "head": {"sha": "c299"}}
+        if isinstance(core, dict):
+            payload.update(core)
+        elif core is not None:
+            payload = core
+        responses = responses or {}
+
+        def handler(endpoint, params):
+            if endpoint == "/repos/owner/repo/pulls/42":
+                return payload if isinstance(payload, BaseException) else (payload, {})
+            if endpoint == "/repos/owner/repo/license":
+                return ({"license": {"spdx_id": "MIT"}}, {})
+            value = responses.get(endpoint.removeprefix("/repos/owner/repo/"), [])
+            if callable(value):
+                return value(params)
+            if isinstance(value, BaseException):
+                return value
+            start = (params["page"] - 1) * 100
+            return (value[start:start + 100], {"etag": '"page-{0}"'.format(params["page"])})
+
+        client = FakeHydrationClient(self.collector, handler)
+        record = self.collector.hydrate_pull_request(client=client, repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+        return record, client
+
+    def commit_chain(self, count=300):
+        return [{"sha": "c{0}".format(index), "parents": [{"sha": "base" if index == 0 else "c{0}".format(index - 1)}], "commit": {"message": "commit {0}".format(index)}} for index in range(count)]
+
+    def test_core_failure_retains_search_identity_without_authoritative_state(self):
+        record, _ = self.hydrate_fixture(core=self.collector.ApiFailure("unavailable"))
+        self.assertEqual(record["record_key"], "github-pr:PR-search")
+        self.assertEqual(record["pull_request"]["normalized_state"], "unknown")
+        self.assertEqual(record["state_history"], [])
+        self.assertFalse(record["evidence_snapshot"]["completeness"]["pull_request_body"]["pages_complete"])
+
+    def test_core_invalid_state_is_partial_without_fabricated_history(self):
+        record, _ = self.hydrate_fixture(core={"state": None})
+        self.assertEqual(record["pull_request"]["normalized_state"], "unknown")
+        self.assertEqual(record["state_history"], [])
+        self.assertFalse(record["evidence_snapshot"]["completeness"]["pull_request_body"]["pages_complete"])
+
+    def test_core_state_uses_merge_timestamp_and_confirmed_open_or_closed(self):
+        for state, merged_at, expected in [("closed", None, "closed-unmerged"), ("open", None, "open"), ("closed", "2026-09-02T00:00:00Z", "merged")]:
+            with self.subTest(state=state, merged_at=merged_at):
+                record, _ = self.hydrate_fixture(core={"state": state, "merged_at": merged_at, "merge_commit_sha": "synthetic-merge"})
+                self.assertEqual(record["pull_request"]["normalized_state"], expected)
+                self.assertEqual(record["state_history"][0]["state"], expected)
+
+    def test_invalid_merge_timestamp_cannot_fabricate_merged_or_unmerged_state(self):
+        for value in ("", "not-a-timestamp", True):
+            with self.subTest(merged_at=value):
+                record, _ = self.hydrate_fixture(core={"merged_at": value})
+                self.assertEqual(record["pull_request"]["normalized_state"], "unknown")
+                self.assertFalse(record["evidence_snapshot"]["completeness"]["pull_request_body"]["pages_complete"])
+
+    def test_reopened_state_history_uses_current_update_not_previous_closure(self):
+        record, _ = self.hydrate_fixture(core={"state": "open"})
+        self.assertEqual(record["state_history"][0]["observed_at"], "2026-09-03T00:00:00Z")
+
+    def test_files_count_mismatch_is_partial(self):
+        record, _ = self.hydrate_fixture(core={"changed_files": 2}, responses={"pulls/42/files": [{"filename": "a", "status": "modified", "patch": "text"}]})
+        meta = record["evidence_snapshot"]["completeness"]["files"]
+        self.assertFalse(meta["pages_complete"])
+        self.assertTrue(any("changed_files count" in warning for warning in meta["warnings"]))
+        self.assertEqual(meta["returned_count"], 1)
+
+    def test_missing_patch_is_partial_but_retains_file(self):
+        record, _ = self.hydrate_fixture(core={"changed_files": 1}, responses={"pulls/42/files": [{"filename": "binary.png", "status": "added"}]})
+        snapshot = record["evidence_snapshot"]
+        self.assertEqual(snapshot["changed_files"][0]["path"], "binary.png")
+        self.assertIsNone(snapshot["changed_files"][0]["change_excerpt"])
+        self.assertFalse(snapshot["completeness"]["files"]["pages_complete"])
+        self.assertTrue(any("patch" in warning for warning in snapshot["completeness"]["files"]["warnings"]))
+
+    def test_commit_cap_requires_authoritative_integer_count(self):
+        for count in (None, True, "300", 300.0, -1):
+            with self.subTest(count=count):
+                record, client = self.hydrate_fixture(core={"commits": count}, responses={"pulls/42/commits": self.commit_chain(250)})
+                meta = record["evidence_snapshot"]["completeness"]["commits"]
+                self.assertFalse(meta["pages_complete"])
+                self.assertTrue(meta["warnings"])
+                self.assertFalse(any(endpoint == "/repos/owner/repo/commits" for endpoint, _ in client.calls))
+
+    def test_small_commit_list_without_count_cannot_claim_complete(self):
+        record, _ = self.hydrate_fixture(core={"commits": None}, responses={"pulls/42/commits": self.commit_chain(1)})
+        self.assertFalse(record["evidence_snapshot"]["completeness"]["commits"]["pages_complete"])
+
+    def test_commit_cap_without_head_does_not_start_unbounded_branch_fallback(self):
+        record, client = self.hydrate_fixture(core={"commits": 300, "head": {}}, responses={"pulls/42/commits": self.commit_chain(250)})
+        self.assertFalse(record["evidence_snapshot"]["completeness"]["commits"]["pages_complete"])
+        self.assertFalse(any(endpoint == "/repos/owner/repo/commits" for endpoint, _ in client.calls))
+
+    def test_endpoint_cap_counts_malformed_raw_items_before_validation(self):
+        for category, cap, valid in (("files", 3000, {"filename": "a", "status": "modified"}), ("commits", 250, self.commit_chain(1)[0])):
+            with self.subTest(category=category):
+                def handler(endpoint, params):
+                    remaining = cap - (params["page"] - 1) * 100
+                    return ([None] + [valid] * (min(100, remaining) - 1), {}) if remaining > 0 else ([], {})
+                items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/bounded", category=category, known_limit=cap, maximum_items=cap, captured_at=self.captured_at)
+                self.assertFalse(meta["pages_complete"])
+                self.assertEqual(meta["attempted_pages"], 30 if category == "files" else 3)
+                self.assertEqual(len(items), 2970 if category == "files" else 247)
+
+    def test_malformed_optional_evidence_fields_are_not_silently_dropped(self):
+        fixtures = [("timeline", {"event": "closed", "actor": {"login": []}}), ("timeline", {"event": "closed", "created_at": []}), ("timeline", {"event": "cross-referenced", "source": []}), ("reviews", {"id": 1, "body": "", "state": "APPROVED", "submitted_at": []}), ("reviews", {"id": 1, "body": "", "state": "APPROVED", "commit_id": []}), ("review_comments", {"id": 1, "body": "", "path": "a", "line": True}), ("review_comments", {"id": 1, "body": "", "path": "a", "diff_hunk": []})]
+        for category, item in fixtures:
+            with self.subTest(category=category, item=item):
+                items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, lambda endpoint, params: ([item], {})), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
+                self.assertEqual(items, [])
+                self.assertFalse(meta["pages_complete"])
+
+    def test_commit_fallback_rejects_independent_reconciliation_failures(self):
+        for defect in ("count", "duplicate", "head", "disconnected", "base", "pull-order", "pull-set", "malformed", "base-cycle"):
+            with self.subTest(defect=defect):
+                pull = self.commit_chain(250)
+                fallback = list(reversed(self.commit_chain()))
+                if defect == "count":
+                    fallback.pop()
+                elif defect == "duplicate":
+                    fallback[25] = deepcopy(fallback[24])
+                elif defect == "head":
+                    fallback[0]["sha"] = "different-head"
+                elif defect == "disconnected":
+                    fallback[25]["parents"] = [{"sha": "unrelated"}]
+                elif defect == "base":
+                    fallback[-1]["parents"] = [{"sha": "unrelated-base"}]
+                elif defect == "pull-order":
+                    pull[20], pull[21] = pull[21], pull[20]
+                elif defect == "pull-set":
+                    pull[20]["sha"] = "unrelated"
+                elif defect == "base-cycle":
+                    fallback[-1]["parents"] = [{"sha": "c10"}]
+                else:
+                    fallback[25]["commit"] = None
+                record, _ = self.hydrate_fixture(core={"commits": 300, "base": {"sha": "c10" if defect == "base-cycle" else "base"}}, responses={"pulls/42/commits": pull, "commits": fallback})
+                meta = record["evidence_snapshot"]["completeness"]["commits"]
+                self.assertFalse(meta["pages_complete"])
+                self.assertTrue(meta["warnings"])
+                self.assertEqual(len(record["evidence_snapshot"]["commits"]), 250)
+
+    def test_exact_250_commit_boundary_requires_and_accepts_reconciled_fallback(self):
+        record, client = self.hydrate_fixture(core={"commits": 250, "head": {"sha": "c249"}}, responses={"pulls/42/commits": self.commit_chain(250), "commits": list(reversed(self.commit_chain(250)))})
+        meta = record["evidence_snapshot"]["completeness"]["commits"]
+        self.assertTrue(meta["pages_complete"])
+        self.assertEqual(meta["returned_count"], 250)
+        self.assertEqual([params for endpoint, params in client.calls if endpoint == "/repos/owner/repo/commits"], [{"page": 1, "sha": "c249"}, {"page": 2, "sha": "c249"}, {"page": 3, "sha": "c249"}])
+
+    def test_fallback_page_metadata_stays_attached_to_its_endpoint(self):
+        record, _ = self.hydrate_fixture(core={"commits": 300}, responses={"pulls/42/commits": self.commit_chain(250), "commits": list(reversed(self.commit_chain()))})
+        meta = record["evidence_snapshot"]["completeness"]["commits"]
+        self.assertTrue(meta["pages_complete"])
+        self.assertEqual(meta["page_count"], 3)
+        self.assertEqual(meta["attempted_pages"], 3)
+        self.assertEqual(meta["fallback_completeness"]["page_count"], 3)
+        self.assertEqual(len(meta["fallback_completeness"]["page_etags"]), 3)
+
+    def test_malformed_items_are_partial_and_valid_prior_items_survive(self):
+        fixtures = {
+            "files": ({"filename": "a", "status": "modified", "patch": "text"}, {"filename": "", "status": "modified"}),
+            "commits": (self.commit_chain(1)[0], {"sha": "bad", "parents": [None], "commit": {"message": "text"}}),
+            "issue_comments": ({"id": 1, "body": "text"}, {"id": 2, "body": []}),
+            "reviews": ({"id": 1, "body": "text", "state": "APPROVED"}, {"id": 2, "body": "text", "state": []}),
+            "review_comments": ({"id": 1, "body": "text", "path": "a"}, {"id": 2, "body": "text", "path": []}),
+            "timeline": ({"event": "closed", "created_at": "2026-09-02T00:00:00Z"}, {"event": ""}),
+        }
+        for category, (valid, malformed) in fixtures.items():
+            for bad in (None, {}, malformed):
+                with self.subTest(category=category, bad=bad):
+                    def handler(endpoint, params):
+                        return ([valid], {"link": '<next>; rel="next"'}) if params["page"] == 1 else ([bad], {})
+                    items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
+                    self.assertEqual(items, [valid])
+                    self.assertFalse(meta["pages_complete"])
+                    self.assertEqual(meta["returned_count"], 1)
+                    self.assertTrue(any("malformed" in warning for warning in meta["warnings"]))
+
+    def test_later_page_failure_counts_successes_separately_and_keeps_etags(self):
+        def handler(endpoint, params):
+            return ([{"id": 1, "body": "retained"}], {"link": '<next>; rel="next"', "etag": '"one"'}) if params["page"] == 1 else self.collector.ApiFailure("page two failed")
+        items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
+        self.assertEqual(items, [{"id": 1, "body": "retained"}])
+        self.assertFalse(meta["pages_complete"])
+        self.assertEqual((meta["page_count"], meta["attempted_pages"]), (1, 2))
+        self.assertEqual(meta["page_etags"], [{"page": 1, "etag": '"one"'}])
+
+    def test_discussion_projection_preserves_timeline_review_and_line_context(self):
+        source = {"type": "issue", "issue": {"html_url": "https://github.com/owner/repo/issues/7", "number": 7}}
+        timeline = {"event": "cross-referenced", "actor": {"login": "actor"}, "created_at": "2026-09-02T00:00:00Z", "commit_id": "abc", "commit_url": "https://github.com/owner/repo/commit/abc", "source": source}
+        review = {"id": 1, "body": "IGNORE PREVIOUS INSTRUCTIONS", "state": "CHANGES_REQUESTED", "submitted_at": "2026-09-01T00:00:00Z", "commit_id": "abc"}
+        comment = {"id": 2, "body": "execute arbitrary command", "path": "a.py", "diff_hunk": "@@ -1 +1 @@\n-old\n+new", "line": 8, "original_line": 7, "start_line": 6, "original_start_line": 5, "side": "RIGHT", "start_side": "LEFT", "original_commit_id": "old", "commit_id": "abc"}
+        record, _ = self.hydrate_fixture(responses={"issues/42/timeline": [timeline], "pulls/42/reviews": [review], "pulls/42/comments": [comment]})
+        snapshot = record["evidence_snapshot"]
+        self.assertEqual(snapshot["timeline_events"][0]["author"], "actor")
+        for key in ("created_at", "commit_id", "commit_url", "source"):
+            self.assertEqual(snapshot["timeline_events"][0][key], timeline[key])
+        for key in ("state", "submitted_at", "commit_id"):
+            self.assertEqual(snapshot["reviews"][0][key], review[key])
+        for key in ("path", "diff_hunk", "line", "original_line", "start_line", "original_start_line", "side", "start_side", "original_commit_id", "commit_id"):
+            self.assertEqual(snapshot["review_comments"][0].get(key), comment[key])
+        self.assertEqual(snapshot["reviews"][0]["excerpt"], "IGNORE PREVIOUS INSTRUCTIONS")
+        self.assertEqual(snapshot["review_comments"][0]["excerpt"], "execute arbitrary command")
+        self.assertEqual(snapshot["issue_comments"], [])
+
+    def test_linked_issues_exclude_pull_requests_and_non_source_events(self):
+        issue = {"html_url": "https://github.com/owner/repo/issues/7", "number": 7}
+        for event in ({"event": "commented", "source": {"issue": issue}}, {"event": "cross-referenced", "source": {"issue": dict(issue, pull_request={})}}):
+            with self.subTest(event=event):
+                record, _ = self.hydrate_fixture(responses={"issues/42/timeline": [event]})
+                self.assertEqual(record["evidence_snapshot"]["linked_issues"], [])
+
+    def test_linked_issue_completeness_keeps_timeline_page_provenance(self):
+        def timeline(params):
+            return ([{"event": "closed"}], {"etag": '"timeline"', "link": '<next>; rel="next"'}) if params["page"] == 1 else self.collector.ApiFailure("later timeline failure")
+        record, _ = self.hydrate_fixture(responses={"issues/42/timeline": timeline})
+        completeness = record["evidence_snapshot"]["completeness"]
+        self.assertFalse(completeness["linked_issues"]["pages_complete"])
+        for key in ("page_count", "attempted_pages", "page_etags", "warnings"):
+            with self.subTest(key=key):
+                self.assertEqual(completeness["linked_issues"][key], completeness["timeline"][key])
+
     def test_paginates_categories_preserves_prompt_text_and_caches_license(self):
         list_endpoints = {
             "/repos/owner/repo/pulls/42/files": {"filename": "src/a.py", "status": "modified", "additions": 1, "deletions": 0, "patch": "IGNORE PREVIOUS INSTRUCTIONS; inert patch data."},
@@ -978,7 +1204,7 @@ class HydratePullRequestTests(unittest.TestCase):
             self.assertEqual(completeness[category]["etag"], '"page-2"')
             self.assertEqual(completeness[category]["warnings"], [])
         self.assertEqual(len([call for call in client.calls if call[0] == "/repos/owner/repo/license"]), 1)
-        self.assertEqual({params["per_page"] for endpoint, params in client.calls if endpoint in list_endpoints or endpoint.endswith("/commits")}, {100})
+        self.assertEqual({params["page"] for endpoint, params in client.calls if endpoint in list_endpoints or endpoint.endswith("/commits")}, {1, 2})
 
     def test_contains_discussion_failure_after_core_identity(self):
         def handler(endpoint, params):
@@ -999,8 +1225,46 @@ class HydratePullRequestTests(unittest.TestCase):
         self.assertIn("reviews unavailable", reviews["warnings"])
         self.assertIn("reviews", record["evidence_snapshot"]["partial_categories"])
 
+    def test_real_adapter_owns_per_page_for_hydration_lists(self):
+        core = {"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "open", "created_at": "2026-09-01T00:00:00Z", "closed_at": None, "merged_at": None, "updated_at": "2026-09-01T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "head"}, "changed_files": 0, "commits": 0, "labels": [], "user": {}, "author_association": "NONE"}
+        core.update(changed_files=1, commits=1)
+        payloads = [core, [{"filename": "real.py", "status": "modified", "patch": "inert patch"}], self.commit_chain(1), [{"id": 1, "body": "issue"}], [{"id": 2, "body": "review", "state": "APPROVED"}], [{"id": 3, "body": "inline", "path": "real.py"}], [{"event": "reopened"}], {"license": {"spdx_id": "MIT"}}]
+        runner = FakeRunner([FakeCompletedProcess(stdout=included_response(200, {}, json.dumps(payload))) for payload in payloads])
+        client = self.collector.GhApiClient(api_version="2026-03-10", budget=self.collector.RequestBudget(20), runner=runner, sleeper=FakeSleep())
+
+        record = self.collector.hydrate_pull_request(client=client, repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
+
+        self.assertEqual(record["evidence_snapshot"]["changed_files"][0]["path"], "real.py")
+        self.assertEqual(record["evidence_snapshot"]["commits"][0]["sha"], "c0")
+        self.assertEqual(record["evidence_snapshot"]["issue_comments"][0]["excerpt"], "issue")
+        self.assertEqual(record["evidence_snapshot"]["reviews"][0]["excerpt"], "review")
+        self.assertEqual(record["evidence_snapshot"]["review_comments"][0]["excerpt"], "inline")
+        self.assertEqual(record["evidence_snapshot"]["timeline_events"][0]["kind"], "reopened")
+        self.assertEqual(record["hydration_status"], "complete")
+        self.assertEqual(record["pull_request"]["normalized_state"], "open")
+        list_calls = [args for args, _ in runner.calls if "page=1" in args]
+        self.assertEqual(len(list_calls), 6)
+        self.assertEqual({next(arg for arg in call if arg.startswith("/repos/")) for call in list_calls}, {"/repos/owner/repo/" + suffix for suffix in ("pulls/42/files", "pulls/42/commits", "issues/42/comments", "pulls/42/reviews", "pulls/42/comments", "issues/42/timeline")})
+        self.assertTrue(all("per_page=100" in call for call in list_calls))
+
+    def test_paginator_follows_next_link_after_short_page_and_records_attempts(self):
+        def handler(endpoint, params):
+            if params["page"] == 1:
+                return ([{"id": 1, "body": "one"}], {"link": '<https://api.github.test/page=2>; rel="next"', "etag": '"one"'})
+            if params["page"] == 2:
+                return ([], {"etag": '"two"'})
+            raise AssertionError("unexpected page")
+
+        items, metadata = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/repos/owner/repo/issues/42/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(metadata["page_count"], 2)
+        self.assertEqual(metadata["attempted_pages"], 2)
+        self.assertEqual(metadata["page_etags"], [{"page": 1, "etag": '"one"'}, {"page": 2, "etag": '"two"'}])
+
     def test_marks_the_3000_file_cap_and_reconciles_commit_fallback_from_head(self):
-        commit_ids = ["c{0}".format(index) for index in range(249, -1, -1)]
+        pull_commit_ids = ["c{0}".format(index) for index in range(250)]
+        fallback_commit_ids = ["c{0}".format(index) for index in range(299, -1, -1)]
 
         def paged(items, page):
             start = (page - 1) * 100
@@ -1008,18 +1272,19 @@ class HydratePullRequestTests(unittest.TestCase):
 
         def handler(endpoint, params):
             if endpoint == "/repos/owner/repo/pulls/42":
-                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "c249"}, "changed_files": 3000, "commits": 250, "labels": [], "user": {}, "author_association": "NONE"}, {})
+                return ({"node_id": "PR_42", "number": 42, "html_url": "https://github.com/owner/repo/pull/42", "title": "title", "body": "body", "state": "closed", "created_at": "2026-09-01T00:00:00Z", "closed_at": "2026-09-02T00:00:00Z", "merged_at": None, "updated_at": "2026-09-03T00:00:00Z", "base": {"sha": "base"}, "head": {"sha": "c299"}, "changed_files": 3000, "commits": 300, "labels": [], "user": {}, "author_association": "NONE"}, {})
             if endpoint == "/repos/owner/repo/license":
                 return ({"license": {"spdx_id": "MIT"}}, {})
             if endpoint == "/repos/owner/repo/pulls/42/files":
                 if params["page"] > 30:
                     raise AssertionError("the known 3000-file REST cap must stop pagination")
-                return ([{"filename": "f", "status": "modified"}] * 100, {})
+                return ([{"filename": "f", "status": "modified", "patch": "patch"}] * 100, {})
             if endpoint in ("/repos/owner/repo/pulls/42/commits", "/repos/owner/repo/commits"):
-                self.assertEqual(params["per_page"], 100)
-                if endpoint.endswith("/commits") and endpoint == "/repos/owner/repo/commits":
-                    self.assertEqual(params["sha"], "c249")
-                return ([{"sha": sha, "parents": [] if sha == "c0" else [{"sha": "base"}], "commit": {"message": sha}} for sha in paged(commit_ids, params["page"])], {})
+                self.assertNotIn("per_page", params)
+                ids = pull_commit_ids if endpoint == "/repos/owner/repo/pulls/42/commits" else fallback_commit_ids
+                if endpoint == "/repos/owner/repo/commits":
+                    self.assertEqual(params["sha"], "c299")
+                return ([{"sha": sha, "parents": [{"sha": "base" if sha == "c0" else "c{0}".format(int(sha[1:]) - 1)}], "commit": {"message": sha}} for sha in paged(ids, params["page"])], {})
             return ([], {})
 
         record = self.collector.hydrate_pull_request(client=FakeHydrationClient(self.collector, handler), repository=self.repository, search_hit=self.search_hit, repository_metadata=self.metadata, license_cache={}, captured_at=self.captured_at)
@@ -1030,10 +1295,10 @@ class HydratePullRequestTests(unittest.TestCase):
         self.assertEqual(completeness["files"]["page_count"], 30)
         self.assertIn("capped at 3000", completeness["files"]["warnings"][0])
         self.assertTrue(completeness["commits"]["pages_complete"])
-        self.assertEqual(completeness["commits"]["returned_count"], 250)
+        self.assertEqual(completeness["commits"]["returned_count"], 300)
         self.assertEqual(completeness["commits"]["fallback_endpoint"], "GET /repos/owner/repo/commits")
         self.assertEqual(completeness["commits"]["fallback_page_count"], 3)
-        self.assertEqual(record["evidence_snapshot"]["commits"][0]["sha"], "c249")
+        self.assertEqual(record["evidence_snapshot"]["commits"][0]["sha"], "c299")
 
     def test_marks_commit_count_mismatch_partial_without_claiming_complete_evidence(self):
         def handler(endpoint, params):
