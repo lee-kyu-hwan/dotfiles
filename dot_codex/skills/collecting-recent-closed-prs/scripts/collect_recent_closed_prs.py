@@ -730,6 +730,9 @@ def hydrate_pull_request(
         etag=core_etag,
         warnings=[] if core_warning is None else [core_warning],
     )
+    if core_payload.get("body") is not None and not isinstance(core_payload["body"], str):
+        body_meta["pages_complete"] = False
+        body_meta["warnings"].append("pull request body must be a string or null")
     details = _pull_request_details(core_payload, number, pull_url)
     category_results: dict[str, tuple[list[object], dict[str, object]]] = {}
     for category, endpoint, known_limit in (
@@ -916,6 +919,11 @@ def _hydrate_list_category(
             for item in bounded_payload:
                 if _valid_hydration_item(category, item):
                     items.append(deepcopy(item))
+                    if category == "commits":
+                        author_warnings = _commit_author_warnings(item)
+                        if author_warnings:
+                            complete = False
+                            warnings.extend(author_warnings)
                 else:
                     complete = False
                     warnings.append("{0} endpoint returned a malformed item".format(category))
@@ -984,6 +992,21 @@ def _valid_hydration_item(category: str, item: object) -> bool:
     return True
 
 
+def _commit_author_warnings(item: dict[str, object]) -> list[str]:
+    warnings: list[str] = []
+    for location, author, fields in (
+        ("author", item.get("author"), ("login", "node_id")),
+        ("commit.author", _nested_value(item, "commit", "author"), ("name", "email", "date")),
+    ):
+        if author is None:
+            continue
+        if not isinstance(author, dict):
+            warnings.append("{0} must be an object or null".format(location))
+        elif any(author.get(field) is not None and not isinstance(author[field], str) for field in fields):
+            warnings.append("{0} contains a malformed text field".format(location))
+    return warnings
+
+
 def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], captured_at: str) -> tuple[dict[str, object], dict[str, object]]:
     cached = cache.get(repository, _MISSING)
     if cached is not _MISSING:
@@ -997,11 +1020,19 @@ def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], 
         payload = _response_payload(response, "license response")
         if not isinstance(payload, dict):
             raise ValueError("license response payload must be an object")
-        license_payload = payload.get("license")
-        if isinstance(license_payload, dict) and isinstance(license_payload.get("spdx_id"), str):
-            license_value["spdx_id"] = license_payload["spdx_id"]
         if isinstance(payload.get("html_url"), str):
             license_value["evidence_url"] = payload["html_url"]
+        license_payload = payload.get("license")
+        if license_payload is None:
+            raise ValueError("license observation is missing")
+        if not isinstance(license_payload, dict):
+            raise ValueError("license observation must be an object")
+        spdx_id = license_payload.get("spdx_id")
+        if spdx_id is None:
+            raise ValueError("license SPDX identifier is missing")
+        if not isinstance(spdx_id, str) or not spdx_id:
+            raise ValueError("license SPDX identifier must be a non-empty string")
+        license_value["spdx_id"] = spdx_id
         metadata = _completeness("GET " + endpoint, True, 1, None, captured_at, 1, _response_etag(response), [])
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
         metadata = _completeness("GET " + endpoint, False, 0, None, captured_at, 0, None, [_hydration_warning(error)])
@@ -1131,13 +1162,20 @@ def _commits_reconcile(pull_commits: list[object], fallback: list[object], head_
         return False
     if list(reversed(fallback_ids))[:len(pull_ids)] != pull_ids:
         return False
+    positions = {sha: index for index, sha in enumerate(fallback_ids)}
     for index, item in enumerate(fallback):
         if not isinstance(item, dict) or not isinstance(item.get("parents"), list):
             return False
-        if index + 1 < len(fallback_ids):
-            if fallback_ids[index + 1] not in [parent.get("sha") for parent in item["parents"] if isinstance(parent, dict)]:
+        parent_ids = [parent.get("sha") for parent in item["parents"] if isinstance(parent, dict)]
+        for parent_sha in parent_ids:
+            if parent_sha == base_sha:
+                continue
+            if parent_sha not in positions or positions[parent_sha] <= index:
                 return False
-        elif base_sha not in [parent.get("sha") for parent in item["parents"] if isinstance(parent, dict)]:
+        if index + 1 < len(fallback_ids):
+            if fallback_ids[index + 1] not in parent_ids:
+                return False
+        elif base_sha not in parent_ids:
             return False
     return True
 

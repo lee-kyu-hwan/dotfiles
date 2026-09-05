@@ -1076,6 +1076,66 @@ class HydratePullRequestTests(unittest.TestCase):
                 self.assertTrue(meta["warnings"])
                 self.assertEqual(len(record["evidence_snapshot"]["commits"]), 250)
 
+    def test_commit_fallback_validates_every_extra_parent_edge(self):
+        for parent, complete in (("c274", False), ("c299", False), ("unknown-branch", False), ("c200", True), ("base", True)):
+            with self.subTest(extra_parent=parent):
+                fallback = list(reversed(self.commit_chain()))
+                fallback[25]["parents"].append({"sha": parent})
+                record, _ = self.hydrate_fixture(core={"commits": 300}, responses={"pulls/42/commits": self.commit_chain(250), "commits": fallback})
+                meta = record["evidence_snapshot"]["completeness"]["commits"]
+                self.assertEqual(meta["pages_complete"], complete)
+                self.assertEqual(meta["returned_count"], 300 if complete else 250)
+                if not complete:
+                    self.assertTrue(any("ancestry" in warning for warning in meta["warnings"]))
+
+    def test_core_body_wrong_type_is_partial_without_losing_identity_or_state(self):
+        for body in ([], {}, True, 42):
+            with self.subTest(body=body):
+                record, _ = self.hydrate_fixture(core={"body": body})
+                self.assertEqual(record["record_key"], "github-pr:PR_42")
+                self.assertEqual(record["pull_request"]["normalized_state"], "closed-unmerged")
+                self.assertIsNone(record["evidence_snapshot"]["body_excerpt"])
+                meta = record["evidence_snapshot"]["completeness"]["pull_request_body"]
+                self.assertFalse(meta["pages_complete"])
+                self.assertTrue(any("body" in warning for warning in meta["warnings"]))
+
+    def test_core_null_body_is_a_valid_empty_observation(self):
+        record, _ = self.hydrate_fixture(core={"body": None})
+        self.assertIsNone(record["evidence_snapshot"]["body_excerpt"])
+        self.assertTrue(record["evidence_snapshot"]["completeness"]["pull_request_body"]["pages_complete"])
+
+    def test_license_missing_or_malformed_evidence_is_explicitly_partial(self):
+        for payload, warning_kind in (({}, "missing"), ({"license": None}, "missing"), ({"license": []}, "object"), ({"license": "MIT"}, "object"), ({"license": {}}, "missing"), ({"license": {"spdx_id": None}}, "missing"), ({"license": {"spdx_id": []}}, "string"), ({"license": {"spdx_id": True}}, "string")):
+            with self.subTest(payload=payload):
+                payload = dict(payload, html_url="https://github.com/owner/repo/blob/main/LICENSE")
+                value, meta = self.collector._hydrate_license(client=FakeHydrationClient(self.collector, lambda endpoint, params: (payload, {})), repository=self.repository, cache={}, captured_at=self.captured_at)
+                self.assertFalse(meta["pages_complete"])
+                self.assertIsNone(value["spdx_id"])
+                self.assertEqual(value["evidence_url"], "https://github.com/owner/repo/blob/main/LICENSE")
+                self.assertTrue(any(warning_kind in warning for warning in meta["warnings"]))
+
+    def test_commit_malformed_authors_keep_valid_sha_and_message_but_are_partial(self):
+        for location, author in (("top", []), ("top", "author"), ("top", {"login": []}), ("nested", []), ("nested", "author"), ("nested", {"name": []}), ("nested", {"email": True})):
+            with self.subTest(location=location, author=author):
+                commit = self.commit_chain(1)[0]
+                (commit if location == "top" else commit["commit"])["author"] = author
+                record, _ = self.hydrate_fixture(core={"commits": 1}, responses={"pulls/42/commits": [commit]})
+                snapshot = record["evidence_snapshot"]
+                self.assertEqual(snapshot["commits"][0]["sha"], "c0")
+                self.assertEqual(snapshot["commits"][0]["message"], "commit 0")
+                self.assertFalse(snapshot["completeness"]["commits"]["pages_complete"])
+                self.assertTrue(any("author" in warning for warning in snapshot["completeness"]["commits"]["warnings"]))
+
+    def test_commit_missing_and_null_authors_are_valid_unknown_observations(self):
+        for explicit_null in (False, True):
+            with self.subTest(explicit_null=explicit_null):
+                commit = self.commit_chain(1)[0]
+                if explicit_null:
+                    commit["author"] = None
+                    commit["commit"]["author"] = None
+                record, _ = self.hydrate_fixture(core={"commits": 1}, responses={"pulls/42/commits": [commit]})
+                self.assertTrue(record["evidence_snapshot"]["completeness"]["commits"]["pages_complete"])
+
     def test_exact_250_commit_boundary_requires_and_accepts_reconciled_fallback(self):
         record, client = self.hydrate_fixture(core={"commits": 250, "head": {"sha": "c249"}}, responses={"pulls/42/commits": self.commit_chain(250), "commits": list(reversed(self.commit_chain(250)))})
         meta = record["evidence_snapshot"]["completeness"]["commits"]
