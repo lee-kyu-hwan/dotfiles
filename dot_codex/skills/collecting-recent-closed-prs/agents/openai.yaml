@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect Recent Closed Pull Requests"
+  short_description: "저장소별 최근 종료 PR을 감사 가능한 corpus로 수집"
+  default_prompt: "Use $collecting-recent-closed-prs to collect and validate closed pull requests for this repository list and explicit date range."
