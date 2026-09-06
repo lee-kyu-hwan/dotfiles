@@ -1693,6 +1693,122 @@ class MergeCorpusTests(unittest.TestCase):
 
         self.assertEqual(merged["generated_by"], incoming["generated_by"])
 
+    def test_older_observation_updates_history_without_replacing_latest_projection(self):
+        latest = self.record(
+            node_id="pr-state",
+            repository_node_id="repo-state",
+            repository="owner/current",
+            number=14,
+            pr_id="PR-014",
+            state="merged",
+            updated_at="2026-09-06T00:00:00Z",
+            run_id="run-latest",
+            body_sha256="a" * 64,
+        )
+        latest["evidence_snapshot"]["body_excerpt"] = "latest body"
+        older = self.record(
+            node_id="pr-state",
+            repository_node_id="repo-state",
+            repository="owner/previous",
+            number=14,
+            state="closed-unmerged",
+            updated_at="2026-09-05T00:00:00Z",
+            run_id="run-older",
+            body_sha256="b" * 64,
+        )
+        older["evidence_snapshot"]["body_excerpt"] = "older body"
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "collector", "revision": "one"},
+            "records": [latest],
+        }
+
+        merged = self.collector.merge_corpus(existing, [older])
+
+        result = merged["records"][0]
+        self.assertEqual(result["pull_request"]["normalized_state"], "merged")
+        self.assertEqual(result["pull_request"]["updated_at"], "2026-09-06T00:00:00Z")
+        self.assertEqual(result["evidence_snapshot"]["body_excerpt"], "latest body")
+        self.assertEqual(result["repository"]["full_name"], "owner/current")
+        self.assertIn("owner/previous", result["repository"]["repository_aliases"])
+        self.assertEqual([entry["state"] for entry in result["state_history"]], ["merged", "closed-unmerged"])
+
+    def test_same_batch_rename_keeps_latest_name_and_previous_alias(self):
+        older = self.record(
+            node_id="pr-rename",
+            repository_node_id="repo-rename",
+            repository="owner/z-old",
+            number=15,
+            updated_at="2026-09-05T00:00:00Z",
+            run_id="run-old",
+            body_sha256="c" * 64,
+        )
+        latest = self.record(
+            node_id="pr-rename",
+            repository_node_id="repo-rename",
+            repository="owner/a-new",
+            number=15,
+            updated_at="2026-09-06T00:00:00Z",
+            run_id="run-new",
+            body_sha256="d" * 64,
+        )
+
+        merged = self.collector.merge_corpus(None, [older, latest])
+
+        result = merged["records"][0]
+        self.assertEqual(result["repository"]["full_name"], "owner/a-new")
+        self.assertEqual(result["repository"]["repository_aliases"], ["owner/z-old"])
+        self.assertEqual(
+            {item["run_id"] for item in result["sources"][0]["observations"]},
+            {"run-old", "run-new"},
+        )
+
+    def test_same_batch_unresolved_url_observations_coalesce(self):
+        first = self.record(
+            node_id=None,
+            repository_node_id=None,
+            repository="owner/unresolved",
+            number=16,
+            state="unknown",
+            run_id="run-one",
+            body_sha256="e" * 64,
+        )
+        second = self.record(
+            node_id=None,
+            repository_node_id=None,
+            repository="owner/unresolved",
+            number=16,
+            state="unknown",
+            run_id="run-two",
+            body_sha256="f" * 64,
+        )
+
+        merged = self.collector.merge_corpus(None, [first, second])
+
+        self.assertEqual(len(merged["records"]), 1)
+        result = merged["records"][0]
+        self.assertIsNone(result["pr_id"])
+        self.assertEqual(
+            {item["run_id"] for item in result["sources"][0]["observations"]},
+            {"run-one", "run-two"},
+        )
+
+    def test_empty_recent_source_gets_complete_generated_observation(self):
+        incoming = self.record(
+            node_id="pr-empty-source",
+            repository_node_id="repo-empty-source",
+            number=17,
+            run_id="run-generated",
+            body_sha256="0" * 64,
+            sources=[{"source_key": "recent-closed", "kind": "search-api", "observations": []}],
+        )
+
+        merged = self.collector.merge_corpus(None, [incoming])
+
+        observations = merged["records"][0]["sources"][0]["observations"]
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0]["run_id"], "run-generated")
+
     def test_preserves_legacy_incomplete_existing_observation_with_complete_new_observation(self):
         old = self.record(
             node_id="pr-legacy",
