@@ -1,0 +1,4 @@
+interface:
+  display_name: "Analyze Open-Source PR Patterns"
+  short_description: "정규화된 PR에서 근거 기반 재사용 변경 패턴 분석"
+  default_prompt: "Use $analyzing-open-source-pr-patterns to produce and validate the strict JSON analysis output for this normalized pull request corpus."
