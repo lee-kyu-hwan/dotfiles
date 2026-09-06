@@ -910,19 +910,20 @@ def merge_corpus(
     if isinstance(existing, list) and new_records is None:
         new_records = existing
         existing = None
-    elif isinstance(existing, list) and isinstance(new_records, dict):
-        existing, new_records = new_records, existing
     if existing is not None and not isinstance(existing, dict):
         raise ValueError("existing corpus must be an object or None")
 
     incoming_envelope: Optional[dict[str, object]] = None
     if isinstance(new_records, dict):
         incoming_envelope = deepcopy(new_records)
+        _validate_corpus_envelope(incoming_envelope, "incoming corpus")
         incoming = incoming_envelope.get("records")
     else:
         incoming = new_records
     if not isinstance(incoming, list) or not all(isinstance(item, dict) for item in incoming):
         raise ValueError("new records must be a list of objects")
+    copied_incoming = [deepcopy(item) for item in incoming]
+    _validate_incoming_observation_identities(copied_incoming)
 
     if existing is None:
         output: dict[str, object] = {
@@ -940,21 +941,16 @@ def merge_corpus(
                     output[key] = deepcopy(value)
     else:
         output = deepcopy(existing)
-        if output.get("schema_version") != "1.0.0":
-            raise ValueError("only corpus schema_version 1.0.0 can be merged")
-        if not isinstance(output.get("records"), list) or not all(
-            isinstance(item, dict) for item in output["records"]
-        ):
-            raise ValueError("existing corpus records must be a list of objects")
+        _validate_corpus_envelope(output, "existing corpus")
 
     records = output["records"]
     assert isinstance(records, list)
-    copied_incoming = _coalesce_incoming_records([deepcopy(item) for item in incoming])
+    copied_incoming = _coalesce_incoming_records(copied_incoming)
     max_id = _greatest_pr_id(records)
     matched_indices: set[int] = set()
     pending: list[tuple[dict[str, object], Optional[int]]] = []
 
-    for record in sorted(copied_incoming, key=_merge_record_sort_key):
+    for record in sorted(copied_incoming, key=_merge_match_sort_key):
         match = _find_merge_match(records, record, matched_indices)
         if match is None:
             pending.append((record, None))
@@ -995,6 +991,50 @@ def merge_corpus(
     )
     records.extend(new_records_to_append)
     return output
+
+
+def _validate_corpus_envelope(document: dict[str, object], label: str) -> None:
+    if document.get("schema_version") != "1.0.0":
+        raise ValueError("{0} requires schema_version 1.0.0".format(label))
+    generated_by = document.get("generated_by")
+    if not isinstance(generated_by, dict) or not {"name", "revision"}.issubset(generated_by):
+        raise ValueError("{0}.generated_by must contain name and revision".format(label))
+    if not all(isinstance(generated_by[key], str) and generated_by[key] for key in ("name", "revision")):
+        raise ValueError("{0}.generated_by name and revision must be non-empty strings".format(label))
+    records = document.get("records")
+    if not isinstance(records, list) or not all(isinstance(item, dict) for item in records):
+        raise ValueError("{0}.records must be a list of objects".format(label))
+
+
+def _validate_incoming_observation_identities(records: list[dict[str, object]]) -> None:
+    for record in records:
+        recent_sources = [
+            source for source in record.get("sources", [])
+            if isinstance(source, dict) and source.get("source_key") == "recent-closed"
+        ] if isinstance(record.get("sources"), list) else []
+        for source in recent_sources:
+            observations = source.get("observations")
+            if not isinstance(observations, list):
+                raise ValueError("recent-closed observations must be a list")
+            for observation in observations:
+                if not isinstance(observation, dict) or not _complete_observation_identity(observation):
+                    raise ValueError("incoming recent-closed observations require run_id, updated_at, and body_sha256")
+        if recent_sources and any(
+            isinstance(source.get("observations"), list) and source["observations"]
+            for source in recent_sources
+        ):
+            continue
+        generated = {
+            "run_id": _record_run_id(record),
+            "updated_at": _record_updated_at(record),
+            "body_sha256": _record_body_sha256(record),
+        }
+        if not _complete_observation_identity(generated):
+            raise ValueError("incoming recent-closed observations require run_id, updated_at, and body_sha256")
+
+
+def _complete_observation_identity(observation: dict[str, object]) -> bool:
+    return all(isinstance(observation.get(key), str) and observation[key] for key in ("run_id", "updated_at", "body_sha256"))
 
 
 def _greatest_pr_id(records: list[object]) -> int:
@@ -1045,41 +1085,89 @@ def _record_run_id(record: dict[str, object]) -> Optional[str]:
     return None
 
 
-def _incoming_group_key(record: dict[str, object]) -> tuple[object, ...]:
-    node_id = _record_pull_node_id(record)
-    if node_id is not None:
-        return ("node", node_id)
-    repository_node_id = _record_repository_node_id(record)
-    number = _record_number(record)
-    if repository_node_id is not None and number != 2**63 - 1:
-        return ("repository-number", repository_node_id, number)
-    url = _record_url_value(record)
-    if url is not None:
-        return ("url", url)
-    return ("unresolved", json.dumps(record, sort_keys=True, separators=(",", ":")))
-
-
 def _coalesce_incoming_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
-    grouped: dict[tuple[object, ...], dict[str, object]] = {}
-    for record in sorted(records, key=_merge_record_sort_key):
-        key = _incoming_group_key(record)
-        current = grouped.get(key)
-        if current is None:
-            grouped[key] = record
-            continue
-        if _authoritative_state(record):
-            current["pull_request"] = _merge_mapping_preserving_unknown(
-                current.get("pull_request"), record.get("pull_request")
-            )
-            for field in ("author", "license", "evidence_snapshot", "hydration_status"):
-                if field in record:
-                    current[field] = _merge_mapping_preserving_unknown(current.get(field), record[field])
-        _append_state_history(current, record.get("state_history"))
-        _append_sources(current, record)
-        for field, value in record.items():
-            if field not in current:
-                current[field] = deepcopy(value)
-    return list(grouped.values())
+    parent = list(range(len(records)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    by_node: dict[str, int] = {}
+    by_repository_number: dict[tuple[str, int], list[int]] = {}
+    for index, record in enumerate(records):
+        node_id = _record_pull_node_id(record)
+        if node_id is not None:
+            if node_id in by_node:
+                union(index, by_node[node_id])
+            else:
+                by_node[node_id] = index
+        repository_node_id = _record_repository_node_id(record)
+        number = _record_number(record)
+        if repository_node_id is not None and number != 2**63 - 1:
+            by_repository_number.setdefault((repository_node_id, number), []).append(index)
+
+    for bucket in by_repository_number.values():
+        node_groups: dict[str, list[int]] = {}
+        unresolved: list[int] = []
+        for index in bucket:
+            node_id = _record_pull_node_id(records[index])
+            if node_id is None:
+                unresolved.append(index)
+            else:
+                node_groups.setdefault(node_id, []).append(index)
+        if len(node_groups) == 1:
+            indices = next(iter(node_groups.values())) + unresolved
+            for index in indices[1:]:
+                union(indices[0], index)
+        elif not node_groups:
+            for index in bucket[1:]:
+                union(bucket[0], index)
+        elif unresolved:
+            # Ambiguous non-null node IDs remain separate; unresolved evidence
+            # cannot choose between them.
+            for index in unresolved[1:]:
+                union(unresolved[0], index)
+
+    grouped: dict[int, list[dict[str, object]]] = {}
+    for index, record in enumerate(records):
+        grouped.setdefault(find(index), []).append(record)
+
+    result: list[dict[str, object]] = []
+    for group in sorted(grouped.values(), key=lambda values: _merge_record_sort_key(values[0])):
+        current = deepcopy(sorted(group, key=_merge_record_sort_key)[0])
+        _append_recent_observation(current, current)
+        for record in sorted(group, key=_merge_record_sort_key)[1:]:
+            _coalesce_record_into(current, record)
+        result.append(current)
+    return result
+
+
+def _coalesce_record_into(current: dict[str, object], record: dict[str, object]) -> None:
+    current_node = _record_pull_node_id(current)
+    incoming_node = _record_pull_node_id(record)
+    if current_node is None and incoming_node is not None:
+        current["identity_status"] = "resolved"
+        current["pull_request_node_id"] = incoming_node
+        current["record_key"] = "github-pr:{0}".format(incoming_node)
+    if _authoritative_state(record):
+        current["pull_request"] = _merge_mapping_preserving_unknown(
+            current.get("pull_request"), record.get("pull_request")
+        )
+        for field in ("author", "license", "evidence_snapshot", "hydration_status"):
+            if field in record:
+                current[field] = _merge_mapping_preserving_unknown(current.get(field), record[field])
+    _append_state_history(current, record.get("state_history"))
+    _append_sources(current, record)
+    for field, value in record.items():
+        if field not in current:
+            current[field] = deepcopy(value)
 
 
 def _merge_record_sort_key(record: dict[str, object]) -> tuple[str, int, str, str, str]:
@@ -1092,6 +1180,11 @@ def _merge_record_sort_key(record: dict[str, object]) -> tuple[str, int, str, st
         updated_at if isinstance(updated_at, str) else "",
         _record_run_id(record) or "",
     )
+
+
+def _merge_match_sort_key(record: dict[str, object]) -> tuple[int, tuple[str, int, str, str, str]]:
+    """Give authoritative node matches precedence over corroboration-only rows."""
+    return (0 if _record_pull_node_id(record) is not None else 1, _merge_record_sort_key(record))
 
 
 def _has_resolved_identity(record: dict[str, object]) -> bool:

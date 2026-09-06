@@ -1485,7 +1485,7 @@ class MergeCorpusTests(unittest.TestCase):
             self.record(node_id=None, repository_node_id="repo-1", repository="owner/one", number=3, state="unknown", run_id="run-b", body_sha256="b" * 64),
             self.record(node_id="node-a", repository_node_id="repo-1", repository="owner/new", number=8, run_id="run-a", body_sha256="a" * 64),
             self.record(node_id="node-a", repository_node_id="repo-1", repository="owner/new", number=8, run_id="run-a", body_sha256="a" * 64),
-            self.record(node_id=None, repository_node_id=None, repository="unknown/repo", number=99, state="unknown", run_id="run-u"),
+            self.record(node_id=None, repository_node_id=None, repository="unknown/repo", number=99, state="unknown", run_id="run-u", body_sha256="u" * 64),
         ]
 
         merged = self.collector.merge_corpus(existing, incoming)
@@ -1550,6 +1550,165 @@ class MergeCorpusTests(unittest.TestCase):
         self.assertEqual(existing["records"][0], existing_record)
         self.assertEqual(incoming["sources"], [])
 
+    def test_mixed_unresolved_and_resolved_corroboration_coalesces_before_allocation(self):
+        unresolved = self.record(
+            node_id=None,
+            repository_node_id="repo-mixed",
+            repository="owner/mixed",
+            number=12,
+            state="unknown",
+            run_id="run-unresolved",
+            body_sha256="u" * 64,
+            extra={"evidence_from_unresolved": {"kept": True}},
+        )
+        resolved = self.record(
+            node_id="pr-mixed",
+            repository_node_id="repo-mixed",
+            repository="owner/mixed",
+            number=12,
+            run_id="run-resolved",
+            body_sha256="r" * 64,
+            extra={"evidence_from_resolved": {"kept": True}},
+        )
+
+        merged = self.collector.merge_corpus(None, [unresolved, resolved])
+
+        self.assertEqual(len(merged["records"]), 1)
+        result = merged["records"][0]
+        self.assertEqual(result["pull_request_node_id"], "pr-mixed")
+        self.assertEqual(result["pr_id"], "PR-001")
+        self.assertEqual(result["evidence_from_unresolved"], {"kept": True})
+        self.assertEqual(result["evidence_from_resolved"], {"kept": True})
+        observations = result["sources"][0]["observations"]
+        self.assertEqual({observation["run_id"] for observation in observations}, {"run-unresolved", "run-resolved"})
+
+    def test_mixed_corroboration_matches_existing_resolved_record_once(self):
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "collector", "revision": "old"},
+            "records": [
+                self.record(
+                    node_id="pr-mixed",
+                    repository_node_id="repo-mixed",
+                    repository="owner/mixed",
+                    number=12,
+                    pr_id="PR-008",
+                    run_id="old-run",
+                    body_sha256="o" * 64,
+                    sources=[{"source_key": "legacy", "observations": [{"run_id": "old-run"}]}],
+                )
+            ],
+        }
+        incoming = [
+            self.record(node_id=None, repository_node_id="repo-mixed", repository="owner/mixed", number=12, state="unknown", run_id="run-unresolved", body_sha256="u" * 64),
+            self.record(node_id="pr-mixed", repository_node_id="repo-mixed", repository="owner/mixed", number=12, run_id="run-resolved", body_sha256="r" * 64),
+        ]
+
+        merged = self.collector.merge_corpus(existing, incoming)
+
+        self.assertEqual(len(merged["records"]), 1)
+        self.assertEqual(merged["records"][0]["pr_id"], "PR-008")
+        self.assertEqual(len(merged["records"][0]["sources"]), 2)
+        recent = next(source for source in merged["records"][0]["sources"] if source["source_key"] == "recent-closed")
+        self.assertEqual({observation["run_id"] for observation in recent["observations"]}, {"run-unresolved", "run-resolved"})
+
+    def test_conflicting_nonnull_pull_request_nodes_do_not_merge_by_corroboration(self):
+        incoming = [
+            self.record(node_id="pr-one", repository_node_id="repo-same", repository="owner/same", number=12, run_id="run-one", body_sha256="1" * 64),
+            self.record(node_id="pr-two", repository_node_id="repo-same", repository="owner/same", number=12, run_id="run-two", body_sha256="2" * 64),
+        ]
+
+        merged = self.collector.merge_corpus(None, incoming)
+
+        self.assertEqual(len(merged["records"]), 2)
+        self.assertEqual({record["pull_request_node_id"] for record in merged["records"]}, {"pr-one", "pr-two"})
+
+    def test_node_match_precedes_ambiguous_unresolved_corroboration(self):
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "collector", "revision": "one"},
+            "records": [
+                self.record(
+                    node_id="pr-one",
+                    repository_node_id="repo-same",
+                    repository="owner/same",
+                    number=12,
+                    pr_id="PR-003",
+                    run_id="old-run",
+                    body_sha256="o" * 64,
+                )
+            ],
+        }
+        incoming = [
+            self.record(node_id=None, repository_node_id="repo-same", repository="owner/same", number=12, state="unknown", run_id="run-unknown", body_sha256="u" * 64),
+            self.record(node_id="pr-one", repository_node_id="repo-same", repository="owner/same", number=12, run_id="run-one", body_sha256="1" * 64),
+            self.record(node_id="pr-two", repository_node_id="repo-same", repository="owner/same", number=12, run_id="run-two", body_sha256="2" * 64),
+        ]
+
+        merged = self.collector.merge_corpus(existing, incoming)
+
+        self.assertEqual(
+            [record["pull_request_node_id"] for record in merged["records"]],
+            ["pr-one", "pr-two", None],
+        )
+        self.assertEqual(
+            [record["pr_id"] for record in merged["records"]],
+            ["PR-003", "PR-004", None],
+        )
+        self.assertEqual(
+            len([record for record in merged["records"] if record["pull_request_node_id"] == "pr-one"]),
+            1,
+        )
+
+    def test_rejects_invalid_envelopes_and_incomplete_generated_observation_before_merge(self):
+        for envelope in (
+            {"generated_by": {"name": "collector", "revision": "one"}, "records": []},
+            {"schema_version": "2.0.0", "generated_by": {"name": "collector", "revision": "one"}, "records": []},
+            {"schema_version": "1.0.0", "generated_by": {"name": "collector"}, "records": []},
+            {"schema_version": "1.0.0", "generated_by": "collector", "records": []},
+        ):
+            with self.subTest(envelope=envelope):
+                with self.assertRaises(ValueError):
+                    self.collector.merge_corpus(None, envelope)
+
+        existing = {"schema_version": "1.0.0", "generated_by": {"name": "collector", "revision": "one"}, "records": []}
+        incomplete = self.record(node_id="pr-incomplete", repository_node_id="repo-incomplete", run_id=None, body_sha256=None)
+        incomplete["pull_request"]["updated_at"] = None
+        with self.assertRaises(ValueError):
+            self.collector.merge_corpus(existing, [incomplete])
+        self.assertEqual(existing["records"], [])
+
+    def test_preserves_generated_by_extension_fields(self):
+        incoming = {
+            "schema_version": "1.0.0",
+            "generated_by": {
+                "name": "collector",
+                "revision": "one",
+                "api_version": "2026-03-10",
+            },
+            "records": [],
+        }
+
+        merged = self.collector.merge_corpus(None, incoming)
+
+        self.assertEqual(merged["generated_by"], incoming["generated_by"])
+
+    def test_preserves_legacy_incomplete_existing_observation_with_complete_new_observation(self):
+        old = self.record(
+            node_id="pr-legacy",
+            repository_node_id="repo-legacy",
+            pr_id="PR-003",
+            sources=[{"source_key": "recent-closed", "kind": "legacy", "observations": [{"run_key": "legacy-run"}]}],
+        )
+        existing = {"schema_version": "1.0.0", "generated_by": {"name": "collector", "revision": "one"}, "records": [old]}
+        incoming = self.record(node_id="pr-legacy", repository_node_id="repo-legacy", run_id="new-run", body_sha256="n" * 64)
+
+        merged = self.collector.merge_corpus(existing, [incoming])
+
+        observations = merged["records"][0]["sources"][0]["observations"]
+        self.assertEqual(observations[0], {"run_key": "legacy-run"})
+        self.assertEqual(observations[1]["run_id"], "new-run")
+
 
 class AnalyzerCompatibilityTests(unittest.TestCase):
     def test_merged_corpus_passes_analyzer_validator(self):
@@ -1581,9 +1740,8 @@ class AnalyzerCompatibilityTests(unittest.TestCase):
             updated_at="2026-09-06T00:00:00Z",
         )
 
-        validator = Path(
-            "/Users/lee-kyu-hwan/code/eslint-contrib/dotfiles-analyzing-open-source-pr-patterns"
-        ) / "dot_codex/skills/analyzing-open-source-pr-patterns/scripts/validate_corpus.py"
+        validator = SCRIPT_PATH.parents[2] / "analyzing-open-source-pr-patterns/scripts/validate_corpus.py"
+        self.assertTrue(validator.is_file())
         with tempfile.TemporaryDirectory() as directory:
             existing_path = Path(directory) / "existing.json"
             merged_path = Path(directory) / "merged.json"
