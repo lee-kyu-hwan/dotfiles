@@ -7,7 +7,9 @@ from copy import deepcopy
 from importlib import util
 import json
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -1405,6 +1407,197 @@ class HydratePullRequestTests(unittest.TestCase):
         self.assertFalse(commits_meta["pages_complete"])
         self.assertIn("repository commit fallback did not reconcile authoritative count and head ancestry", commits_meta["warnings"])
         self.assertEqual(commits_meta["fallback_endpoint"], "GET /repos/owner/repo/commits")
+
+
+class MergeCorpusTests(unittest.TestCase):
+    """Identity and append-only behavior for normalized corpus projections."""
+
+    def setUp(self):
+        self.collector = load_collector()
+
+    @staticmethod
+    def record(
+        *,
+        node_id=None,
+        repository_node_id=None,
+        repository="owner/repo",
+        number=1,
+        state="closed-unmerged",
+        pr_id=None,
+        run_id=None,
+        updated_at="2026-09-05T00:00:00Z",
+        body_sha256=None,
+        sources=None,
+        state_history=None,
+        extra=None,
+    ):
+        url = "https://github.com/{0}/pull/{1}".format(repository, number)
+        record = {
+            "fixture_kind": "synthetic",
+            "identity_status": "resolved" if node_id is not None else "unresolved",
+            "record_key": "github-pr:{0}".format(node_id) if node_id is not None else None,
+            "pr_id": pr_id,
+            "pull_request_node_id": node_id,
+            "repository": {
+                "full_name": repository,
+                "node_id": repository_node_id,
+                "repository_aliases": [],
+            },
+            "pull_request": {
+                "number": number,
+                "url": url,
+                "title": "PR {0}".format(number),
+                "normalized_state": state,
+                "closure_reason": "unknown",
+                "created_at": "2026-09-01T00:00:00Z",
+                "closed_at": "2026-09-02T00:00:00Z",
+                "merged_at": None,
+                "updated_at": updated_at,
+            },
+            "author": {"login": "author", "node_id": "U-1", "association": "NONE", "normalized_role": "unknown"},
+            "license": {"spdx_id": "MIT"},
+            "sources": deepcopy(sources if sources is not None else []),
+            "state_history": deepcopy(state_history if state_history is not None else ([{"state": state, "observed_at": updated_at, "authority": "GitHub pull request", "evidence_url": url}] if state != "unknown" else [])),
+            "evidence_snapshot": {
+                "body_excerpt": "body",
+                "completeness": {},
+            },
+        }
+        if run_id is not None:
+            record["run_id"] = run_id
+        if body_sha256 is not None:
+            record["body_sha256"] = body_sha256
+        if extra:
+            record.update(deepcopy(extra))
+        return record
+
+    def test_merge_preserves_ids_uses_corroboration_aliases_sparse_allocation_and_unresolved_null(self):
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "collector", "revision": "old"},
+            "records": [
+                self.record(node_id="node-b", repository_node_id="repo-1", repository="owner/one", number=3, pr_id="PR-003"),
+                self.record(node_id="node-a", repository_node_id="repo-1", repository="owner/old", number=8, pr_id="PR-008"),
+            ],
+        }
+        incoming = [
+            self.record(node_id="node-c", repository_node_id="repo-2", repository="zeta/repo", number=1, run_id="run-c", body_sha256="c" * 64),
+            self.record(node_id=None, repository_node_id="repo-1", repository="owner/one", number=3, state="unknown", run_id="run-b", body_sha256="b" * 64),
+            self.record(node_id="node-a", repository_node_id="repo-1", repository="owner/new", number=8, run_id="run-a", body_sha256="a" * 64),
+            self.record(node_id="node-a", repository_node_id="repo-1", repository="owner/new", number=8, run_id="run-a", body_sha256="a" * 64),
+            self.record(node_id=None, repository_node_id=None, repository="unknown/repo", number=99, state="unknown", run_id="run-u"),
+        ]
+
+        merged = self.collector.merge_corpus(existing, incoming)
+
+        self.assertEqual([record["pr_id"] for record in merged["records"]], ["PR-003", "PR-008", "PR-009", None])
+        self.assertEqual(merged["records"][0]["pr_id"], "PR-003")
+        self.assertEqual(merged["records"][1]["pr_id"], "PR-008")
+        renamed = merged["records"][1]
+        self.assertEqual(renamed["repository"]["full_name"], "owner/new")
+        self.assertEqual(renamed["repository"]["repository_aliases"], ["owner/old"])
+        recent = [source for source in renamed["sources"] if source["source_key"] == "recent-closed"]
+        self.assertEqual(len(recent), 1)
+        self.assertEqual(len(recent[0]["observations"]), 1)
+        self.assertIsNone(merged["records"][-1]["pr_id"])
+        self.assertIsNone(merged["records"][-1]["record_key"])
+        self.assertEqual(merged["records"][0]["state_history"], existing["records"][0]["state_history"])
+
+    def test_merge_keeps_exact_history_and_unknown_values_and_deduplicates_observation(self):
+        old_source = {
+            "source_key": "recent-closed",
+            "kind": "legacy-search",
+            "legacy_metadata": {"enabled": False, "count": 4, "values": [None, {"nested": True}]},
+            "observations": [{"run_id": "run-old", "updated_at": "2026-09-01T00:00:00Z", "body_sha256": "old"}],
+        }
+        old_history = [{"state": "open", "observed_at": "2026-09-01T00:00:00Z", "legacy": [None, False]}]
+        existing_record = self.record(
+            node_id="node-preserved",
+            repository_node_id="repo-preserved",
+            number=7,
+            pr_id="PR-008",
+            sources=[old_source],
+            state_history=old_history,
+            extra={"legacy_analysis": {"keep": True, "items": [1, None]}, "legacy_null": None},
+        )
+        existing = {"schema_version": "1.0.0", "generated_by": {"name": "collector", "revision": "old"}, "records": [existing_record]}
+        incoming = self.record(
+            node_id="node-preserved",
+            repository_node_id="repo-preserved",
+            number=7,
+            state="unknown",
+            run_id="run-new",
+            updated_at="2026-09-02T00:00:00Z",
+            body_sha256="new",
+            extra={"new_unknown": {"integer": 3, "flag": True}},
+        )
+
+        once = self.collector.merge_corpus(existing, [incoming])
+        twice = self.collector.merge_corpus(once, [incoming])
+        result = twice["records"][0]
+        source = next(source for source in result["sources"] if source["source_key"] == "recent-closed")
+
+        self.assertEqual(result["legacy_analysis"], existing_record["legacy_analysis"])
+        self.assertIsNone(result["legacy_null"])
+        self.assertEqual(result["state_history"][: len(old_history)], old_history)
+        self.assertEqual(result["sources"][0]["kind"], old_source["kind"])
+        self.assertEqual(result["sources"][0]["legacy_metadata"], old_source["legacy_metadata"])
+        self.assertEqual(result["sources"][0]["observations"][:1], old_source["observations"])
+        self.assertEqual(len(source["observations"]), 2)
+        self.assertEqual(source["observations"][0], old_source["observations"][0])
+        self.assertEqual(source["observations"][1]["run_id"], "run-new")
+        self.assertEqual(result["state_history"], old_history)
+        self.assertEqual(existing["records"][0], existing_record)
+        self.assertEqual(incoming["sources"], [])
+
+
+class AnalyzerCompatibilityTests(unittest.TestCase):
+    def test_merged_corpus_passes_analyzer_validator(self):
+        collector = load_collector()
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "authoritative-fixture", "revision": "fixture-1"},
+            "records": [
+                MergeCorpusTests.record(
+                    node_id="authoritative-node",
+                    repository_node_id="authoritative-repo",
+                    repository="owner/authoritative",
+                    number=3,
+                    pr_id="PR-003",
+                    run_id="old-run",
+                    body_sha256="d" * 64,
+                    sources=[{"source_key": "fixture", "kind": "authoritative", "observations": [{"run_id": "old-run"}]}],
+                )
+            ],
+        }
+        incoming = MergeCorpusTests.record(
+            node_id="authoritative-node",
+            repository_node_id="authoritative-repo",
+            repository="owner/authoritative",
+            number=3,
+            state="merged",
+            run_id="new-run",
+            body_sha256="e" * 64,
+            updated_at="2026-09-06T00:00:00Z",
+        )
+
+        validator = Path(
+            "/Users/lee-kyu-hwan/code/eslint-contrib/dotfiles-analyzing-open-source-pr-patterns"
+        ) / "dot_codex/skills/analyzing-open-source-pr-patterns/scripts/validate_corpus.py"
+        with tempfile.TemporaryDirectory() as directory:
+            existing_path = Path(directory) / "existing.json"
+            merged_path = Path(directory) / "merged.json"
+            existing_path.write_text(json.dumps(existing), encoding="utf-8")
+            merged = collector.merge_corpus(existing, [incoming])
+            merged_path.write_text(json.dumps(merged), encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, str(validator), str(merged_path), "--existing", str(existing_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 if __name__ == "__main__":
