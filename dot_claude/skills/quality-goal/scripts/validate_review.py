@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 
@@ -63,6 +64,69 @@ def _is_integer(value):
 
 def _is_non_empty_string(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def validate_revision_check(payload):
+    """Validate the revision-check transport contract without dependencies."""
+    if not isinstance(payload, dict):
+        return ["revision check must be an object"]
+    required = {
+        "artifact", "round", "base_digest", "current_digest", "spec_digest",
+        "cells", "empty_cells", "touched_requirements", "removed_ids", "ripple",
+        "notes", "passed",
+    }
+    errors = [f"missing required field: {key}" for key in sorted(required - set(payload))]
+    errors += [f"unknown top-level field: {key!r}" for key in sorted(set(payload) - required)]
+    if payload.get("artifact") not in {"spec", "plan"}:
+        errors.append("artifact must be spec or plan")
+    if payload.get("round") is not None and (not _is_integer(payload["round"]) or payload["round"] < 1):
+        errors.append("round must be a positive integer or null")
+    for key in ("base_digest", "current_digest", "spec_digest"):
+        value = payload.get(key)
+        if value is not None and (not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None):
+            errors.append(f"{key} must be a SHA-256 digest or null")
+    if not _is_integer(payload.get("empty_cells")):
+        errors.append("empty_cells must be an integer")
+    for key in ("touched_requirements", "removed_ids"):
+        if not isinstance(payload.get(key), list) or not all(isinstance(item, str) for item in payload.get(key, [])):
+            errors.append(f"{key} must be a list of strings")
+    if not isinstance(payload.get("passed"), bool):
+        errors.append("passed must be a boolean")
+    for key, fields in (("cells", {"kind", "key", "status", "detail", "line"}), ("ripple", {"requirement", "acceptance_criteria", "plan_rows", "tasks", "commands"})):
+        values = payload.get(key)
+        if not isinstance(values, list):
+            errors.append(f"{key} must be a list")
+            continue
+        for index, value in enumerate(values):
+            if not isinstance(value, dict) or set(value) != fields:
+                errors.append(f"{key}[{index}] has invalid fields")
+                continue
+            if key == "cells" and (value["status"] not in {"ok", "empty"} or not isinstance(value["line"], (int, type(None))) or isinstance(value["line"], bool)):
+                errors.append(f"cells[{index}] has invalid values")
+            elif key == "cells" and not all(isinstance(value[field], str) for field in ("kind", "key", "detail")):
+                errors.append(f"cells[{index}] has invalid values")
+            elif key == "ripple":
+                string_lists = ("acceptance_criteria", "commands")
+                nullable_lists = ("plan_rows", "tasks")
+                invalid = not isinstance(value["requirement"], str)
+                invalid |= any(not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]) for field in string_lists)
+                invalid |= any(value[field] is not None and not isinstance(value[field], list) for field in nullable_lists)
+                invalid |= value["plan_rows"] is not None and any(not _is_integer(item) for item in value["plan_rows"])
+                invalid |= value["tasks"] is not None and any(not isinstance(item, str) for item in value["tasks"])
+                if invalid:
+                    errors.append(f"ripple[{index}] has invalid values")
+    notes = payload.get("notes")
+    note_fields = {"required", "path", "section_found", "missing_rows", "blank_cells"}
+    if not isinstance(notes, dict) or set(notes) != note_fields:
+        errors.append("notes has invalid fields")
+    elif (
+        not isinstance(notes["required"], bool)
+        or not (isinstance(notes["path"], str) or notes["path"] is None)
+        or not isinstance(notes["section_found"], bool)
+        or any(not isinstance(notes[field], list) or not all(isinstance(item, str) for item in notes[field]) for field in ("missing_rows", "blank_cells"))
+    ):
+        errors.append("notes has invalid values")
+    return errors
 
 
 def _unknown_keys(mapping, allowed):

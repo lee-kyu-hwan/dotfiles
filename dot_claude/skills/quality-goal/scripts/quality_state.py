@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unicodedata
 
-from validate_review import validate_review
+from validate_review import validate_review, validate_revision_check
 
 
 ALLOWED_TRANSITIONS = {
@@ -203,6 +203,7 @@ def new_state(
         },
         "rounds": {"spec": 0, "plan": 0, "code": 0},
         "reviews": {"spec": [], "plan": [], "code": []},
+        "revision_checks": {"spec": [], "plan": []},
         "open_finding_ids": {"spec": [], "plan": [], "code": []},
         "review_validation_retry": None,
         "review_unverified_retry": None,
@@ -567,7 +568,37 @@ def _load_review(path):
     return review
 
 
-def record_review(state, review_path, artifact_digest):
+def _load_revision_check(path):
+    try:
+        with Path(path).open(encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise StateError(f"unable to load revision check {path}: {exc}") from exc
+    errors = validate_revision_check(payload)
+    if errors:
+        raise StateError("revision check validation failed: " + "; ".join(errors))
+    return payload
+
+
+def _write_snapshot(source, destination):
+    temporary = None
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            temporary.write_bytes(Path(source).read_bytes())
+        os.replace(temporary, destination)
+    except OSError as exc:
+        raise FilesystemError(f"unable to write snapshot: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def record_review(state, review_path, artifact_digest, *, revision_check_path=None, snapshot_dir=None):
     """Validate and record one review round for the current artifact stage."""
     state = _require_state(state)
     if (
@@ -610,6 +641,23 @@ def record_review(state, review_path, artifact_digest):
         )
     if expected_round > ROUND_LIMITS[artifact]:
         raise TransitionError(f"review round limit exhausted for {artifact}")
+
+    legacy = "revision_checks" not in state
+    revision_check = None
+    if artifact == "code" and revision_check_path is not None:
+        raise StateError("record-review does not accept --revision-check for code")
+    if not legacy and artifact in {"spec", "plan"} and expected_round >= 2 and revision_check_path is None:
+        raise StateError(f"record-review requires --revision-check for {artifact} round {expected_round}")
+    if revision_check_path is not None:
+        revision_check = _load_revision_check(revision_check_path)
+        if revision_check["artifact"] != artifact:
+            raise StateError("revision check artifact mismatch")
+        if revision_check["round"] != expected_round:
+            raise StateError("revision check round mismatch")
+        if revision_check["current_digest"] != artifact_digest:
+            raise StateError("revision check current_digest mismatch")
+        if revision_check["passed"] is not True:
+            raise StateError("revision check must have passed")
 
     prior = None
     if expected_round >= 2:
@@ -659,10 +707,26 @@ def record_review(state, review_path, artifact_digest):
         "blockers": blockers,
     }
 
+    if snapshot_dir is not None and artifact in {"spec", "plan"}:
+        artifact_path = state.get("artifacts", {}).get(artifact)
+        if artifact_path is not None:
+            snapshot_root = Path(snapshot_dir)
+            target = snapshot_root / f"{artifact}-r{expected_round}.md"
+            _write_snapshot(artifact_path, target)
+
     rounds[artifact] = expected_round
     reviews[artifact].append(recorded_review)
     open_finding_ids[artifact] = list(blockers)
     artifact_digests[artifact] = artifact_digest
+    if revision_check is not None:
+        if "revision_checks" not in state:
+            state["revision_checks"] = {"spec": [], "plan": []}
+        state["revision_checks"][artifact].append({
+            "round": expected_round,
+            "path": str(Path(revision_check_path).resolve()),
+            "current_digest": revision_check["current_digest"],
+            "base_digest": revision_check["base_digest"],
+        })
     state["review_validation_retry"] = None
     state["review_unverified_retry"] = None
     state["updated_at"] = _now_timestamp()
@@ -1167,6 +1231,7 @@ def _build_parser():
     review_parser.add_argument("--state", required=True)
     review_parser.add_argument("--review", required=True)
     review_parser.add_argument("--artifact-digest", required=True)
+    review_parser.add_argument("--revision-check")
 
     unverified_review_parser = subparsers.add_parser("record-review-unverified")
     unverified_review_parser.add_argument("--state", required=True)
@@ -1289,6 +1354,8 @@ def main(argv=None):
                     state,
                     args.review,
                     args.artifact_digest,
+                    revision_check_path=args.revision_check,
+                    snapshot_dir=Path(args.state).resolve().parent / "snapshots",
                 ),
             )
         elif args.command == "record-review-unverified":

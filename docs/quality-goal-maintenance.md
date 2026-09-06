@@ -59,3 +59,15 @@ SemVer를 따른다.
 - 게이트 규칙이나 상태 머신 계약 변경: MAJOR
 - 지시·정책 추가: MINOR
 - 문구 정정: PATCH
+
+## 개정 후 자기 회귀 점검
+
+개정본을 리뷰에 기록하기 전 다음과 같이 점검한다.
+
+```bash
+python3 dot_claude/skills/quality-goal/scripts/revision_check.py --artifact spec --current /absolute/spec.md --state /absolute/state.json --out /absolute/revision-check-spec.json
+```
+
+Plan은 `--spec /absolute/spec.md`도 준다. 라운드 2 이상은 `snapshots/`의
+직전 산출물과 digest를 대조하며, 성공 JSON을 `record-review --revision-check`에
+넘긴다. `revision_checks` 키가 없는 기존 상태는 호환성을 위해 면제다.
