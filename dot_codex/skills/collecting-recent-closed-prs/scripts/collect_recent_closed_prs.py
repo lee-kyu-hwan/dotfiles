@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import argparse
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 import json
+import os
+from pathlib import Path
 import re
 import subprocess
+import sys
 import threading
+import tempfile
 import time as clock_time
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -106,6 +112,7 @@ class GhApiClient:
         self._sleeper = sleeper
         self._clock = clock
         self._lock = threading.RLock()
+        self.request_events: list[dict[str, object]] = []
 
     def get_json(
         self,
@@ -163,6 +170,9 @@ class GhApiClient:
         command = self._api_command(endpoint, params, cached_etag)
         for attempt in range(MAX_RETRIES + 1):
             self.budget.consume()
+            event = {"endpoint": endpoint, "attempt": attempt + 1, "status": None,
+                     "conditional": cached_etag is not None}
+            self.request_events.append(event)
             try:
                 completed = self._runner(
                     command,
@@ -179,12 +189,14 @@ class GhApiClient:
                 )
                 if attempt == MAX_RETRIES:
                     raise failure
-                self._sleeper(_transport_backoff(attempt))
+                event["retry_delay"] = _transport_backoff(attempt)
+                self._sleeper(event["retry_delay"])
                 continue
 
             diagnostics = _redact_diagnostics(getattr(completed, "stderr", ""))
             try:
                 status, headers, body = _parse_included_response(getattr(completed, "stdout", ""))
+                event["status"] = status
             except ValueError as error:
                 failure = ApiFailure(
                     "GitHub CLI returned no parseable HTTP response",
@@ -193,7 +205,8 @@ class GhApiClient:
                 )
                 if attempt == MAX_RETRIES or getattr(completed, "returncode", 1) == 0:
                     raise failure from error
-                self._sleeper(_transport_backoff(attempt))
+                event["retry_delay"] = _transport_backoff(attempt)
+                self._sleeper(event["retry_delay"])
                 continue
 
             if status == 304:
@@ -231,7 +244,8 @@ class GhApiClient:
             )
             if not _is_retryable(status, headers, message) or attempt == MAX_RETRIES:
                 raise failure
-            self._sleeper(_retry_delay(status, headers, attempt, self._clock))
+            event["retry_delay"] = _retry_delay(status, headers, attempt, self._clock)
+            self._sleeper(event["retry_delay"])
 
         raise AssertionError("bounded retry loop must return or raise")
 
@@ -443,6 +457,9 @@ def collect_repository_hits(
     interval: Interval,
     outcome: str,
     max_per_repository: int,
+    *,
+    safe_leaves: Optional[list[dict[str, object]]] = None,
+    on_safe_leaf: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> RepositorySearchResult:
     """Collect one repository's ordered search candidates without hydration.
 
@@ -516,6 +533,16 @@ def collect_repository_hits(
             return
         partition_interval = _partition_interval(interval, start, end)
         query = build_closed_query(repository, partition_interval, outcome)
+        for saved in safe_leaves or []:
+            meta = saved.get("partition", {})
+            if (meta.get("query") == query and meta.get("pagination_complete") is True
+                    and meta.get("completion_state") == "complete"
+                    and meta.get("incomplete_results") is False):
+                restored = dict(meta)
+                restored["interval"] = tuple(restored["interval"])
+                partitions.append(SearchPartition(**restored))
+                safe_hits.extend(_exact_partition_hits(deepcopy(saved["hits"]), start, end, warnings))
+                return
         try:
             first_payload = _response_payload(
                 client.get_json("/search/issues", {"q": query, "page": 1}),
@@ -630,6 +657,8 @@ def collect_repository_hits(
             )
         )
         safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
+        if on_safe_leaf is not None:
+            on_safe_leaf({"partition": _serialise_partition(partitions[-1]), "hits": deepcopy(items), "preflight": deepcopy(preflight_payload)})
 
     collect_partition(root_start, root_end)
     hits = _deduplicated_ordered_hits(safe_hits)
@@ -2069,3 +2098,680 @@ def _whole_second(value: datetime) -> datetime:
 
 def _utc_string(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def request_fingerprint(repositories: list[str], interval: Interval, outcome: str, max_per_repository: int, request_budget: int, api_version: str) -> str:
+    """Hash the complete collection request without reordering repositories."""
+    payload = {"repositories": repositories, "interval": {"start_at": interval.start_at, "end_at": interval.end_at, "timezone": interval.timezone, "input_mode": interval.input_mode}, "outcome": outcome, "max_per_repository": max_per_repository, "request_budget": request_budget, "api_version": api_version}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True)
+class CollectionRun:
+    """The in-memory result of one collection attempt.
+
+    ``manifest`` is the complete v2 envelope, while ``corpus`` is the
+    analyzer-facing v1 corpus.  Keeping both values on the result makes the
+    checkpoint boundary explicit and keeps callers from reconstructing status
+    from a partially written file.
+    """
+
+    corpus: dict[str, object]
+    manifest: dict[str, object]
+    exit_code: int
+
+    @property
+    def record(self) -> dict[str, object]:
+        records = self.manifest.get("records")
+        if isinstance(records, list) and records and isinstance(records[-1], dict):
+            return records[-1]
+        return {}
+
+
+def _run_timestamp(value: Optional[str]) -> str:
+    return value if isinstance(value, str) and value else _utc_string(datetime.now(timezone.utc))
+
+
+def _repository_records(corpus: object, repository: str) -> list[dict[str, object]]:
+    if not isinstance(corpus, dict) or not isinstance(corpus.get("records"), list):
+        return []
+    return [
+        deepcopy(record)
+        for record in corpus["records"]
+        if isinstance(record, dict)
+        and isinstance(record.get("repository"), dict)
+        and record["repository"].get("full_name") == repository
+    ]
+
+
+def _serialise_partition(partition: SearchPartition) -> dict[str, object]:
+    return {
+        "repository": partition.repository,
+        "interval": list(partition.interval),
+        "query": partition.query,
+        "total_count": partition.total_count,
+        "returned_count": partition.returned_count,
+        "pagination_complete": partition.pagination_complete,
+        "incomplete_results": partition.incomplete_results,
+        "completion_state": partition.completion_state,
+        "failure": partition.failure,
+    }
+
+
+def _hydrated_body_sha256(record: dict[str, object]) -> Optional[str]:
+    evidence = record.get("evidence_snapshot")
+    if not isinstance(evidence, dict):
+        return None
+    completeness = evidence.get("completeness")
+    body_meta = completeness.get("pull_request_body") if isinstance(completeness, dict) else None
+    if not isinstance(body_meta, dict) or body_meta.get("pages_complete") is not True:
+        return None
+    body = evidence.get("body_excerpt")
+    if body is not None and not isinstance(body, str):
+        return None
+    return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
+
+
+def _prepare_observation(record: dict[str, object], run_id: str, captured_at: str) -> Optional[dict[str, object]]:
+    """Attach collector identity only when hydration supplied authoritative data."""
+    prepared = deepcopy(record)
+    pull_request = prepared.get("pull_request")
+    updated_at = pull_request.get("updated_at") if isinstance(pull_request, dict) else None
+    body_sha256 = _hydrated_body_sha256(prepared)
+    if not isinstance(updated_at, str) or not updated_at or body_sha256 is None:
+        return None
+    prepared["run_id"] = run_id
+    prepared["captured_at"] = captured_at
+    prepared["body_sha256"] = body_sha256
+    return prepared
+
+
+def _hydration_is_complete(record: dict[str, object]) -> bool:
+    if record.get("hydration_status") != "complete":
+        return False
+    evidence = record.get("evidence_snapshot")
+    completeness = evidence.get("completeness") if isinstance(evidence, dict) else None
+    return isinstance(completeness, dict) and all(
+        isinstance(value, dict) and value.get("pages_complete") is True
+        for value in completeness.values()
+    )
+
+
+def _validate_manifest_v2(document: object) -> dict[str, object]:
+    if not isinstance(document, dict) or document.get("schema_version") != "2.0.0":
+        raise ValueError("resume manifest requires schema_version 2.0.0")
+    records = document.get("records")
+    if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
+        raise ValueError("resume manifest records must be a list of objects")
+    return document
+
+
+def _resume_record(manifest: object, fingerprint: str, run_id: Optional[str]) -> Optional[dict[str, object]]:
+    if manifest is None:
+        if run_id is not None:
+            raise ValueError("resume requires an existing manifest")
+        return None
+    document = _validate_manifest_v2(manifest)
+    if run_id is None:
+        return None
+    records = document["records"]
+    candidates = [record for record in records if isinstance(record, dict)]
+    if run_id is not None:
+        matches = [record for record in candidates if record.get("run_id") == run_id]
+        if not matches:
+            raise ValueError("requested resume run_id was not found")
+        selected = matches[-1]
+        if selected.get("request_fingerprint") != fingerprint:
+            raise ValueError("resume request fingerprint is incompatible")
+        return selected
+    return None
+
+
+def _manifest_generator(api_version: str, client_version: str, revision: Optional[str]) -> dict[str, str]:
+    return {
+        "name": "collecting-recent-closed-prs",
+        "revision": revision or compute_skill_revision(),
+        "api_version": api_version,
+        "client_version": client_version,
+    }
+
+
+def _with_manifest_record(history: list[object], record: dict[str, object], replace_run_id: Optional[str]) -> list[object]:
+    if replace_run_id is None:
+        return deepcopy(history) + [deepcopy(record)]
+    replaced = False
+    output: list[object] = []
+    for previous in history:
+        if isinstance(previous, dict) and previous.get("run_id") == replace_run_id:
+            updated = deepcopy(previous)
+            updated.update(deepcopy(record))
+            repositories = {item["repository"]: deepcopy(item) for item in previous.get("repositories", [])}
+            for item in record.get("repositories", []):
+                prior_repo = repositories.get(item["repository"], {})
+                completed = {value["pull_request_node_id"]: deepcopy(value) for value in prior_repo.get("completed_records", [])}
+                completed.update({value["pull_request_node_id"]: deepcopy(value) for value in item.get("completed_records", [])})
+                prior_repo.update(deepcopy(item))
+                if completed:
+                    prior_repo["completed_records"] = list(completed.values())
+                repositories[item["repository"]] = prior_repo
+            updated["repositories"] = list(repositories.values())
+            output.append(updated)
+            replaced = True
+        else:
+            output.append(deepcopy(previous))
+    return output if replaced else output + [deepcopy(record)]
+
+
+def collect(
+    client: Any,
+    repositories: list[str],
+    interval: Interval,
+    outcome: str = "all",
+    max_per_repository: int = 25,
+    request_budget: int = 1000,
+    *,
+    run_id: Optional[str] = None,
+    existing_corpus: Optional[dict[str, object]] = None,
+    existing_manifest: Optional[dict[str, object]] = None,
+    output: Optional[object] = None,
+    manifest_output: Optional[object] = None,
+    markdown_output: Optional[object] = None,
+    captured_at: Optional[str] = None,
+    api_version: Optional[str] = None,
+    client_version: str = "unknown",
+    skill_revision: Optional[str] = None,
+) -> CollectionRun:
+    """Collect each repository serially, checkpointing usable evidence.
+
+    A repository with a complete prior checkpoint is read through from the
+    prior corpus.  Partial repositories are always retried, so failed
+    hydration is never mistaken for complete evidence on resume.
+    """
+    if not isinstance(repositories, list) or not repositories or not all(isinstance(repo, str) and repo for repo in repositories):
+        raise ValueError("repositories must be a non-empty list")
+    if any(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo) is None or repo.split("/")[1] in {".", ".."} for repo in repositories):
+        raise ValueError("repositories must be owner/name identifiers")
+    if len({repo.lower() for repo in repositories}) != len(repositories):
+        raise ValueError("repository list must not contain duplicates")
+    destinations = [Path(path).resolve() for path in (output, manifest_output, markdown_output) if path is not None]
+    if len(set(destinations)) != len(destinations) or any(
+        left.exists() and right.exists() and os.path.samefile(left, right)
+        for index, left in enumerate(destinations) for right in destinations[index + 1:]
+    ):
+        raise ValueError("corpus, manifest, and Markdown outputs must be distinct files")
+    if existing_corpus is not None:
+        _validate_corpus_envelope(existing_corpus, "existing corpus")
+    if not isinstance(interval, Interval):
+        raise ValueError("interval must be an Interval")
+    if outcome not in {"all", "merged", "closed-unmerged"}:
+        raise ValueError("outcome must be all, merged, or closed-unmerged")
+    if not isinstance(max_per_repository, int) or isinstance(max_per_repository, bool) or max_per_repository <= 0:
+        raise ValueError("max_per_repository must be a positive integer")
+    budget = getattr(client, "budget", None)
+    if isinstance(budget, RequestBudget):
+        effective_budget = budget.limit
+    else:
+        if not isinstance(request_budget, int) or isinstance(request_budget, bool) or request_budget <= 0:
+            raise ValueError("request_budget must be a positive integer")
+        effective_budget = request_budget
+    effective_api_version = api_version or getattr(client, "api_version", API_VERSION)
+    fingerprint = request_fingerprint(repositories, interval, outcome, max_per_repository, effective_budget, effective_api_version)
+    prior = _resume_record(existing_manifest, fingerprint, run_id)
+    if prior is not None and existing_corpus is None:
+        raise ValueError("resume requires its existing corpus")
+    if prior is not None and isinstance(budget, RequestBudget):
+        previous_count = prior.get("request_count", 0)
+        if not isinstance(previous_count, int) or isinstance(previous_count, bool) or not 0 <= previous_count <= effective_budget:
+            raise ValueError("resume request count is invalid")
+        budget.consumed = max(budget.consumed, previous_count)
+    previous_events = deepcopy(prior.get("request_events", [])) if prior else []
+
+    def request_events() -> list[object]:
+        return previous_events + deepcopy(getattr(client, "request_events", []))
+    prior_manifest_records = []
+    if existing_manifest is not None:
+        validated_manifest = _validate_manifest_v2(existing_manifest)
+        prior_manifest_records = deepcopy(validated_manifest["records"])
+    timestamp = _run_timestamp(captured_at)
+    stable_run_id = prior.get("run_id") if prior is not None else (run_id or "run-" + hashlib.sha256((timestamp + fingerprint).encode("utf-8")).hexdigest()[:20])
+    started_at = prior.get("started_at") if prior is not None and isinstance(prior.get("started_at"), str) else timestamp
+
+    preflight: dict[str, object] = {}
+    warnings: list[str] = []
+    if hasattr(client, "global_preflight"):
+        try:
+            raw_preflight = client.global_preflight()
+            if isinstance(raw_preflight, dict):
+                preflight = deepcopy(raw_preflight)
+                client_version = str(preflight.get("client_version", client_version))
+                effective_api_version = str(preflight.get("api_version", effective_api_version))
+        except (ApiFailure, BudgetExhausted, ValueError) as error:
+            warning = _hydration_warning(error)
+            warnings.append(warning)
+            prior_corpus = deepcopy(existing_corpus) if isinstance(existing_corpus, dict) else {"schema_version": "1.0.0", "generated_by": {"name": "collecting-recent-closed-prs", "revision": skill_revision or "unknown"}, "records": []}
+            failed_record = {
+                "run_id": stable_run_id,
+                "request_fingerprint": fingerprint,
+                "collection_status": "failed",
+                "started_at": started_at,
+                "completed_at": _run_timestamp(None),
+                "repositories": [],
+                "warnings": warnings,
+                "preflight": preflight,
+                "request_count": getattr(budget, "consumed", 0),
+                "request_events": request_events(),
+            }
+            manifest = {"schema_version": "2.0.0", "generated_by": _manifest_generator(effective_api_version, client_version, skill_revision), "records": _with_manifest_record(prior_manifest_records, failed_record, stable_run_id if prior is not None else None)}
+            if manifest_output is not None:
+                atomic_write_json(manifest_output, manifest)
+            return CollectionRun(prior_corpus, manifest, 4)
+
+    prior_repositories = {
+        value.get("repository"): value
+        for value in (prior.get("repositories", []) if isinstance(prior, dict) else [])
+        if isinstance(value, dict) and isinstance(value.get("repository"), str)
+    }
+    corpus = deepcopy(existing_corpus) if isinstance(existing_corpus, dict) else {"schema_version": "1.0.0", "generated_by": {"name": "collecting-recent-closed-prs", "revision": skill_revision or compute_skill_revision()}, "records": []}
+    _validate_corpus_envelope(corpus, "existing corpus")
+    repository_manifest: list[dict[str, object]] = []
+    collected_any = False
+    partial = False
+    license_cache: dict[str, object] = {}
+
+    def save_checkpoint() -> None:
+        checkpoint = {
+            "run_id": stable_run_id, "request_fingerprint": fingerprint,
+            "collection_status": "partial", "checkpoint": True,
+            "started_at": started_at, "completed_at": None,
+            "checkpointed_at": _run_timestamp(None),
+            "repositories_requested": deepcopy(repositories),
+            "repositories": deepcopy(repository_manifest),
+            "request_count": getattr(budget, "consumed", 0),
+            "request_events": request_events(),
+            "request_budget": effective_budget,
+            "interval": {"start_at": interval.start_at, "end_at": interval.end_at,
+                         "timezone": interval.timezone, "input_mode": deepcopy(interval.input_mode),
+                         "as_of": interval.as_of, "last_day_partial": interval.last_day_partial},
+            "max_per_repository": max_per_repository, "outcome": outcome,
+            "api_version": effective_api_version, "client_version": client_version,
+            "collection_method": "github-rest-search-and-hydration",
+            "warnings": list(warnings),
+        }
+        if output is not None:
+            atomic_write_json(output, corpus)
+        if manifest_output is not None:
+            atomic_write_json(manifest_output, {
+                "schema_version": "2.0.0",
+                "generated_by": _manifest_generator(effective_api_version, client_version, skill_revision),
+                "records": _with_manifest_record(prior_manifest_records, checkpoint, stable_run_id if prior is not None else None),
+            })
+
+    for repository in repositories:
+        previous = prior_repositories.get(repository)
+        if previous is not None and previous.get("collection_status") in {"collected", "no-results"}:
+            reused = _repository_records(existing_corpus, repository)
+            if reused:
+                corpus["records"] = [record for record in corpus["records"] if not (isinstance(record, dict) and isinstance(record.get("repository"), dict) and record["repository"].get("full_name") == repository)] + reused
+            repository_manifest.append(deepcopy(previous))
+            collected_any = collected_any or bool(reused)
+            continue
+        checkpoint_repo = {
+            "repository": repository, "collection_status": "partial",
+            "safe_leaves": deepcopy(previous.get("safe_leaves", [])) if previous else [],
+            "completed_records": [], "selected_count": 0, "warnings": [],
+        }
+        reusable_records = {
+            record.get("pull_request_node_id"): record
+            for record in (previous.get("completed_records", []) if previous else [])
+            if isinstance(record, dict) and _hydration_is_complete(record)
+        }
+        repository_manifest.append(checkpoint_repo)
+
+        def checkpoint_leaf(leaf: dict[str, object]) -> None:
+            checkpoint_repo["safe_leaves"].append(deepcopy(leaf))
+            save_checkpoint()
+
+        try:
+            search = collect_repository_hits(client, repository, interval, outcome, max_per_repository,
+                                             safe_leaves=checkpoint_repo["safe_leaves"], on_safe_leaf=checkpoint_leaf)
+        except KeyboardInterrupt:
+            search = _empty_repository_search_result(repository, "partial", "partial", "collection interrupted during search")
+        except (ApiFailure, BudgetExhausted, ValueError, TypeError) as error:
+            search = _empty_repository_search_result(repository, "failed", "failed", _hydration_warning(error))
+        repo_warnings = list(search.warnings)
+        selected_records: list[dict[str, object]] = []
+        partial_records: list[dict[str, object]] = []
+        candidates = list(search.selected_hits) + list(search.overflow_hits)
+        processed_hits = 0
+        for hit in candidates:
+            if len(selected_records) >= max_per_repository:
+                break
+            processed_hits += 1
+            try:
+                hydrated = deepcopy(reusable_records.get(hit.get("node_id")))
+                if hydrated is None:
+                    hydrated = hydrate_pull_request(
+                    client=client,
+                    repository=repository,
+                    search_hit=hit,
+                    repository_metadata=search.preflight,
+                    license_cache=license_cache,
+                    captured_at=timestamp,
+                )
+            except KeyboardInterrupt:
+                repo_warnings.append("collection interrupted during hydration")
+                break
+            except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
+                repo_warnings.append(_hydration_warning(error))
+                continue
+            indexed_state = "merged" if outcome == "merged" else "closed-unmerged" if outcome == "closed-unmerged" else None
+            hydrated_state = hydrated.get("pull_request", {}).get("normalized_state") if isinstance(hydrated.get("pull_request"), dict) else None
+            if hydrated_state == "open":
+                repo_warnings.append("outcome index race: candidate was reopened during hydration")
+                continue
+            if indexed_state is not None and hydrated_state != indexed_state:
+                repo_warnings.append("outcome index race: candidate was reclassified during hydration")
+                continue
+            prepared = _prepare_observation(hydrated, stable_run_id, timestamp)
+            if prepared is None:
+                repo_warnings.append("required pull-request evidence was incomplete; record retained as partial evidence")
+                partial = True
+                partial_records.append(deepcopy(hydrated))
+                continue
+            selected_records.append(prepared)
+            corpus = merge_corpus(corpus, [prepared])
+            collected_any = True
+            checkpoint_repo["selected_count"] = len(selected_records)
+            checkpoint_repo["completed_records"] = [deepcopy(record) for record in selected_records if _hydration_is_complete(record)]
+            save_checkpoint()
+        if selected_records:
+            collected_any = True
+        hydration_complete_count = sum(1 for record in selected_records if _hydration_is_complete(record))
+        hydration_partial_count = len(selected_records) - hydration_complete_count
+        if search.collection_status not in {"collected", "no-results"} or repo_warnings or hydration_partial_count:
+            partial = True
+        repository_checkpoint = {
+            "repository": repository,
+            "collection_status": "partial" if repo_warnings or hydration_partial_count or search.collection_status == "partial" else search.collection_status,
+            "preflight": deepcopy(search.preflight),
+            "preflight_outcome": search.preflight_outcome,
+            "partitions": [_serialise_partition(partition) for partition in search.partitions],
+            "matched_count": search.matched_count,
+            "selected_count": len(selected_records),
+            "excluded_by_cap": max(0, len(candidates) - processed_hits) if len(selected_records) >= max_per_repository else 0,
+            "warnings": repo_warnings,
+            "complete_prs": hydration_complete_count,
+            "partial_prs": hydration_partial_count,
+            "partial_records": partial_records,
+        }
+        checkpoint_repo.update(repository_checkpoint)
+        if output is not None and collected_any:
+            atomic_write_json(output, corpus)
+        if manifest_output is not None:
+            checkpoint_record = {
+                "run_id": stable_run_id,
+                "request_fingerprint": fingerprint,
+                "collection_status": "partial",
+                "collection_method": "github-rest-search-and-hydration",
+                "started_at": started_at,
+                "completed_at": None,
+                "api_version": effective_api_version,
+                "client_version": client_version,
+                "interval": {"start_at": interval.start_at, "end_at": interval.end_at, "timezone": interval.timezone, "input_mode": deepcopy(interval.input_mode), "as_of": interval.as_of, "last_day_partial": interval.last_day_partial},
+                "repositories_requested": deepcopy(repositories),
+                "outcome": outcome,
+                "max_per_repository": max_per_repository,
+                "request_budget": effective_budget,
+                "request_count": getattr(budget, "consumed", 0),
+                "request_events": request_events(),
+                "preflight": preflight,
+                "repositories": deepcopy(repository_manifest),
+                "warnings": warnings,
+                "checkpoint": True,
+            }
+            checkpoint_manifest = {"schema_version": "2.0.0", "generated_by": _manifest_generator(effective_api_version, client_version, skill_revision), "records": _with_manifest_record(prior_manifest_records, checkpoint_record, stable_run_id if prior is not None else None)}
+            atomic_write_json(manifest_output, checkpoint_manifest)
+
+    status = "complete" if not partial else "partial"
+    if not collected_any and partial:
+        status = "failed"
+    consumed = getattr(budget, "consumed", 0)
+    manifest_record = {
+        "run_id": stable_run_id,
+        "request_fingerprint": fingerprint,
+        "collection_status": status,
+        "collection_method": "github-rest-search-and-hydration",
+        "started_at": started_at,
+        "completed_at": _run_timestamp(None),
+        "checkpoint": False,
+        "api_version": effective_api_version,
+        "client_version": client_version,
+        "interval": {"start_at": interval.start_at, "end_at": interval.end_at, "timezone": interval.timezone, "input_mode": deepcopy(interval.input_mode), "as_of": interval.as_of, "last_day_partial": interval.last_day_partial},
+        "repositories_requested": deepcopy(repositories),
+        "outcome": outcome,
+        "max_per_repository": max_per_repository,
+        "request_budget": effective_budget,
+        "request_count": consumed,
+        "request_events": request_events(),
+        "preflight": preflight,
+        "repositories": repository_manifest,
+        "warnings": warnings,
+        "method_limitations": ["GitHub search is index-backed; hydrated state is authoritative."],
+    }
+    manifest = {
+        "schema_version": "2.0.0",
+        "generated_by": _manifest_generator(effective_api_version, client_version, skill_revision),
+        "records": _with_manifest_record(prior_manifest_records, manifest_record, stable_run_id if prior is not None else None),
+    }
+    if output is not None and (collected_any or not isinstance(existing_corpus, dict)):
+        atomic_write_json(output, corpus)
+    if manifest_output is not None:
+        atomic_write_json(manifest_output, manifest)
+    if markdown_output is not None:
+        persisted_corpus = corpus
+        persisted_manifest = manifest
+        if output is not None and os.path.isfile(os.fspath(output)):
+            with open(os.fspath(output), encoding="utf-8") as handle:
+                persisted_corpus = json.load(handle)
+        if manifest_output is not None and os.path.isfile(os.fspath(manifest_output)):
+            with open(os.fspath(manifest_output), encoding="utf-8") as handle:
+                persisted_manifest = json.load(handle)
+        markdown = render_inventory_markdown(persisted_corpus, persisted_manifest)
+        atomic_write_text(markdown_output, markdown)
+    exit_code = 0 if status == "complete" else 3 if status == "partial" and collected_any else 4
+    return CollectionRun(corpus, manifest, exit_code)
+
+
+def atomic_write_json(destination: object, document: object, *, replacer: Callable[[str, str], None] = os.replace) -> None:
+    """Replace one explicit JSON output only after a complete adjacent write."""
+    path = os.fspath(destination)
+    directory = os.path.dirname(os.path.abspath(path))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
+            temporary = handle.name
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        replacer(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def atomic_write_text(destination: object, text: str, *, replacer: Callable[[str, str], None] = os.replace) -> None:
+    """Atomically write a UTF-8 text artifact, including Markdown reports."""
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    path = os.fspath(destination)
+    directory = os.path.dirname(os.path.abspath(path))
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=directory, delete=False) as handle:
+            temporary = handle.name
+            handle.write(text)
+        replacer(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+SKILL_REVISION_PATHS = (
+    "SKILL.md",
+    "agents/openai.yaml",
+    "references/collection-contract.md",
+    "references/github-rest-contract.md",
+    "scripts/collect_recent_closed_prs.py",
+    "tests/test_collect_recent_closed_prs.py",
+)
+
+
+def compute_skill_revision(skill_dir: object = SKILL_DIR) -> str:
+    """Hash the six canonical skill files with length-framed path and bytes."""
+    root = Path(skill_dir)
+    digest = hashlib.sha256()
+    for relative in sorted(SKILL_REVISION_PATHS):
+        path_bytes = relative.encode("utf-8")
+        content = (root / relative).read_bytes()
+        digest.update(len(path_bytes).to_bytes(8, byteorder="big"))
+        digest.update(path_bytes)
+        digest.update(len(content).to_bytes(8, byteorder="big"))
+        digest.update(content)
+    return "sha256:" + digest.hexdigest()
+
+
+def render_inventory_markdown(corpus: dict[str, object], manifest: dict[str, object]) -> str:
+    """Render only persisted artifact data, surfacing partial evidence first."""
+    runs = manifest.get("records") if isinstance(manifest.get("records"), list) else []
+    latest = runs[-1] if runs and isinstance(runs[-1], dict) else {}
+    lines: list[str] = []
+    if latest.get("collection_status") == "partial":
+        lines.extend(["# Partial result", "", "This inventory has incomplete collection evidence.", ""])
+        for repository in latest.get("repositories", []):
+            if not isinstance(repository, dict) or repository.get("collection_status") not in {"partial", "failed"}:
+                continue
+            lines.append("- " + str(repository.get("repository", "unknown repository")))
+            for partition in repository.get("partitions", []):
+                if isinstance(partition, dict) and partition.get("completion_state") == "failed":
+                    lines.append("  - " + str(partition.get("failure", "failed partition")))
+        lines.append("")
+    lines.extend(["# Inventory", ""])
+    if isinstance(latest, dict):
+        if "max_per_repository" in latest:
+            lines.append("Cap per repository: " + str(latest["max_per_repository"]))
+        lines.append("Collection status: " + str(latest.get("collection_status", "unknown")))
+        lines.append("")
+        for repository in latest.get("repositories", []):
+            if not isinstance(repository, dict):
+                continue
+            lines.append(
+                "- {0}: matched {1}, selected {2}, excluded {3}".format(
+                    repository.get("repository", "unknown repository"),
+                    repository.get("matched_count", 0),
+                    repository.get("selected_count", 0),
+                    repository.get("excluded_by_cap", 0),
+                )
+            )
+    for record in corpus.get("records", []) if isinstance(corpus.get("records"), list) else []:
+        if isinstance(record, dict):
+            pull = record.get("pull_request") if isinstance(record.get("pull_request"), dict) else {}
+            lines.append("- " + str(pull.get("url", "unknown pull request")))
+    return "\n".join(lines) + "\n"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Collect recently closed GitHub pull requests")
+    commands = parser.add_subparsers(dest="command", required=True)
+    collect_parser = commands.add_parser("collect")
+    collect_parser.add_argument("--repo", action="append", required=True)
+    collect_parser.add_argument("--output", required=True)
+    collect_parser.add_argument("--manifest", required=True)
+    collect_parser.add_argument("--markdown-output")
+    collect_parser.add_argument("--resume-run-id")
+    collect_parser.add_argument("--max-per-repo", type=int, default=25)
+    collect_parser.add_argument("--request-budget", type=int, default=1000)
+    collect_parser.add_argument("--api-version", default=API_VERSION)
+    collect_parser.add_argument("--timezone", default="UTC")
+    collect_parser.add_argument("--recent-days", type=int)
+    collect_parser.add_argument("--as-of")
+    collect_parser.add_argument("--start-date")
+    collect_parser.add_argument("--end-date")
+    collect_parser.add_argument("--start-at")
+    collect_parser.add_argument("--end-at")
+    collect_parser.add_argument("--outcome", choices=("all", "merged", "closed-unmerged"), default="all")
+    migrate = commands.add_parser("migrate-manifest")
+    migrate.add_argument("--input", required=True)
+    migrate.add_argument("--output", required=True)
+    migrate.add_argument("--replace", action="store_true")
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if effective_argv == ["--print-revision"]:
+        print(compute_skill_revision())
+        return 0
+    args = build_parser().parse_args(effective_argv)
+    if args.command == "migrate-manifest":
+        source = os.path.abspath(args.input)
+        destination = os.path.abspath(args.output)
+        if source == destination and not args.replace:
+            raise ValueError("migration input and output are the same; pass --replace")
+        with open(source, encoding="utf-8") as handle:
+            document = json.load(handle)
+        atomic_write_json(destination, migrate_manifest_v1(document))
+        return 0
+    if args.command == "collect":
+        interval = resolve_interval(
+            start_at=args.start_at,
+            end_at=args.end_at,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            recent_days=args.recent_days,
+            timezone_name=args.timezone,
+            as_of=args.as_of,
+        )
+        budget = RequestBudget(args.request_budget)
+        client = GhApiClient(api_version=args.api_version, budget=budget)
+        existing_corpus = None
+        existing_manifest = None
+        if os.path.isfile(args.output):
+            with open(args.output, encoding="utf-8") as handle:
+                existing_corpus = json.load(handle)
+        if os.path.isfile(args.manifest):
+            with open(args.manifest, encoding="utf-8") as handle:
+                existing_manifest = json.load(handle)
+        run = collect(
+            client,
+            args.repo,
+            interval,
+            outcome=args.outcome,
+            max_per_repository=args.max_per_repo,
+            request_budget=args.request_budget,
+            run_id=args.resume_run_id,
+            existing_corpus=existing_corpus,
+            existing_manifest=existing_manifest,
+            output=args.output,
+            manifest_output=args.manifest,
+            markdown_output=args.markdown_output,
+            api_version=args.api_version,
+        )
+        return run.exit_code
+    raise ValueError("unsupported command")
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(2)

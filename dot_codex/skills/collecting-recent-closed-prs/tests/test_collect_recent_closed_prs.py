@@ -10,7 +10,9 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import shutil
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_PATH = (
@@ -439,6 +441,9 @@ class GhApiClientTests(unittest.TestCase):
         self.assertEqual(len(self.runner.calls), 4)
         self.assertEqual(client.budget.consumed, 4)
         self.assertEqual(self.sleeper.delays, [60, 60, 60])
+        self.assertEqual([event.get("status") for event in getattr(client, "request_events", [])], [403, 403, 403, 403])
+        self.assertEqual([event.get("retry_delay") for event in client.request_events], [60, 60, 60, None])
+        self.assertNotIn("ghp_secret-token", json.dumps(client.request_events))
         self.assertNotIn("ghp_secret-token", raised.exception.diagnostics)
         self.assertNotIn("authorization", raised.exception.diagnostics.lower())
 
@@ -1899,6 +1904,331 @@ class AnalyzerCompatibilityTests(unittest.TestCase):
             )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+
+class Task7PrimitiveTests(unittest.TestCase):
+    def setUp(self):
+        self.collector = load_collector()
+
+    def test_fingerprint_preserves_requested_repository_order_and_input_contract(self):
+        interval = self.collector.resolve_interval(start_at="2026-09-01T00:00:00Z", end_at="2026-09-02T00:00:00Z", start_date=None, end_date=None, recent_days=None, timezone_name="UTC", as_of=None)
+        first = self.collector.request_fingerprint(["owner/a", "owner/b"], interval, "all", 2, 100, "2026-03-10")
+        second = self.collector.request_fingerprint(["owner/b", "owner/a"], interval, "all", 2, 100, "2026-03-10")
+        self.assertRegex(first, r"\Asha256:[0-9a-f]{64}\Z")
+        self.assertNotEqual(first, second)
+
+    def test_atomic_write_keeps_previous_destination_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.json"
+            destination.write_text("old\n", encoding="utf-8")
+            with self.assertRaises(OSError):
+                self.collector.atomic_write_json(destination, {"new": True}, replacer=lambda source, target: (_ for _ in ()).throw(OSError("replace failed")))
+            self.assertEqual(destination.read_text(encoding="utf-8"), "old\n")
+
+    def test_partial_markdown_leads_with_failures(self):
+        manifest = {"records": [{"collection_status": "partial", "repositories": [{"repository": "owner/repo", "collection_status": "partial", "partitions": [{"completion_state": "failed", "failure": "budget exhausted"}]}], "max_per_repository": 2}]}
+        markdown = self.collector.render_inventory_markdown({"records": []}, manifest)
+        self.assertLess(markdown.index("Partial result"), markdown.index("Inventory"))
+        self.assertIn("budget exhausted", markdown)
+
+    def test_atomic_write_removes_temporary_file_when_serialization_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "artifact.json"
+            with self.assertRaises(TypeError):
+                self.collector.atomic_write_json(destination, {"bad": object()})
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_skill_revision_changes_when_each_canonical_file_changes(self):
+        revision = self.collector.compute_skill_revision()
+        self.assertRegex(revision, r"\Asha256:[0-9a-f]{64}\Z")
+        for relative in self.collector.SKILL_REVISION_PATHS:
+            with self.subTest(relative=relative):
+                with tempfile.TemporaryDirectory() as directory:
+                    copied = Path(directory) / "skill"
+                    shutil.copytree(self.collector.SKILL_DIR, copied)
+                    target = copied / relative
+                    target.write_bytes(target.read_bytes() + b"\n")
+                    self.assertNotEqual(revision, self.collector.compute_skill_revision(copied))
+
+    def test_print_revision_is_a_top_level_cli_mode(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "--print-revision"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout.strip(), r"\Asha256:[0-9a-f]{64}\Z")
+
+
+class Task7OrchestrationTests(unittest.TestCase):
+    def setUp(self):
+        self.collector = load_collector()
+        self.interval = self.collector.resolve_interval(
+            start_at="2026-09-01T00:00:00Z",
+            end_at="2026-09-02T00:00:00Z",
+            start_date=None,
+            end_date=None,
+            recent_days=None,
+            timezone_name="UTC",
+            as_of=None,
+        )
+
+    def hit(self, number):
+        return {
+            "node_id": "PR_node_" + str(number),
+            "number": number,
+            "closed_at": "2026-09-01T12:00:00Z",
+            "html_url": "https://github.com/owner/repo/pull/" + str(number),
+        }
+
+    def hydrated(self, number, state="merged"):
+        return {
+            "identity_status": "resolved",
+            "record_key": "github-pr:PR_node_" + str(number),
+            "pull_request_node_id": "PR_node_" + str(number),
+            "repository": {"full_name": "owner/repo", "node_id": "R_repo"},
+            "pull_request": {"number": number, "url": "https://github.com/owner/repo/pull/" + str(number), "normalized_state": state, "updated_at": "2026-09-01T12:00:00Z"},
+            "sources": [],
+            "state_history": [],
+            "hydration_status": "complete",
+            "evidence_snapshot": {"body_excerpt": "body-" + str(number), "completeness": {"pull_request_body": {"pages_complete": True}}},
+        }
+
+    def search(self, hits, selected=None, overflow=None, status="collected", warnings=()):
+        return self.collector.RepositorySearchResult(
+            repository="owner/repo", preflight={"full_name": "owner/repo", "node_id": "R_repo"}, preflight_outcome="collected",
+            collection_status=status, partitions=(), hits=tuple(hits), selected_hits=tuple(selected if selected is not None else hits), overflow_hits=tuple(overflow or ()),
+            matched_count=len(hits), selected_count=len(selected if selected is not None else hits), excluded_by_cap=len(overflow or ()), warnings=tuple(warnings),
+        )
+
+    def test_collect_writes_manifest_v2_and_corpus(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([self.hit(1)])), patch.object(self.collector, "hydrate_pull_request", return_value=self.hydrated(1)):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval, output=None, manifest_output=None)
+        self.assertEqual(run.exit_code, 0)
+        self.assertEqual(run.manifest["schema_version"], "2.0.0")
+        self.assertEqual(run.manifest["records"][-1]["collection_status"], "complete")
+        self.assertEqual(len(run.corpus["records"]), 1)
+        self.assertRegex(run.record["run_id"], r"\Arun-[0-9a-f]{20}\Z")
+
+    def test_outcome_race_backfills_cap_and_preserves_warning(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+
+        search = self.search([self.hit(1), self.hit(2)], selected=[self.hit(1)], overflow=[self.hit(2)])
+        with patch.object(self.collector, "collect_repository_hits", return_value=search), patch.object(self.collector, "hydrate_pull_request", side_effect=[self.hydrated(1, "closed-unmerged"), self.hydrated(2, "merged")]):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval, outcome="merged", max_per_repository=1)
+        repository = run.record["repositories"][0]
+        self.assertEqual(repository["selected_count"], 1)
+        self.assertEqual(len(run.corpus["records"]), 1)
+        self.assertIn("outcome index race", " ".join(repository["warnings"]))
+
+    def test_incompatible_resume_fails_before_preflight(self):
+        calls = []
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+            def global_preflight(self):
+                calls.append("preflight")
+                return {}
+        existing = {"schema_version": "2.0.0", "records": [{"run_id": "old", "request_fingerprint": "sha256:old"}]}
+        with self.assertRaises(ValueError):
+            self.collector.collect(Client(), ["owner/repo"], self.interval, existing_manifest=existing, run_id="old")
+        self.assertEqual(calls, [])
+
+    def test_aliasing_outputs_are_rejected_before_preflight(self):
+        calls = []
+        class Client:
+            def global_preflight(self):
+                calls.append(True)
+                return {}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.json"
+            with patch.object(self.collector, "collect_repository_hits", return_value=self.search([])), self.assertRaises(ValueError):
+                self.collector.collect(Client(), ["owner/repo"], self.interval, output=path, manifest_output=path)
+        self.assertEqual(calls, [])
+
+    def test_existing_manifest_is_appended_without_implicit_resume(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+        old = {"run_id": "old", "request_fingerprint": "sha256:other", "collection_status": "complete"}
+        existing = {"schema_version": "2.0.0", "generated_by": {"name": "collector", "revision": "one"}, "records": [old]}
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([self.hit(1)])), patch.object(self.collector, "hydrate_pull_request", return_value=self.hydrated(1)):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval, existing_manifest=existing)
+        self.assertEqual([record["run_id"] for record in run.manifest["records"]], ["old", run.record["run_id"]])
+
+    def test_partial_hydration_is_counted_without_claiming_complete_pr(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+        record = self.hydrated(1)
+        record["hydration_status"] = "partial"
+        record["evidence_snapshot"]["completeness"]["files"] = {"pages_complete": False}
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([self.hit(1)])), patch.object(self.collector, "hydrate_pull_request", return_value=record):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval)
+        repository = run.record["repositories"][0]
+        self.assertEqual(repository["complete_prs"], 0)
+        self.assertEqual(repository["partial_prs"], 1)
+        self.assertEqual(run.exit_code, 3)
+
+    def test_reopened_hit_is_not_selected_or_counted_as_cap_excluded(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([self.hit(1)])), patch.object(self.collector, "hydrate_pull_request", return_value=self.hydrated(1, "open")):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval)
+        self.assertEqual(run.record["repositories"][0]["selected_count"], 0)
+        self.assertEqual(run.record["repositories"][0]["excluded_by_cap"], 0)
+
+    def test_completed_at_is_final_capture_not_run_start(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([])), patch.object(self.collector, "_run_timestamp", side_effect=lambda value: value or "2026-09-06T12:00:10Z"):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval, captured_at="2026-09-06T12:00:00Z")
+        self.assertEqual(run.record["started_at"], "2026-09-06T12:00:00Z")
+        self.assertEqual(run.record["completed_at"], "2026-09-06T12:00:10Z")
+
+    def test_as_of_is_exposed_by_collect_parser(self):
+        args = self.collector.build_parser().parse_args(["collect", "--repo", "owner/repo", "--recent-days", "2", "--as-of", "2026-09-06T12:00:00Z", "--output", "out", "--manifest", "manifest"])
+        self.assertEqual(args.as_of, "2026-09-06T12:00:00Z")
+
+    def test_resume_carries_budget_and_request_events_without_reset(self):
+        collector = self.collector
+        class Client:
+            api_version = "2026-03-10"
+            def __init__(self):
+                self.budget = collector.RequestBudget(20)
+                self.request_events = []
+            def global_preflight(self):
+                self.budget.consume()
+                self.request_events.append({"endpoint": "/user", "status": 200})
+                return {}
+        with patch.object(collector, "collect_repository_hits", return_value=self.search([])):
+            first = collector.collect(Client(), ["owner/repo"], self.interval)
+            resumed = collector.collect(Client(), ["owner/repo"], self.interval, run_id=first.record["run_id"], existing_manifest=first.manifest, existing_corpus=first.corpus)
+        self.assertEqual(resumed.record["request_count"], 2)
+        self.assertEqual(len(resumed.record["request_events"]), 2)
+
+    def test_failed_resume_preserves_completed_prs_and_unvisited_repository_checkpoints(self):
+        collector = self.collector
+        class Client:
+            api_version = "2026-03-10"
+            def __init__(self, fail=False):
+                self.budget = collector.RequestBudget(100)
+                self.fail = fail
+            def global_preflight(self):
+                if self.fail:
+                    raise collector.ApiFailure("temporarily unavailable")
+                return {}
+        search = self.search([self.hit(2), self.hit(1)])
+        with patch.object(collector, "collect_repository_hits", return_value=search), patch.object(collector, "hydrate_pull_request", side_effect=[self.hydrated(2), KeyboardInterrupt()]):
+            first = collector.collect(Client(), ["owner/repo"], self.interval)
+        extra = {"repository": "owner/later", "collection_status": "partial", "safe_leaves": [], "completed_records": [self.hydrated(3)]}
+        first.record["repositories"].append(extra)
+        for fail_global in (True, False):
+            with self.subTest(global_preflight=fail_global), patch.object(collector, "collect_repository_hits", side_effect=ValueError("search unavailable")):
+                resumed = collector.collect(Client(fail_global), ["owner/repo"], self.interval, run_id=first.record["run_id"], existing_manifest=first.manifest, existing_corpus=first.corpus)
+            repos = {repo["repository"]: repo for repo in resumed.record["repositories"]}
+            self.assertEqual(len(repos.get("owner/repo", {}).get("completed_records", [])), 1)
+            self.assertEqual(repos.get("owner/later"), extra)
+
+    def test_core_failure_is_manifested_as_partial_without_fabricated_history(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(20)
+        failed = self.hydrated(1)
+        failed["pull_request"]["updated_at"] = None
+        failed["state_history"] = []
+        failed["evidence_snapshot"]["completeness"]["pull_request_body"] = {"pages_complete": False}
+        with patch.object(self.collector, "collect_repository_hits", return_value=self.search([self.hit(1)])), patch.object(self.collector, "hydrate_pull_request", return_value=failed):
+            run = self.collector.collect(Client(), ["owner/repo"], self.interval)
+        repository = run.record["repositories"][0]
+        self.assertEqual(repository["partial_records"][0]["state_history"], [])
+        self.assertEqual(run.corpus["records"], [])
+
+    def test_safe_leaf_survives_interruption_and_is_not_requested_on_resume(self):
+        collector = self.collector
+        queries = []
+        class Client:
+            api_version = "2026-03-10"
+            budget = collector.RequestBudget(100)
+            interrupted = False
+            def get_json(self, endpoint, params=None):
+                if endpoint.startswith("/repos/"):
+                    return collector.ApiResponse(200, {}, {"node_id": "R_repo", "full_name": "owner/repo"})
+                query = params["q"]
+                queries.append(query)
+                if "00:00:00Z..2026-09-01T23:59:59Z" in query:
+                    payload = {"total_count": 1000, "incomplete_results": False, "items": []}
+                elif "12:00:00Z.." in query and not self.interrupted:
+                    self.interrupted = True
+                    raise KeyboardInterrupt()
+                else:
+                    payload = {"total_count": 0, "incomplete_results": False, "items": []}
+                return collector.ApiResponse(200, {}, payload)
+        client = Client()
+        with tempfile.TemporaryDirectory() as directory:
+            output, manifest = Path(directory) / "corpus.json", Path(directory) / "manifest.json"
+            try:
+                collector.collect(client, ["owner/repo"], self.interval, output=output, manifest_output=manifest)
+            except KeyboardInterrupt:
+                pass
+            self.assertTrue(manifest.exists(), "safe leaf must be checkpointed before later request")
+            saved = json.loads(manifest.read_text())
+            prior_corpus = json.loads(output.read_text())
+            self.assertEqual(len(saved["records"][-1]["repositories"][0]["safe_leaves"]), 1)
+            queries.clear()
+            result = collector.collect(client, ["owner/repo"], self.interval, existing_corpus=prior_corpus, existing_manifest=saved, run_id=saved["records"][-1]["run_id"])
+            self.assertEqual(result.exit_code, 0)
+            self.assertFalse(any("00:00:00Z..2026-09-01T11:59:59Z" in query for query in queries))
+
+    def test_selected_pr_survives_interruption_and_complete_evidence_is_reused(self):
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(100)
+        with tempfile.TemporaryDirectory() as directory:
+            output, manifest = Path(directory) / "corpus.json", Path(directory) / "manifest.json"
+            search = self.search([self.hit(2), self.hit(1)])
+            with patch.object(self.collector, "collect_repository_hits", return_value=search), patch.object(self.collector, "hydrate_pull_request", side_effect=[self.hydrated(2), KeyboardInterrupt()]):
+                try:
+                    self.collector.collect(Client(), ["owner/repo"], self.interval, output=output, manifest_output=manifest)
+                except KeyboardInterrupt:
+                    pass
+            self.assertTrue(output.exists(), "each selected PR must reach disk before next hydration")
+            corpus = json.loads(output.read_text())
+            saved = json.loads(manifest.read_text())
+            self.assertEqual(len(corpus["records"]), 1)
+            hydrated_numbers = []
+            def hydrate(**kwargs):
+                hydrated_numbers.append(kwargs["search_hit"]["number"])
+                return self.hydrated(kwargs["search_hit"]["number"])
+            with patch.object(self.collector, "collect_repository_hits", return_value=search), patch.object(self.collector, "hydrate_pull_request", side_effect=hydrate):
+                result = self.collector.collect(Client(), ["owner/repo"], self.interval, existing_corpus=corpus, existing_manifest=saved, run_id=saved["records"][-1]["run_id"])
+            self.assertEqual(hydrated_numbers, [1])
+            self.assertEqual(len(result.corpus["records"]), 2)
+            self.assertEqual(len(result.manifest["records"]), 1)
+
+    def test_invalid_repository_and_resume_without_manifest_fail_before_preflight(self):
+        calls = []
+        class Client:
+            api_version = "2026-03-10"
+            budget = self.collector.RequestBudget(100)
+            def global_preflight(self):
+                calls.append(True)
+                return {}
+            def get_json(self, endpoint, params=None):
+                return {"total_count": 0, "incomplete_results": False, "items": []}
+        for repositories, kwargs in [(["../user"], {}), (["owner/repo"], {"run_id": "missing"})]:
+            with self.subTest(repositories=repositories, kwargs=kwargs), self.assertRaises(ValueError):
+                self.collector.collect(Client(), repositories, self.interval, **kwargs)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

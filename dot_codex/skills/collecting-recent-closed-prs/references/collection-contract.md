@@ -60,6 +60,14 @@ and API version. Changed inputs fail before network access. Completed leaves
 and complete PR evidence are reusable; partial work needs retry. Preserve the
 previous observation and capture new completion evidence.
 
+Use `--resume-run-id` explicitly with the existing corpus and manifest. Without
+it, collection appends a new run and preserves older runs. For recent-day
+resume, pass the original `--as-of` so the resolved interval does not drift.
+The original request budget includes previous attempts; resume does not reset
+it. An exhausted budget requires a new run with a suitable budget, not a
+changed fingerprint on the old run. Safe-leaf and completed-PR checkpoints
+survive later failures, including a failed resume preflight.
+
 JSON artifacts use UTF-8 and trailing newlines. Atomic replacement uses a
 temporary file beside its destination, preserving the prior file on failed
 replacement. Markdown is rendered from successfully saved JSON and puts a
@@ -86,3 +94,7 @@ If partial identity/core evidence fails its input contract, retain the failure
 evidence and explain that handoff is incomplete. Never fabricate state history
 to satisfy validation. Candidate validation and GitHub writes require their
 own workflow and authorization.
+
+Core evidence that cannot support a valid observation is retained under the
+repository manifest's `partial_records`, outside the analyzer corpus. Failed
+or reclassified candidates are not counted as exclusions caused by the cap.
