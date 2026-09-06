@@ -1793,6 +1793,33 @@ class MergeCorpusTests(unittest.TestCase):
             {"run-one", "run-two"},
         )
 
+    def test_shared_url_cannot_bridge_distinct_repository_node_groups(self):
+        shared_url = "https://github.com/renamed/example/pull/18"
+        records = [
+            self.record(node_id="pr-a", repository_node_id="repo-a", repository="owner/a", number=18, run_id="run-a", body_sha256="1" * 64),
+            self.record(node_id="pr-b", repository_node_id="repo-b", repository="owner/b", number=18, run_id="run-b", body_sha256="2" * 64),
+            self.record(node_id=None, repository_node_id="repo-a", repository="owner/a", number=18, state="unknown", run_id="run-a-unresolved", body_sha256="3" * 64),
+            self.record(node_id=None, repository_node_id="repo-b", repository="owner/b", number=18, state="unknown", run_id="run-b-unresolved", body_sha256="4" * 64),
+        ]
+        for record in records:
+            record["pull_request"]["url"] = shared_url
+
+        merged = self.collector.merge_corpus(None, records)
+
+        self.assertEqual(
+            {record["pull_request_node_id"] for record in merged["records"]},
+            {"pr-a", "pr-b"},
+        )
+        self.assertEqual(len(merged["records"]), 2)
+        observations = {
+            record["pull_request_node_id"]: {
+                item["run_id"] for item in record["sources"][0]["observations"]
+            }
+            for record in merged["records"]
+        }
+        self.assertEqual(observations["pr-a"], {"run-a", "run-a-unresolved"})
+        self.assertEqual(observations["pr-b"], {"run-b", "run-b-unresolved"})
+
     def test_empty_recent_source_gets_complete_generated_observation(self):
         incoming = self.record(
             node_id="pr-empty-source",

@@ -1113,7 +1113,7 @@ def _coalesce_incoming_records(records: list[dict[str, object]]) -> list[dict[st
         number = _record_number(record)
         if repository_node_id is not None and number != 2**63 - 1:
             by_repository_number.setdefault((repository_node_id, number), []).append(index)
-        if node_id is None:
+        if node_id is None and repository_node_id is None:
             url = _record_url_value(record)
             if url is not None:
                 if url in by_unresolved_url:
