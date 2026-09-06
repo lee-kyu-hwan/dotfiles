@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -81,6 +82,37 @@ def valid_review(artifact="plan", round_number=1, verdict="PASS", blockers=None)
         ],
         "required_next_action": None,
     }
+
+
+def valid_revision_check(artifact, round_number, current_digest=VALID_DIGEST):
+    return {
+        "artifact": artifact,
+        "round": round_number,
+        "base_digest": None,
+        "current_digest": current_digest,
+        "spec_digest": None,
+        "cells": [],
+        "empty_cells": 0,
+        "touched_requirements": [],
+        "removed_ids": [],
+        "ripple": [],
+        "notes": {
+            "required": False,
+            "path": None,
+            "section_found": False,
+            "missing_rows": [],
+            "blank_cells": [],
+        },
+        "passed": True,
+    }
+
+
+def write_revision_check(directory, artifact, round_number, current_digest=VALID_DIGEST):
+    return write_json(
+        directory,
+        f"{artifact}-revision-check-{round_number}.json",
+        valid_revision_check(artifact, round_number, current_digest),
+    )
 
 
 def unverified_review(artifact="plan", round_number=1, claim=None):
@@ -216,6 +248,7 @@ class NewStateTests(unittest.TestCase):
                 "artifact_digests",
                 "rounds",
                 "reviews",
+                "revision_checks",
                 "open_finding_ids",
                 "review_validation_retry",
                 "review_unverified_retry",
@@ -248,6 +281,7 @@ class NewStateTests(unittest.TestCase):
         )
         self.assertEqual({"spec": 0, "plan": 0, "code": 0}, state["rounds"])
         self.assertEqual({"spec": [], "plan": [], "code": []}, state["reviews"])
+        self.assertEqual({"spec": [], "plan": []}, state["revision_checks"])
         self.assertEqual(
             {"spec": [], "plan": [], "code": []},
             state["open_finding_ids"],
@@ -667,7 +701,17 @@ class TerminalReportRegistrationTests(unittest.TestCase):
                                 blockers=[f"{artifact.upper()}-LIMIT-{round_number}"],
                             ),
                         )
-                        quality_state.record_review(state, review_path, digest)
+                        revision_check_path = None
+                        if artifact in {"spec", "plan"} and round_number >= 2:
+                            revision_check_path = write_revision_check(
+                                directory, artifact, round_number, digest
+                            )
+                        quality_state.record_review(
+                            state,
+                            review_path,
+                            digest,
+                            revision_check_path=revision_check_path,
+                        )
 
                     report_path = directory / f"{artifact}-report.md"
                     report_path.write_text("report\n", encoding="utf-8")
@@ -695,7 +739,17 @@ class TerminalReportRegistrationTests(unittest.TestCase):
                         blockers=[blocker],
                     ),
                 )
-                quality_state.record_review(state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
 
             report_path = directory / "report.md"
             report_path.write_text("report\n", encoding="utf-8")
@@ -781,7 +835,17 @@ class TerminalReportRegistrationTests(unittest.TestCase):
                         blockers=[f"PLAN-LIMIT-{round_number}"],
                     ),
                 )
-                quality_state.record_review(limit_state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "plan", round_number
+                    )
+                quality_state.record_review(
+                    limit_state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
             limit_retry = write_json(
                 directory, "plan-3.json", valid_review(artifact="plan", round_number=3)
             )
@@ -798,7 +862,17 @@ class TerminalReportRegistrationTests(unittest.TestCase):
                         blockers=["SPEC-RECURRING"],
                     ),
                 )
-                quality_state.record_review(recurring_state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    recurring_state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
             recurring_retry = write_json(
                 directory, "spec-3.json", valid_review(artifact="spec", round_number=3)
             )
@@ -1554,7 +1628,10 @@ class RecordReviewUnverifiedTests(unittest.TestCase):
             }
             path = write_json(directory, "round-two.json", valid_review("spec", 2))
 
-            result = quality_state.record_review(state, path, "b" * 64)
+            revision_check = write_revision_check(directory, "spec", 2, "b" * 64)
+            result = quality_state.record_review(
+                state, path, "b" * 64, revision_check_path=revision_check
+            )
 
             self.assertEqual(2, result["rounds"]["spec"])
             self.assertIsNone(result["review_unverified_retry"])
@@ -1570,7 +1647,17 @@ class RoundLimitTests(unittest.TestCase):
                     f"plan-{round_number}.json",
                     valid_review(artifact="plan", round_number=round_number),
                 )
-                quality_state.record_review(state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "plan", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
 
             round_three = write_json(
                 directory,
@@ -1590,7 +1677,17 @@ class RoundLimitTests(unittest.TestCase):
                     f"spec-{round_number}.json",
                     valid_review(artifact="spec", round_number=round_number),
                 )
-                quality_state.record_review(state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
 
             round_four = write_json(
                 directory,
@@ -1637,7 +1734,17 @@ class RoundLimitTests(unittest.TestCase):
                         verdict="REVISE",
                     ),
                 )
-                quality_state.record_review(state, review_path, VALID_DIGEST)
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
             final = write_json(
                 directory,
                 "spec-3.json",
@@ -1649,7 +1756,13 @@ class RoundLimitTests(unittest.TestCase):
                 ),
             )
 
-            result = quality_state.record_review(state, final, VALID_DIGEST)
+            final_revision_check = write_revision_check(directory, "spec", 3)
+            result = quality_state.record_review(
+                state,
+                final,
+                VALID_DIGEST,
+                revision_check_path=final_revision_check,
+            )
 
             self.assertEqual("NEEDS_REDESIGN", result["stage"])
             self.assertTrue(result["status_reason"].startswith("REVIEW_LIMIT_EXHAUSTED"))
@@ -1718,7 +1831,10 @@ class RecurringBlockerTests(unittest.TestCase):
                 ),
             )
 
-            result = quality_state.record_review(state, second, VALID_DIGEST)
+            revision_check = write_revision_check(directory, "plan", 2)
+            result = quality_state.record_review(
+                state, second, VALID_DIGEST, revision_check_path=revision_check
+            )
 
             self.assertEqual("NEEDS_REDESIGN", result["stage"])
             self.assertIn("PLAN-X", result["status_reason"])
@@ -2567,6 +2683,248 @@ class ResumeSelectionTests(unittest.TestCase):
             )
 
 
+class RevisionCheckStateTests(unittest.TestCase):
+    def test_record_review_writes_snapshot_with_reviewed_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for artifact_kind, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(artifact=artifact_kind):
+                    artifact = directory / f"{artifact_kind}.md"
+                    artifact.write_text(f"{artifact_kind} r1\n", encoding="utf-8")
+                    state = state_at(stage)
+                    quality_state.set_artifact(state, artifact_kind, artifact)
+                    digest = quality_state._file_digest(artifact)
+                    review = write_json(directory, f"{artifact_kind}-review.json", valid_review(artifact_kind))
+                    snapshot_dir = directory / artifact_kind / "snapshots"
+                    quality_state.record_review(state, review, digest, snapshot_dir=snapshot_dir)
+                    snapshot = snapshot_dir / f"{artifact_kind}-r1.md"
+                    self.assertEqual(digest, quality_state._file_digest(snapshot))
+                    self.assertEqual(digest, state["reviews"][artifact_kind][-1]["artifact_digest"])
+            for artifact_kind, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW"), ("code", "CODE_REVIEW")):
+                with self.subTest(no_snapshot=artifact_kind):
+                    state = state_at(stage)
+                    review = write_json(directory, f"{artifact_kind}-none.json", valid_review(artifact_kind))
+                    quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=None)
+                    self.assertFalse((directory / f"{artifact_kind}-r1.md").exists())
+            state = state_at("SPEC_REVIEW")
+            review = write_json(directory, "null-artifact.json", valid_review("spec"))
+            quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=directory / "null-artifact")
+            self.assertFalse((directory / "null-artifact").exists())
+            state = state_at("CODE_REVIEW")
+            review = write_json(directory, "code-snapshot.json", valid_review("code"))
+            quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=directory / "code-snapshot")
+            self.assertFalse((directory / "code-snapshot").exists())
+            state = state_at("SPEC_REVIEW")
+            review = write_json(directory, "three-positional.json", valid_review("spec"))
+            quality_state.record_review(state, review, VALID_DIGEST)
+            self.assertEqual(1, state["rounds"]["spec"])
+
+    def test_record_review_round_two_requires_revision_check(self):
+        for artifact, stage, round_number in (("spec", "SPEC_REVIEW", 2), ("spec", "SPEC_REVIEW", 3), ("plan", "PLAN_REVIEW", 2)):
+            with self.subTest(artifact=artifact, round_number=round_number):
+                state = state_at(stage)
+                state["rounds"][artifact] = round_number - 1
+                review = valid_review(artifact, round_number)
+                with tempfile.TemporaryDirectory() as directory:
+                    review_path = write_json(directory, "review.json", review)
+                    before = deepcopy(state)
+                    with self.assertRaisesRegex(StateError, rf"--revision-check.*{round_number}"):
+                        quality_state.record_review(state, review_path, VALID_DIGEST)
+                self.assertEqual(before, state)
+
+    def test_record_review_rejects_mismatched_revision_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            valid = write_revision_check(directory, "plan", 2)
+            cases = {
+                "missing": directory / "missing.json",
+                "artifact": write_json(directory, "artifact.json", valid_revision_check("spec", 2)),
+                "round": write_json(directory, "round.json", valid_revision_check("plan", 1)),
+                "digest": write_json(directory, "digest.json", valid_revision_check("plan", 2, "b" * 64)),
+                "passed": write_json(directory, "passed.json", {**valid_revision_check("plan", 2), "passed": False}),
+                "schema": write_json(directory, "schema.json", {**valid_revision_check("plan", 2), "extra": True}),
+            }
+            for case, revision_check in cases.items():
+                with self.subTest(case=case):
+                    state = state_at("PLAN_REVIEW")
+                    state["rounds"]["plan"] = 1
+                    review = write_json(directory, f"review-{case}.json", valid_review("plan", 2))
+                    before = deepcopy(state)
+                    with self.assertRaises(StateError):
+                        quality_state.record_review(
+                            state, review, VALID_DIGEST,
+                            revision_check_path=revision_check,
+                        )
+                    self.assertEqual(before, state)
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = 1
+            mismatched_review = write_json(directory, "review-mismatched-round.json", valid_review("plan", 1))
+            with self.assertRaisesRegex(StateError, r"review round must be 2"):
+                quality_state.record_review(state, mismatched_review, VALID_DIGEST)
+            self.assertTrue(valid.is_file())
+            invalid_review = valid_review("plan", 2)
+            invalid_review.pop("verdict")
+            invalid_path = write_json(directory, "review-schema-invalid.json", invalid_review)
+            before = deepcopy(state)
+            with self.assertRaisesRegex(StateError, r"requires --revision-check for plan round 2"):
+                quality_state.record_review(state, invalid_path, VALID_DIGEST)
+            self.assertEqual(before, state)
+
+    def test_record_review_stores_revision_check_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(artifact=artifact):
+                    state = state_at(stage)
+                    revision_check = write_revision_check(directory, artifact, 1)
+                    review = write_json(directory, f"{artifact}-review.json", valid_review(artifact, 1))
+                    quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=revision_check)
+                    self.assertEqual(
+                        {"round": 1, "path": str(revision_check.resolve()), "current_digest": VALID_DIGEST, "base_digest": None},
+                        state["revision_checks"][artifact][-1],
+                    )
+            state = state_at("PLAN_REVIEW")
+            rejected = write_json(
+                directory, "rejected.json", {**valid_revision_check("plan", 1), "passed": False}
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=rejected)
+
+    def test_revision_check_option_rejected_for_code_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+            review = write_json(directory, "review.json", valid_review("code", 1))
+            revision_check = write_revision_check(directory, "spec", 1)
+            with self.assertRaises(StateError):
+                quality_state.record_review(
+                    state, review, VALID_DIGEST, revision_check_path=revision_check
+                )
+
+    def test_legacy_state_without_revision_checks_is_exempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            fixture = Path(__file__).parent / "fixtures" / "revision-check" / "state-legacy-without-revision-checks.json"
+            legacy = json.loads(fixture.read_text(encoding="utf-8"))
+            self.assertNotIn("revision_checks", legacy)
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(exempt=artifact):
+                    state = state_at(stage)
+                    state.pop("revision_checks")
+                    state["rounds"].update(legacy["rounds"])
+                    state["reviews"].update(legacy["reviews"])
+                    review = write_json(directory, f"{artifact}-review.json", valid_review(artifact, 2))
+                    quality_state.record_review(state, review, VALID_DIGEST)
+                    self.assertNotIn("revision_checks", state)
+
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(create_key=artifact):
+                    state = state_at(stage)
+                    state.pop("revision_checks")
+                    revision_check = write_revision_check(directory, artifact, 1)
+                    review = write_json(directory, f"{artifact}-review-r1.json", valid_review(artifact, 1))
+                    quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=revision_check)
+                    self.assertEqual([artifact], [key for key, entries in state["revision_checks"].items() if entries])
+
+    def test_new_state_has_empty_revision_checks_and_load_does_not_inject(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CLASSIFIED")
+            self.assertEqual({"spec": [], "plan": []}, state["revision_checks"])
+            state.pop("revision_checks")
+            path = write_json(directory, "legacy.json", state)
+            loaded = quality_state.load_state(path)
+            self.assertNotIn("revision_checks", loaded)
+            self.assertEqual(1, loaded["schema_version"])
+
+    def test_snapshot_write_failure_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "spec.md"
+            artifact.write_text("spec\n", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            quality_state.set_artifact(state, "spec", artifact)
+            digest = quality_state._file_digest(artifact)
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            blocked = directory / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            before = deepcopy(state)
+            with self.assertRaises(quality_state.FilesystemError):
+                quality_state.record_review(state, review, digest, snapshot_dir=blocked)
+            self.assertEqual(before, state)
+            self.assertFalse((blocked / "spec-r1.md").exists())
+            self.assertFalse(any(path.name.startswith("tmp") for path in directory.iterdir()))
+            snapshot_dir = directory / "snapshots"
+            snapshot_dir.mkdir()
+            r1 = snapshot_dir / "spec-r1.md"
+            r1.write_text("r1\n", encoding="utf-8")
+            (snapshot_dir / "spec-r2.md").write_text("unrecorded r2\n", encoding="utf-8")
+            state_path = write_json(directory, "state.json", {
+                "rounds": {"spec": 1},
+                "reviews": {"spec": [{"artifact_digest": quality_state._file_digest(r1)}]},
+            })
+            current = directory / "current.md"
+            current.write_text((Path(__file__).parent / "fixtures" / "revision-check" / "spec-complete.md").read_text(encoding="utf-8"), encoding="utf-8")
+            output = directory / "out.json"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_DIR / "revision_check.py"), "--artifact", "spec", "--current", str(current), "--state", str(state_path), "--out", str(output)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(2, result.returncode, result.stderr)
+            self.assertEqual(quality_state._file_digest(r1), json.loads(output.read_text(encoding="utf-8"))["base_digest"])
+
+
+class RevisionCheckCLITests(unittest.TestCase):
+    def test_cli_record_review_accepts_revision_check_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "plan.md"
+            artifact.write_text("plan\n", encoding="utf-8")
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state_path = directory / "state.json"
+            quality_state.save_state(state_path, state)
+            digest = quality_state._file_digest(artifact)
+            review = write_json(directory, "review.json", valid_review("plan", 1))
+            revision_check = write_revision_check(directory, "plan", 1, digest)
+
+            with redirect_stdout(io.StringIO()):
+                result = quality_state.main([
+                    "record-review", "--state", str(state_path), "--review", str(review),
+                    "--artifact-digest", digest, "--revision-check", str(revision_check),
+                ])
+
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(0, result)
+            self.assertEqual(1, len(persisted["revision_checks"]["plan"]))
+            self.assertTrue((directory / "snapshots" / "plan-r1.md").is_file())
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state_path = directory / "forwarded-state.json"
+            quality_state.save_state(state_path, state)
+            with patch.object(quality_state, "record_review", side_effect=lambda supplied, *_args, **_kwargs: supplied) as recorded:
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, quality_state.main([
+                        "record-review", "--state", str(state_path), "--review", str(review),
+                        "--artifact-digest", digest, "--revision-check", str(revision_check),
+                    ]))
+            self.assertEqual(str(revision_check), str(recorded.call_args.kwargs["revision_check_path"]))
+            self.assertEqual((state_path.parent / "snapshots").resolve(), recorded.call_args.kwargs["snapshot_dir"])
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state["rounds"]["plan"] = 1
+            state_path = directory / "round-two-state.json"
+            quality_state.save_state(state_path, state)
+            round_two_review = write_json(directory, "round-two-review.json", valid_review("plan", 2))
+            errors = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(errors):
+                result = quality_state.main([
+                    "record-review", "--state", str(state_path), "--review", str(round_two_review),
+                    "--artifact-digest", digest,
+                ])
+            self.assertNotEqual(0, result)
+            self.assertIn("--revision-check", errors.getvalue())
+
+
 class CLITests(unittest.TestCase):
     def invoke_main(self, args):
         output = io.StringIO()
@@ -2763,6 +3121,8 @@ class CLITests(unittest.TestCase):
                 str(second_path),
                 "--artifact-digest",
                 VALID_DIGEST,
+                "--revision-check",
+                str(write_revision_check(directory, "plan", 2)),
             ])
 
             persisted = quality_state.load_state(state_path)
@@ -2818,7 +3178,10 @@ class CLITests(unittest.TestCase):
                 self.assert_cli_success([
                     "record-review", "--state", str(state_path), "--review", str(review_path),
                     "--artifact-digest", digest,
-                ])
+                ] + (
+                    ["--revision-check", str(write_revision_check(directory, "spec", round_number, digest))]
+                    if round_number >= 2 else []
+                ))
 
             self.assert_cli_success([
                 "set-artifact", "--state", str(state_path), "--kind", "report",
@@ -2875,7 +3238,10 @@ class CLITests(unittest.TestCase):
                 self.assert_cli_success([
                     "record-review", "--state", str(state_path), "--review", str(review_path),
                     "--artifact-digest", digest,
-                ])
+                ] + (
+                    ["--revision-check", str(write_revision_check(directory, "spec", round_number, digest))]
+                    if round_number >= 2 else []
+                ))
 
             self.assert_cli_success([
                 "set-artifact", "--state", str(state_path), "--kind", "report",

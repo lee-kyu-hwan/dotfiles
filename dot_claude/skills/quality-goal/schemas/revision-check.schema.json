@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "round", "base_digest", "current_digest", "spec_digest", "cells", "empty_cells", "touched_requirements", "removed_ids", "ripple", "notes", "passed"],
+  "properties": {
+    "artifact": {"type": "string", "enum": ["spec", "plan"]},
+    "round": {"type": ["integer", "null"], "minimum": 1},
+    "base_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "current_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "spec_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "key", "status", "detail", "line"],
+        "properties": {
+          "kind": {"type": "string"},
+          "key": {"type": "string"},
+          "status": {"type": "string", "enum": ["ok", "empty"]},
+          "detail": {"type": "string"},
+          "line": {"type": ["integer", "null"]}
+        }
+      }
+    },
+    "empty_cells": {"type": "integer"},
+    "touched_requirements": {"type": "array", "items": {"type": "string"}},
+    "removed_ids": {"type": "array", "items": {"type": "string"}},
+    "ripple": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["requirement", "acceptance_criteria", "plan_rows", "tasks", "commands"],
+        "properties": {
+          "requirement": {"type": "string"},
+          "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+          "plan_rows": {"type": ["array", "null"], "items": {"type": "integer"}},
+          "tasks": {"type": ["array", "null"], "items": {"type": "string"}},
+          "commands": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "notes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "path", "section_found", "missing_rows", "blank_cells"],
+      "properties": {
+        "required": {"type": "boolean"},
+        "path": {"type": ["string", "null"]},
+        "section_found": {"type": "boolean"},
+        "missing_rows": {"type": "array", "items": {"type": "string"}},
+        "blank_cells": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "passed": {"type": "boolean"}
+  }
+}

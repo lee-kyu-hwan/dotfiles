@@ -8,7 +8,7 @@ REFERENCE_DIR = Path(__file__).resolve().parent.parent / "references"
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from validate_review import REQUIRED_CHECKS  # noqa: E402
+from validate_review import REQUIRED_CHECKS, validate_revision_check  # noqa: E402
 
 
 def read_reference(name):
@@ -525,6 +525,216 @@ class TemplateContentContractTests(unittest.TestCase):
         self.assertRegex(lower, r"every.{0,100}executed command.{0,160}exit code.{0,160}(?:concise )?output evidence")
 
 
+class RevisionCheckContentContractTests(unittest.TestCase):
+    def test_revision_check_policy_contract(self):
+        text = read_reference("revision-check-policy.md")
+        spec = (
+            find_repo_root(Path(__file__).resolve())
+            / "docs/development/2026-09-06-61-quality-goal-revision-regression-check/spec.md"
+        ).read_text(encoding="utf-8")
+        for token in (
+            "R<n>.<m>", "AC-<n>", "D<n>", "T<n>", "CMD-<n>",
+            "R→추적행", "R→AC", "추적행 AC 존재",
+            "추적행→R", "R 수=추적 행 수", "AC→R", "AC→판정수단",
+            "AC→CMD 존재", "AC 번호 연속", "중복 정의", "참조 무결성",
+            "문법 미충족", "Spec AC→Plan 추적행", "Plan 추적행→Spec AC",
+            "AC→태스크", "태스크 존재", "태스크 대상 AC→추적행",
+            "추적행→태스크 대상 AC", "AC 등장 행에 판정수단 동반",
+            "추적행 CMD 존재", "파급표", "자체 개정", "치환 없음",
+            "revision_checks", "record-review", "Non-goal 2", "Non-goal 4",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+        self.assertIn("| 요구사항 | 해소 finding | 함께 바뀐 항목 | 상호작용 판정 | 치환 근거 |", text)
+        self.assertRegex(
+            text,
+            r"`함께 바뀐 항목` 셋째 열에서 `ripple\[\]\.acceptance_criteria` 의 각 AC ID.*"
+            r"바로 뒤 괄호가 `일치`/`모순`",
+        )
+        self.assertIn("빠진 AC 는 `<R>/<AC>`, 토큰 없는 AC 는 `<R>/<AC>/판정`", text)
+        for sentence in (
+            "Exit `0`: no empty cells and complete required notes.",
+            "Exit `1`: an empty cell, missing note row, blank note cell, or missing required note section.",
+            "Exit `2`: an unreadable input, malformed state, missing snapshot, or snapshot digest mismatch.",
+            "`요구사항` names the touched requirement.",
+            "`해소 finding` records the finding resolved.",
+            "`상호작용 판정` states in one sentence",
+            "`치환 근거` records why an earlier resolution was replaced; use `자체 개정` and `치환 없음`",
+            "Round 1 has no base snapshot and is exempt from revision notes.",
+            "Later rounds use `snapshots/<artifact>-r<N>.md` as the base",
+            "legacy state without the `revision_checks` key is exempt.",
+            "`record-review` for Spec or Plan round 2+ requires a revision-check JSON",
+        ):
+            self.assertIn(sentence, text)
+        r14 = spec.split("  - (a) **정의 문법**", 1)[1].split("- **R1.5**", 1)[0]
+        for paragraph in r14.splitlines():
+            if paragraph.strip():
+                self.assertIn(paragraph.strip(), text)
+        risk_table = spec.split("| 사례 | 성격 | 기계 포착 | 칸 종류 또는 미포착 사유 |", 1)[1].split("\n\n- 위험:", 1)[0]
+        self.assertIn("| 사례 | 성격 | 기계 포착 | 칸 종류 또는 미포착 사유 |" + risk_table, text)
+
+    def test_maintenance_doc_covers_revision_check(self):
+        text = (REFERENCE_DIR.parent.parent.parent.parent / "docs" / "quality-goal-maintenance.md").read_text(encoding="utf-8")
+        section = text.split("## 개정 후 자기 회귀 점검", 1)[1]
+        self.assertIn("revision_check.py --artifact", section)
+        self.assertIn("snapshots/", section)
+        self.assertIn("revision_checks", section)
+        self.assertRegex(section, r"(?m)^python3 .*revision_check\.py --artifact\b")
+
+    def test_skill_revision_check_procedure_contract(self):
+        text = QualityGoalSkillContentTests().read_skill()
+        for section in (text.split("### Spec", 1)[1].split("### Plan", 1)[0], text.split("### Plan", 1)[1].split("### Approval", 1)[0]):
+            for token in ("set-artifact", "revision_check.py", "--state", "record-review --revision-check", "revision-notes.md", "exit code 0"):
+                self.assertIn(token, section)
+            self.assertIn("round-2-or-later", section)
+            self.assertRegex(section, r"reviewer\s+evidence")
+            self.assertRegex(
+                section,
+                r"Repeat (?:without consuming a review round )?until exit code 0",
+            )
+            self.assertLess(section.index("set-artifact"), section.index("revision_check.py"))
+            self.assertLess(section.index("revision_check.py"), section.index("record-review --revision-check"))
+            self.assertLess(section.index("exit code 0"), section.index("record-review --revision-check"))
+
+    def test_skill_lists_revision_check_supporting_paths(self):
+        text = QualityGoalSkillContentTests().read_skill()
+        for path in (
+            "${CLAUDE_SKILL_DIR}/scripts/revision_check.py",
+            "${CLAUDE_SKILL_DIR}/references/revision-check-policy.md",
+            "${CLAUDE_SKILL_DIR}/schemas/revision-check.schema.json",
+        ):
+            self.assertIn(path, text)
+
+    def test_skill_version_is_major_bumped(self):
+        frontmatter, _ = parse_yaml_frontmatter(QualityGoalSkillContentTests().read_skill())
+        self.assertEqual("5.0.0", frontmatter["version"])
+
+    def test_skill_names_identifier_grammar_for_authors(self):
+        text = QualityGoalSkillContentTests().read_skill()
+        for section in (text.split("### Spec", 1)[1].split("### Plan", 1)[0], text.split("### Plan", 1)[1].split("### Approval", 1)[0]):
+            lines = section.splitlines()
+            start = next(index for index, line in enumerate(lines) if "references/revision-check-policy.md" in line)
+            instruction = "\n".join(lines[start:start + 3])
+            self.assertRegex(instruction, r"(?:Drafts|Plan drafts) follow.*identifier\s+grammar")
+            for token in ("- **R<n>.<m>**", "- **AC-<n>**", "[실행]", "[문서]", "추적표", "판정 명령 표", "### T<n>.", "대상 AC:"):
+                self.assertIn(token, instruction)
+
+    def test_round_limits_required_checks_threshold_unchanged(self):
+        """Spec AC-46 의 '세 루브릭' 문언은 code-rubric 에 대해 사실과 다르며, 판정 의도(임계 85·Pass gate 불변)로 구현한다(Plan deviation, 보고서 기록)."""
+        import quality_state
+        import validate_review
+
+        self.assertEqual({"spec": 3, "plan": 2, "code": 3}, quality_state.ROUND_LIMITS)
+        self.assertEqual(85, validate_review.SCORE_THRESHOLD)
+        self.assertEqual({"spec", "plan", "code"}, set(validate_review.REQUIRED_CHECKS))
+
+        for name in ("spec-rubric.md", "plan-rubric.md"):
+            pass_gate = read_reference(name).split("## Pass gate", 1)[1].split("\n## ", 1)[0]
+            self.assertIn("85", pass_gate)
+
+        code_pass_gate = read_reference("code-rubric.md").split("## Pass gate", 1)[1].split("\n## ", 1)[0]
+        self.assertNotIn("85", code_pass_gate)
+        for key in (
+            "required_commands_passed",
+            "acceptance_criteria_met",
+            "unrelated_changes_absent",
+            "documentation_current",
+        ):
+            self.assertIn(f"`{key}`", code_pass_gate)
+
+    def test_fixtures_cover_each_cell_kind(self):
+        fixture_dir = Path(__file__).parent / "fixtures" / "revision-check"
+        revision_source = (Path(__file__).parent / "test_revision_check.py").read_text(encoding="utf-8")
+        quality_state_source = (Path(__file__).parent / "test_quality_state.py").read_text(encoding="utf-8")
+        content_source = (Path(__file__).parent / "test_content_contracts.py").read_text(encoding="utf-8")
+        for name in ("spec-complete.md", "plan-complete.md", "plan-plan06-shape.md", "spec-revision-notes-round2.md", "spec-revision-notes-no-round2.md"):
+            self.assertTrue((fixture_dir / name).is_file())
+            self.assertIn(name, revision_source)
+        spec_fixture = (fixture_dir / "spec-complete.md").read_text(encoding="utf-8")
+        plan_fixture = (fixture_dir / "plan-complete.md").read_text(encoding="utf-8")
+        plan06_fixture = (fixture_dir / "plan-plan06-shape.md").read_text(encoding="utf-8")
+        self.assertEqual(4, len(re.findall(r"(?m)^- \*\*R\d+\.\d+\*\*", spec_fixture)))
+        self.assertEqual(8, len(re.findall(r"(?m)^- \*\*AC-\d+\*\*", spec_fixture)))
+        self.assertEqual(2, len(re.findall(r"(?m)^### D\d+\.", spec_fixture)))
+        self.assertEqual(4, len(re.findall(r"(?m)^\| R\d+\.\d+ \|", spec_fixture)))
+        self.assertEqual(3, len(re.findall(r"(?m)^### T\d+\.", plan_fixture)))
+        self.assertIn("| CMD-1 |", spec_fixture)
+        self.assertIn("| CMD-2 |", spec_fixture)
+        self.assertIn("| CMD-1 |", plan_fixture)
+        self.assertIn("| command | CMD-2 |", plan_fixture)
+        self.assertIn("| AC-1 | T1 | [문서] `spec.md` § Test strategy |", plan06_fixture)
+        self.assertIn("AC-1 `docs/quality-goal-maintenance.md`", plan06_fixture)
+        self.assertRegex(plan06_fixture, r"(?m)^.*spec\.md.*$")
+        for name in (
+            "test_stdout_prints_ripple_and_empty_cell_tables", "test_base_snapshot_located_and_digest_checked",
+            "test_round_one_has_no_base_and_no_notes_requirement", "test_touched_requirements_from_diff_spec",
+            "test_touched_requirements_from_diff_plan", "test_ripple_row_per_touched_requirement_with_empty_marking",
+            "test_notes_section_required_from_round_two", "test_notes_table_header_and_row_coverage",
+            "test_notes_blank_cell_is_empty", "test_notes_failure_sets_passed_false_and_exit_one", "test_standalone_base_mode",
+        ):
+            self.assertIn(f"def {name}", revision_source)
+        spec = (
+            find_repo_root(Path(__file__).resolve())
+            / "docs/development/2026-09-06-61-quality-goal-revision-regression-check/spec.md"
+        ).read_text(encoding="utf-8")
+        ac_tests = {
+            int(number): name
+            for number, name in re.findall(r"^- \*\*AC-(\d+)\*\*.*?CMD-2 `?(test_\w+)", spec, re.MULTILINE)
+        }
+        placements = (
+            (set(range(1, 27)) | {48, 49, 50, 52}, revision_source),
+            (set(range(27, 35)) | {53}, quality_state_source),
+            (set(range(35, 41)) | {46, 47, 51, 54}, content_source),
+        )
+        for numbers, source in placements:
+            for number in numbers:
+                self.assertIn(f"def {ac_tests[number]}", source, number)
+
+    def test_round_two_legacy_tests_were_updated_not_renamed(self):
+        source = (Path(__file__).parent / "test_quality_state.py").read_text(encoding="utf-8")
+        expected = {
+            "test_report_registers_after_review_limit_exhausted_auto_transition",
+            "test_report_registers_after_recurring_blocking_finding_auto_transition",
+            "test_record_review_is_rejected_after_each_auto_transition",
+            "test_stale_unverified_retry_does_not_bind_normal_next_round_and_is_cleared",
+            "test_plan_round_three_is_rejected_after_two_recorded_rounds",
+            "test_spec_round_four_is_rejected_after_three_recorded_rounds",
+            "test_nonpassing_final_spec_round_enters_needs_redesign",
+            "test_repeated_stable_blocker_enters_needs_redesign_with_the_finding_id",
+            "test_cli_record_review_round_two_uses_state_held_prior_blockers",
+            "test_cli_registers_report_after_limit_exhausted_transition",
+            "test_cli_registers_report_after_recurring_finding_transition",
+        }
+        bodies = {
+            match.group(1): match.group(2)
+            for match in re.finditer(
+                r"^    def (test_\w+)\(self\):(.*?)(?=^    def |^class |\Z)",
+                source,
+                re.MULTILINE | re.DOTALL,
+            )
+        }
+        found = {
+            name for name, body in bodies.items()
+            if re.search(r'(?<!_unverified)record_review\(|"record-review"', body)
+            and re.search(
+                r'round_number=[23]|valid_review\("(spec|plan)", [23]|for round_number in \(1, 2|1, 2, 3\)|range\(1, limit \+ 1\)',
+                body,
+            )
+            and 'valid_review("code"' not in body
+            and 'rounds["plan"] == 0' not in body
+        }
+        self.assertTrue(expected <= found)
+        for name in expected:
+            body = bodies[name]
+            self.assertTrue(
+                "revision_check_path=" in body
+                or "--revision-check" in body
+                or "state-legacy-without-revision-checks.json" in body,
+                name,
+            )
+        self.assertTrue(expected <= set(bodies))
+
+
 class CodexResultSchemaContractTests(unittest.TestCase):
     SCHEMA_PATH = REFERENCE_DIR.parent / "schemas" / "codex-result.schema.json"
 
@@ -582,6 +792,71 @@ class CodexResultSchemaContractTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertEqual(schema["properties"][field]["type"], "array")
                 self.assertEqual(schema["properties"][field]["items"]["type"], "string")
+
+
+class RevisionCheckSchemaContractTests(unittest.TestCase):
+    SCHEMA_PATH = REFERENCE_DIR.parent / "schemas" / "revision-check.schema.json"
+
+    def test_revision_check_schema_contract(self):
+        import json
+
+        schema = json.loads(self.SCHEMA_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(schema["type"], "object")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "artifact", "round", "base_digest", "current_digest", "spec_digest",
+                "cells", "empty_cells", "touched_requirements", "removed_ids", "ripple",
+                "notes", "passed",
+            },
+        )
+        self.assertEqual(set(schema["properties"]["artifact"]["enum"]), {"spec", "plan"})
+        self.assertEqual(schema["properties"]["empty_cells"]["type"], "integer")
+        self.assertEqual(schema["properties"]["cells"]["items"]["type"], "object")
+        self.assertFalse(schema["properties"]["cells"]["items"]["additionalProperties"])
+        self.assertEqual(
+            set(schema["properties"]["cells"]["items"]["required"]),
+            {"kind", "key", "status", "detail", "line"},
+        )
+        self.assertEqual(
+            schema["properties"]["cells"]["items"]["properties"]["line"]["type"],
+            ["integer", "null"],
+        )
+        self.assertEqual(
+            set(schema["properties"]["cells"]["items"]["properties"]["status"]["enum"]),
+            {"ok", "empty"},
+        )
+        self.assertFalse(schema["properties"]["ripple"]["items"]["additionalProperties"])
+        self.assertEqual(
+            set(schema["properties"]["ripple"]["items"]["required"]),
+            {"requirement", "acceptance_criteria", "plan_rows", "tasks", "commands"},
+        )
+        self.assertFalse(schema["properties"]["notes"]["additionalProperties"])
+        self.assertEqual(
+            set(schema["properties"]["notes"]["required"]),
+            {"required", "path", "section_found", "missing_rows", "blank_cells"},
+        )
+        payload = {
+            "artifact": "spec", "round": 1, "base_digest": None,
+            "current_digest": "a" * 64, "spec_digest": None,
+            "cells": [{"kind": "kind", "key": "key", "status": "ok", "detail": "detail", "line": 1}],
+            "empty_cells": 0, "touched_requirements": [], "removed_ids": [],
+            "ripple": [{"requirement": "R1.1", "acceptance_criteria": ["AC-1"], "plan_rows": None, "tasks": None, "commands": ["CMD-1"]}],
+            "notes": {"required": False, "path": None, "section_found": False, "missing_rows": [], "blank_cells": []},
+            "passed": True,
+        }
+        variants = (
+            {**payload, "cells": [{"kind": "kind", "key": "key", "status": "ok", "line": 1}]},
+            {**payload, "cells": [{**payload["cells"][0], "detail": 1}]},
+            {**payload, "cells": [{**payload["cells"][0], "line": "1"}]},
+            {**payload, "empty_cells": "0"},
+            {**payload, "ripple": [{**payload["ripple"][0], "commands": "CMD-1"}]},
+            {**payload, "notes": {**payload["notes"], "section_found": "false"}},
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertTrue(validate_revision_check(variant))
 
 
 def find_repo_root(start):
@@ -794,7 +1069,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "4.1.0",
+            "version": "5.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",

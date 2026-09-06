@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 4.1.0
+version: 5.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -66,6 +66,9 @@ each one when its stage is reached:
 - ${CLAUDE_SKILL_DIR}/schemas/codex-result.schema.json
 - ${CLAUDE_SKILL_DIR}/scripts/quality_state.py
 - ${CLAUDE_SKILL_DIR}/scripts/validate_review.py
+- ${CLAUDE_SKILL_DIR}/scripts/revision_check.py
+- ${CLAUDE_SKILL_DIR}/references/revision-check-policy.md
+- ${CLAUDE_SKILL_DIR}/schemas/revision-check.schema.json
 - the quality-reviewer agent at ${CLAUDE_SKILL_DIR}/../../agents/quality-reviewer.md
 
 ## Preflight & resume
@@ -152,6 +155,15 @@ review gate cannot be skipped by transitioning straight to SPEC_PASSED.
 
 Light creates no durable Spec and skips SPEC_REVIEW.
 
+Drafts follow `references/revision-check-policy.md` identifier grammar:
+`- **R<n>.<m>**`, `- **AC-<n>**`, `[실행]`, `[문서]`, 추적표, 판정 명령 표,
+`### T<n>.`, and `대상 AC:`. After a round-2-or-later revision, write
+`spec-revision-notes.md`, re-run `set-artifact`, then run
+`revision_check.py --artifact spec --current <absolute artifact> --state <state.json>`.
+Use `python3 ${CLAUDE_SKILL_DIR}/scripts/revision_check.py --artifact spec --current <artifacts.spec absolute path> --state <project_root>/.claude/quality-state/<task-id>/state.json --out <same directory>/revision-check-spec-r<round>.json`.
+Repeat without consuming a review round until exit code 0, include the check
+JSON and notes path in reviewer evidence, and use `record-review --revision-check`.
+
 ### Plan
 
 For standard and strict, draft Plan from templates/plan.md under
@@ -192,6 +204,15 @@ docs/development/YYYY-MM-DD-<slug>/ with a deterministic numeric suffix on
 collision, such as -2 or -3. Standard and strict render spec.md, plan.md, and
 report.md there from the three templates. Light creates only report.md in the
 same corresponding directory.
+
+Plan drafts follow the same `references/revision-check-policy.md` identifier
+grammar: `- **R<n>.<m>**`, `- **AC-<n>**`, `[실행]`, `[문서]`, 추적표, 판정 명령 표,
+`### T<n>.`, and `대상 AC:`. After each round-2-or-later revision,
+write `plan-revision-notes.md`, re-run `set-artifact`, then run
+`revision_check.py --artifact plan --current <absolute artifact> --spec <absolute spec> --state <state.json>`.
+Use `python3 ${CLAUDE_SKILL_DIR}/scripts/revision_check.py --artifact plan --current <artifacts.plan absolute path> --spec <artifacts.spec absolute path> --state <project_root>/.claude/quality-state/<task-id>/state.json --out <same directory>/revision-check-plan-r<round>.json`.
+Repeat until exit code 0, attach the check JSON and notes path as reviewer
+evidence, and call `record-review --revision-check`.
 
 ### Approval
 
