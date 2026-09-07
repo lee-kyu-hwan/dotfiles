@@ -9,8 +9,13 @@
 | Codex light+standard | gpt-5.6-terra | high |
 | Codex strict | gpt-5.6-sol | high |
 | Bounded redesign only | gpt-5.6-sol | xhigh |
+| Spec author (standard) | gpt-5.6-terra | high |
+| Spec author (strict) | gpt-5.6-sol | high |
+| readiness reviewer (fresh) | gpt-5.6-sol | high |
 
 The Sol/xhigh route applies only after a failed high-risk implementation or a `NEEDS_REDESIGN` diagnosis, and only for the bounded redesign task.
+
+`model-routing.md` owns the role-specific model and effort values and runnable templates. `references/readiness-policy.md` cites those templates and owns the procedure context: when to invoke them, what the prompt contains, and how the result is recorded.
 
 ## Codex invocation
 
@@ -30,6 +35,40 @@ codex exec \
 ```
 
 Check the exit code, then validate the result file against the schema. A rejected or unavailable model is recorded as `BLOCKED_MODEL_UNAVAILABLE`; silent fallback to another model is never allowed.
+
+### author 호출 템플릿
+
+`Spec author (standard)` 또는 `Spec author (strict)` 라우트에서 선택한 `$CODEX_MODEL`과 `$CODEX_EFFORT`를 사용한다. 이 블록이 author 호출 템플릿의 실행 가능한 정본이며, `references/readiness-policy.md`는 이를 인용해 절차 문맥만 정한다.
+
+```bash
+codex exec \
+  -C "$PROJECT_ROOT" \
+  --sandbox workspace-write \
+  --ephemeral \
+  --model "$CODEX_MODEL" \
+  -c "model_reasoning_effort=\"$CODEX_EFFORT\"" \
+  --output-schema "$SKILL_DIR/schemas/codex-result.schema.json" \
+  --output-last-message "$RESULT_PATH" \
+  --json \
+  - < "$PROMPT_PATH" > "$EVENTS_PATH" 2> "$STDERR_PATH"
+```
+
+### readiness 호출 템플릿
+
+`readiness reviewer (fresh)` 라우트에서 선택한 `$CODEX_MODEL`과 `$CODEX_EFFORT`를 사용한다. 이 블록이 readiness 호출 템플릿의 실행 가능한 정본이며, `references/readiness-policy.md`는 이를 인용해 절차 문맥만 정한다.
+
+```bash
+codex exec \
+  -C "$PROJECT_ROOT" \
+  --sandbox read-only \
+  --ephemeral \
+  --model "$CODEX_MODEL" \
+  -c "model_reasoning_effort=\"$CODEX_EFFORT\"" \
+  --output-schema "$SKILL_DIR/schemas/readiness-result.schema.json" \
+  --output-last-message "$RESULT_PATH" \
+  --json \
+  - < "$PROMPT_PATH" > "$EVENTS_PATH" 2> "$STDERR_PATH"
+```
 
 ## Preflight
 

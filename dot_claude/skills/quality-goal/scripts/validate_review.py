@@ -56,6 +56,7 @@ OPEN_FINDING_FIELDS = (
 OPEN_FINDING_STRING_FIELDS = (
     "id", "severity", "description", "evidence_location", "required_resolution",
 )
+READINESS_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "readiness-result.schema.json"
 
 
 def _is_integer(value):
@@ -64,6 +65,102 @@ def _is_integer(value):
 
 def _is_non_empty_string(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def _matches_schema_type(value, expected):
+    expected_types = expected if isinstance(expected, list) else [expected]
+    return any(
+        (kind == "object" and isinstance(value, dict))
+        or (kind == "array" and isinstance(value, list))
+        or (kind == "string" and isinstance(value, str))
+        or (kind == "integer" and _is_integer(value))
+        or (kind == "boolean" and isinstance(value, bool))
+        or (kind == "null" and value is None)
+        for kind in expected_types
+    )
+
+
+def _validate_schema_value(value, schema, path="$"):
+    """Validate the JSON-Schema features used by readiness-result.schema.json."""
+    errors = []
+    expected_type = schema.get("type")
+    if expected_type is not None and not _matches_schema_type(value, expected_type):
+        return [f"{path} has invalid type"]
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path} has an unsupported value")
+    if isinstance(value, str) and "pattern" in schema and re.search(schema["pattern"], value) is None:
+        errors.append(f"{path} does not match its required pattern")
+    if _is_integer(value):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path} is below its minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            errors.append(f"{path} is above its maximum")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            errors.append(f"{path} has too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            errors.append(f"{path} has too many items")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                errors.extend(_validate_schema_value(item, schema["items"], f"{path}[{index}]"))
+    if isinstance(value, dict):
+        required = set(schema.get("required", []))
+        for key in sorted(required - set(value)):
+            errors.append(f"{path} is missing required field: {key}")
+        properties = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            for key in sorted(set(value) - set(properties)):
+                errors.append(f"{path} has unknown field: {key!r}")
+        for key, item in value.items():
+            if key in properties:
+                errors.extend(_validate_schema_value(item, properties[key], f"{path}.{key}"))
+    return errors
+
+
+def validate_readiness_result(result):
+    """Return contract errors for a standalone Codex readiness result."""
+    try:
+        with READINESS_SCHEMA_PATH.open(encoding="utf-8") as stream:
+            schema = json.load(stream)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [f"unable to load readiness schema: {exc}"]
+
+    errors = _validate_schema_value(result, schema)
+    if errors:
+        return errors
+
+    checklist_ids = {item["id"] for item in result["checklist"]}
+    if checklist_ids != {f"C{number}" for number in range(1, 9)}:
+        errors.append("checklist must contain each of C1 through C8 exactly once")
+
+    for finding in result["findings"]:
+        if re.fullmatch(r"READY-.*", finding["id"]) is None:
+            errors.append("issued finding IDs must use READY-")
+    for blocker in result["blockers"]:
+        if re.fullmatch(r"READY-.*", blocker) is None:
+            errors.append("blocker IDs must use READY-")
+    for prior in result["prior_findings"]:
+        if re.fullmatch(r"(?:READY-|SPEC-).*", prior["id"]) is None:
+            errors.append("prior finding IDs must use READY- or SPEC-")
+    for finding_id in result["resolved_finding_ids"]:
+        if re.fullmatch(r"(?:READY-|SPEC-).*", finding_id) is None:
+            errors.append("resolved finding IDs must use READY- or SPEC-")
+
+    resolved = {
+        prior["id"] for prior in result["prior_findings"]
+        if prior["judgement"] == "resolved"
+    }
+    if set(result["resolved_finding_ids"]) != resolved:
+        errors.append("resolved_finding_ids must equal resolved prior finding IDs")
+
+    checks_satisfied = all(item["status"] in {"pass", "not_applicable"} for item in result["checklist"])
+    no_hard_findings = not any(
+        finding["severity"] in HARD_SEVERITIES for finding in result["findings"]
+    )
+    expected_verdict = "READY" if checks_satisfied and no_hard_findings else "REVISE"
+    if result["verdict"] != expected_verdict:
+        errors.append(f"verdict must be {expected_verdict} for checklist and finding severity")
+    return errors
 
 
 def validate_revision_check(payload):

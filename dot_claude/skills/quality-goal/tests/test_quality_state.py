@@ -1,3 +1,4 @@
+import ast
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 import quality_state
 from quality_state import StateError
+from validate_review import REQUIRED_CHECKS
 
 
 def run_git(root, *args):
@@ -219,6 +221,59 @@ class NormalizeGoalTests(unittest.TestCase):
         )
 
 
+class JudgementScriptTests(unittest.TestCase):
+    def test_judgement_scripts_exist_and_are_not_collected(self):
+        tests_dir = Path(__file__).parent
+        scripts = (
+            "assert_python_version.py",
+            "assert_preserved_sections.py",
+            "assert_tests_preserved.py",
+        )
+
+        for name in scripts:
+            self.assertTrue((tests_dir / name).is_file())
+            self.assertFalse(name.startswith("test_"))
+
+        discovery = unittest.TestLoader().discover(
+            str(tests_dir), pattern="test_*.py"
+        )
+        discovered_ids = []
+        for suite in discovery:
+            for nested_suite in suite:
+                for test in nested_suite:
+                    discovered_ids.append(test.id())
+        for name in scripts:
+            self.assertFalse(
+                any(name.removesuffix(".py") in test_id for test_id in discovered_ids)
+            )
+
+    def test_python_version_guard_boundary_and_main_delegates(self):
+        source_path = Path(__file__).parent / "assert_python_version.py"
+        source = source_path.read_text(encoding="utf-8")
+        namespace = {}
+        exec(compile(source, str(source_path), "exec"), namespace)
+
+        self.assertFalse(namespace["is_supported"]((3, 11, 9)))
+        self.assertTrue(namespace["is_supported"]((3, 12, 0)))
+        self.assertTrue(namespace["is_supported"]((3, 14, 7)))
+
+        tree = ast.parse(source)
+        version_compares_outside_helper = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Compare)
+            and any(
+                isinstance(item, ast.Attribute)
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "sys"
+                and item.attr == "version_info"
+                for item in ast.walk(node)
+            )
+        ]
+        self.assertEqual([], version_compares_outside_helper)
+        self.assertIn('is_supported(sys.version_info)', source)
+
+
 class NewStateTests(unittest.TestCase):
     def test_new_state_has_the_complete_schema_version_one_shape(self):
         project_root = Path("relative-project")
@@ -257,6 +312,8 @@ class NewStateTests(unittest.TestCase):
                 "status_reason",
                 "created_at",
                 "updated_at",
+                "readiness",
+                "draft_attempts",
             },
             set(state),
         )
@@ -280,6 +337,8 @@ class NewStateTests(unittest.TestCase):
             state["artifact_digests"],
         )
         self.assertEqual({"spec": 0, "plan": 0, "code": 0}, state["rounds"])
+        self.assertEqual({"spec": [], "plan": []}, state["readiness"])
+        self.assertEqual({"spec": 0, "plan": 0}, state["draft_attempts"])
         self.assertEqual({"spec": [], "plan": [], "code": []}, state["reviews"])
         self.assertEqual({"spec": [], "plan": []}, state["revision_checks"])
         self.assertEqual(
@@ -3823,6 +3882,418 @@ class CLITests(unittest.TestCase):
                 str(artifact_dir),
             ])
             self.assertEqual(2, result)
+
+
+class ReadinessStateCompatibilityTests(unittest.TestCase):
+    def test_new_state_has_exactly_two_new_fields(self):
+        state = quality_state.new_state("goal", "auto", Path.cwd(), "artifacts", now=FIXED_NOW)
+        self.assertEqual(
+            {
+                "schema_version", "task_id", "goal", "goal_key", "requested_mode",
+                "mode", "classification_reasons", "stage", "project_root", "artifact_dir",
+                "base_revision", "initial_dirty_paths", "artifacts", "artifact_digests",
+                "rounds", "reviews", "revision_checks", "open_finding_ids",
+                "review_validation_retry", "review_unverified_retry", "plan_approval",
+                "verification", "status_reason", "created_at", "updated_at", "readiness",
+                "draft_attempts",
+            },
+            set(state),
+        )
+        self.assertEqual({"spec": [], "plan": []}, state["readiness"])
+        self.assertEqual({"spec": 0, "plan": 0}, state["draft_attempts"])
+
+    def test_transitions_and_terminal_states_unchanged(self):
+        self.assertEqual(
+            {"INTAKE": {"CLASSIFIED", "BLOCKED", "CANCELLED"}, "CLASSIFIED": {"SPEC_REVIEW", "AWAITING_PLAN_APPROVAL", "BLOCKED", "CANCELLED"}, "SPEC_REVIEW": {"SPEC_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "SPEC_PASSED": {"PLAN_REVIEW", "BLOCKED", "CANCELLED"}, "PLAN_REVIEW": {"PLAN_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "PLAN_PASSED": {"AWAITING_PLAN_APPROVAL", "BLOCKED", "CANCELLED"}, "AWAITING_PLAN_APPROVAL": {"IMPLEMENTING", "SPEC_REVIEW", "PLAN_REVIEW", "BLOCKED", "CANCELLED"}, "IMPLEMENTING": {"CODE_REVIEW", "SPEC_REVIEW", "PLAN_REVIEW", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "CODE_REVIEW": {"IMPLEMENTING", "COMPLETED", "SPEC_REVIEW", "PLAN_REVIEW", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}},
+            quality_state.ALLOWED_TRANSITIONS,
+        )
+        self.assertEqual({"COMPLETED", "BLOCKED", "NEEDS_REDESIGN", "CANCELLED"}, quality_state.TERMINAL_STATES)
+
+    def test_v1_state_without_new_fields_is_not_mutated_on_load(self):
+        fixture = Path(__file__).parent / "fixtures" / "state-v1-without-new-fields.json"
+        before = fixture.read_bytes()
+        loaded = quality_state.load_state(fixture)
+        self.assertNotIn("readiness", loaded)
+        self.assertNotIn("draft_attempts", loaded)
+        self.assertEqual(before, fixture.read_bytes())
+
+    def test_resume_preserves_rounds_reviews_and_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = 1
+            state["reviews"]["plan"] = [{"round": 1, "path": "review.json", "artifact_digest": VALID_DIGEST, "verdict": "REVISE", "blockers": []}]
+            state["open_finding_ids"]["plan"] = ["PLAN-01"]
+            state["revision_checks"]["plan"] = [{"round": 1, "path": "check.json", "current_digest": VALID_DIGEST, "base_digest": None}]
+            state["plan_approval"] = {"path": "plan.md", "digest": VALID_DIGEST, "approved_at": "2026-08-25T12:34:56Z"}
+            state_root = Path(directory) / "states"
+            state_path = state_root / state["task_id"] / "state.json"
+            quality_state.save_state(state_path, state)
+            selected = quality_state.select_resume_candidate(state_root, state["goal"], state["project_root"])
+            resumed = quality_state.load_state(selected)
+            for key in ("rounds", "reviews", "open_finding_ids", "plan_approval", "revision_checks"):
+                self.assertEqual(state[key], resumed[key])
+
+    def test_round_limits_and_required_checks_unchanged(self):
+        self.assertEqual({"spec": 3, "plan": 2, "code": 3}, quality_state.ROUND_LIMITS)
+        self.assertEqual(
+            {"spec": {"required_sections", "material_decisions_resolved", "acceptance_criteria_objective"}, "plan": {"required_sections", "traceability_complete", "placeholders_absent"}, "code": {"required_commands_passed", "acceptance_criteria_met", "unrelated_changes_absent", "documentation_current"}},
+            REQUIRED_CHECKS,
+        )
+
+
+class DraftAttemptTests(unittest.TestCase):
+    def test_record_draft_attempt_increments_only_draft_attempts(self):
+        state = state_at("SPEC_REVIEW")
+        before_rounds = deepcopy(state["rounds"])
+
+        quality_state.record_draft_attempt(state, "spec")
+
+        self.assertEqual({"spec": 1, "plan": 0}, state["draft_attempts"])
+        self.assertEqual(before_rounds, state["rounds"])
+
+    def test_record_draft_attempt_is_per_artifact(self):
+        state = state_at("SPEC_REVIEW")
+
+        quality_state.record_draft_attempt(state, "plan")
+
+        self.assertEqual({"spec": 0, "plan": 1}, state["draft_attempts"])
+
+    def test_draft_attempts_created_on_first_record(self):
+        fixture = Path(__file__).parent / "fixtures" / "state-v1-without-new-fields.json"
+        state = quality_state.load_state(fixture)
+
+        quality_state.record_draft_attempt(state, "spec")
+
+        self.assertEqual({"spec": 1, "plan": 0}, state["draft_attempts"])
+
+
+class ReadinessRecordingTests(unittest.TestCase):
+    def _readiness_state(self, directory, *, mode="standard"):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact = directory / "spec.md"
+        artifact.write_text("specification\n", encoding="utf-8")
+        state = state_at("SPEC_REVIEW", mode=mode)
+        quality_state.set_artifact(state, "spec", artifact)
+        return state, artifact, quality_state._file_digest(artifact)
+
+    def _readiness_result(self, directory, name, digest, **changes):
+        source = Path(__file__).parent / "fixtures" / "readiness-ready.json"
+        result = json.loads(source.read_text(encoding="utf-8"))
+        result["artifact_digest"] = digest
+        result.update(changes)
+        return write_json(directory, name, result)
+
+    def _record_ready(self, state, directory, digest, *, name="ready.json", formal_round=1, score=100):
+        result = self._readiness_result(
+            directory, name, digest, formal_round=formal_round, score=score,
+        )
+        return quality_state.record_readiness(
+            state, "spec", result, digest, formal_round, "gpt-5.6-sol", "ok",
+        )
+
+    def _invoke_cli(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            status = quality_state.main(args)
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_readiness_record_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "spec.md"
+            artifact.write_text("spec", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(artifact)
+            result_data = json.loads(
+                (Path(__file__).parent / "fixtures" / "readiness-ready.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            result_data["prior_findings"] = [{
+                "id": "SPEC-01",
+                "source": "formal",
+                "judgement": "resolved",
+                "evidence": "spec.md:10",
+            }]
+            result_data["resolved_finding_ids"] = ["SPEC-01"]
+            result_data["artifact_digest"] = quality_state._file_digest(artifact)
+            result_path = write_json(directory, "readiness-resolved.json", result_data)
+            result = quality_state.record_readiness(state, "spec", result_path, quality_state._file_digest(artifact), 1, "gpt-5.6-sol", "ok")
+            record = result["readiness"]["spec"][0]
+            self.assertEqual({"attempt", "formal_round", "outcome", "verdict", "score", "checklist", "findings", "resolved_finding_ids", "artifact_digest", "reviewer_model", "result_path", "recorded_at"}, set(record))
+            self.assertEqual(result_data["resolved_finding_ids"], record["resolved_finding_ids"])
+            self.assertNotIn("prior_findings", record)
+
+    def test_readiness_recording_ignores_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            low_state, _, digest = self._readiness_state(directory)
+            high_state, _, high_digest = self._readiness_state(Path(directory) / "high")
+            self._record_ready(low_state, directory, digest, name="low.json", score=0)
+            self._record_ready(high_state, Path(directory) / "high", high_digest, name="high.json", score=100)
+
+            self.assertEqual("recorded", low_state["readiness"]["spec"][0]["outcome"])
+            self.assertEqual("recorded", high_state["readiness"]["spec"][0]["outcome"])
+
+    def test_record_readiness_does_not_touch_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            before_rounds = deepcopy(state["rounds"])
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(before_rounds, state["rounds"])
+
+    def test_review_recording_is_independent_of_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for has_revise_readiness in (False, True):
+                for command in ("record-review", "record-review-unverified", "record-review-error"):
+                    with self.subTest(has_revise_readiness=has_revise_readiness, command=command):
+                        case_directory = Path(directory) / f"{has_revise_readiness}-{command}"
+                        case_directory.mkdir()
+                        state, _, digest = self._readiness_state(case_directory)
+                        if has_revise_readiness:
+                            revise = self._readiness_result(
+                                case_directory, "revise.json", digest,
+                                verdict="REVISE", score=80,
+                            )
+                            quality_state.record_readiness(
+                                state, "spec", revise, digest, 1, "gpt-5.6-sol", "ok",
+                            )
+                        if command == "record-review":
+                            review = write_json(case_directory, "review.json", valid_review("spec", 1))
+                            quality_state.record_review(state, review, digest)
+                        elif command == "record-review-unverified":
+                            review = write_json(case_directory, "review.json", unverified_review("spec", 1))
+                            quality_state.record_review_unverified(state, review, digest)
+                        else:
+                            quality_state.record_review_validation_failure(state, "spec", 1, ["invalid response"])
+
+                        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_readiness_attempt_is_globally_monotonic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            self._record_ready(state, directory, digest, name="first.json")
+            self._record_ready(state, directory, digest, name="second.json")
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            quality_state.record_review(state, review, digest)
+            self._record_ready(state, directory, digest, name="third.json", formal_round=2)
+
+            self.assertEqual([1, 2, 3], [record["attempt"] for record in state["readiness"]["spec"]])
+            self.assertEqual([1, 1, 2], [record["formal_round"] for record in state["readiness"]["spec"]])
+
+    def test_record_readiness_has_no_attempt_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            for attempt in range(3):
+                self._record_ready(state, directory, digest, name=f"attempt-{attempt}.json")
+
+            self.assertEqual(3, len(state["readiness"]["spec"]))
+
+    def test_record_readiness_rejects_registered_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            with self.assertRaisesRegex(StateError, "artifact digest mismatch"):
+                quality_state.record_readiness(
+                    state, "spec", result, "0" * 64, 1, "gpt-5.6-sol", "ok",
+                )
+
+            self.assertEqual([], state["readiness"]["spec"])
+
+    def test_record_readiness_records_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            result = self._readiness_result(directory, "mismatch.json", "b" * 64)
+
+            quality_state.record_readiness(state, "spec", result, digest, 1, "gpt-5.6-sol", "ok")
+
+            record = state["readiness"]["spec"][0]
+            self.assertEqual("digest_mismatch", record["outcome"])
+            self.assertIsNone(record["verdict"])
+
+    def test_readiness_formal_round_advances_after_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            quality_state.record_review(state, review, digest)
+
+            self._record_ready(state, directory, digest, formal_round=2)
+
+            self.assertEqual(state["rounds"]["spec"] + 1, state["readiness"]["spec"][0]["formal_round"])
+
+    def test_record_readiness_rejects_mismatched_formal_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            state["rounds"]["spec"] = 1
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            with self.assertRaisesRegex(StateError, "formal_round"):
+                quality_state.record_readiness(state, "spec", result, digest, 1, "gpt-5.6-sol", "ok")
+
+    def test_record_readiness_persists_review_time_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, artifact, digest = self._readiness_state(directory)
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(quality_state._file_digest(artifact), state["readiness"]["spec"][0]["artifact_digest"])
+
+    def test_readiness_field_created_on_first_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            del state["readiness"]
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(1, len(state["readiness"]["spec"]))
+
+    def test_readiness_records_survive_stage_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for target in ("SPEC_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"):
+                with self.subTest(target=target):
+                    case_directory = Path(directory) / target
+                    case_directory.mkdir()
+                    state, _, digest = self._readiness_state(case_directory)
+                    self._record_ready(state, case_directory, digest)
+                    quality_state.record_draft_attempt(state, "spec")
+                    before_readiness = deepcopy(state["readiness"])
+                    before_attempts = deepcopy(state["draft_attempts"])
+                    if target == "SPEC_PASSED":
+                        review = write_json(case_directory, "review.json", valid_review("spec", 1))
+                        quality_state.record_review(state, review, digest)
+                    quality_state.transition(state, target, "end")
+
+                    self.assertEqual(before_readiness, state["readiness"])
+                    self.assertEqual(before_attempts, state["draft_attempts"])
+
+    def test_readiness_record_outcome_enum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            self._record_ready(state, directory, digest, name="recorded.json")
+            mismatch = self._readiness_result(directory, "mismatch.json", "b" * 64)
+            quality_state.record_readiness(state, "spec", mismatch, digest, 1, "gpt-5.6-sol", "ok")
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+            stderr_path = Path(directory) / "stderr.log"
+            stderr_path.write_text("failed\n", encoding="utf-8")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "failed", stderr_path)
+
+            outcomes = {record["outcome"] for record in state["readiness"]["spec"]}
+            self.assertEqual({"recorded", "schema_invalid", "digest_mismatch", "invocation_failed"}, outcomes)
+
+    def test_failed_readiness_attempt_record_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+            mismatch = self._readiness_result(directory, "mismatch.json", "b" * 64)
+            stderr_path = Path(directory) / "stderr.log"
+            stderr_path.write_text("failed\n", encoding="utf-8")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+            quality_state.record_readiness(state, "spec", mismatch, digest, 1, "gpt-5.6-sol", "ok")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "failed", stderr_path)
+
+            for record in state["readiness"]["spec"]:
+                with self.subTest(outcome=record["outcome"]):
+                    self.assertIn(record["outcome"], {"schema_invalid", "digest_mismatch", "invocation_failed"})
+                    self.assertIsNone(record["verdict"])
+                    self.assertIsNone(record["score"])
+                    self.assertEqual([], record["checklist"])
+                    self.assertEqual([], record["findings"])
+                    self.assertEqual([], record["resolved_finding_ids"])
+                    for field in ("attempt", "formal_round", "outcome", "artifact_digest", "reviewer_model", "result_path", "recorded_at"):
+                        self.assertIsNotNone(record[field])
+
+    def test_invocation_status_enum_is_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            state_path = Path(directory) / "state.json"
+            quality_state.save_state(state_path, state)
+            result = self._readiness_result(directory, "ready.json", digest)
+            arguments = [
+                "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "unknown",
+            ]
+
+            self.assertNotEqual(0, self._invoke_cli(arguments)[0])
+            self.assertNotEqual(0, self._invoke_cli(arguments[:-1] + ["ok", "--outcome", "recorded"])[0])
+
+    def test_invocation_failure_is_recorded_and_requires_stderr_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for stderr_mode in ("present", "missing", "nonexistent"):
+                with self.subTest(stderr_mode=stderr_mode):
+                    case_directory = Path(directory) / stderr_mode
+                    case_directory.mkdir()
+                    state, _, digest = self._readiness_state(case_directory)
+                    state_path = case_directory / "state.json"
+                    quality_state.save_state(state_path, state)
+                    result = self._readiness_result(case_directory, "ready.json", digest)
+                    stderr_path = case_directory / "stderr.log"
+                    if stderr_mode == "present":
+                        stderr_path.write_text("failure\n", encoding="utf-8")
+                    arguments = [
+                        "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                        "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                        "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "failed",
+                    ]
+                    if stderr_mode != "missing":
+                        arguments.extend(["--stderr-path", str(stderr_path)])
+
+                    status, output, _ = self._invoke_cli(arguments)
+                    if stderr_mode == "present":
+                        self.assertEqual(0, status)
+                        record = json.loads(output)["readiness"]["spec"][0]
+                        self.assertEqual("invocation_failed", record["outcome"])
+                        self.assertEqual(str(stderr_path), record["result_path"])
+                    else:
+                        self.assertNotEqual(0, status)
+
+    def test_schema_invalid_precedes_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid_mismatch = self._readiness_result(
+                directory, "invalid-mismatch.json", "b" * 64, checklist=[],
+            )
+
+            quality_state.record_readiness(
+                state, "spec", invalid_mismatch, digest, 1, "gpt-5.6-sol", "ok",
+            )
+
+            self.assertEqual("schema_invalid", state["readiness"]["spec"][0]["outcome"])
+
+    def test_readiness_commands_rejected_in_light_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory, mode="light")
+            state_path = Path(directory) / "state.json"
+            quality_state.save_state(state_path, state)
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            readiness_status, _, _ = self._invoke_cli([
+                "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "ok",
+            ])
+            draft_status, _, _ = self._invoke_cli([
+                "record-draft-attempt", "--state", str(state_path), "--artifact", "spec",
+            ])
+
+            self.assertNotEqual(0, readiness_status)
+            self.assertNotEqual(0, draft_status)
+
+    def test_invalid_readiness_result_is_recorded_as_schema_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+
+            record = state["readiness"]["spec"][0]
+            self.assertEqual("schema_invalid", record["outcome"])
+            self.assertIsNone(record["verdict"])
 
 
 if __name__ == "__main__":

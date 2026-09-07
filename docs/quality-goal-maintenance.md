@@ -26,13 +26,25 @@ codex는 brew가 아니라 nvm/npm 설치본이므로 node 버전이 바뀌면 �
 
 라우팅 모델이 프리플라이트와 같은 조건으로 응답하는지 확인한다: `--sandbox read-only`, `model_reasoning_effort="low"`, 한 줄 프롬프트.
 
-## 결정적 테스트
+readiness 점검에서는 `codex exec` 호출에 `--skip-git-repo-check`, `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-bypass-hook-trust`, `--approve-for-me`, `--ignore-rules`, `--ignore-user-config`, `--add-dir`, `--yolo`를 쓰지 않는 금지 계약을 확인한다. `schemas/readiness-result.schema.json` 결과 스키마와 `references/model-routing.md`의 `Spec author (standard)`·`Spec author (strict)`·`readiness reviewer (fresh)` 라우팅 모델을 확인하고, 그 라우팅 문서와 `references/readiness-policy.md`의 절차 문맥이 동기화되어 있는지도 확인한다.
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s dot_claude/skills/quality-goal/tests -p 'test_*.py'
-```
+## 판정 명령 표
 
-스킬을 수정한 뒤에는 반드시 통과를 확인하고, 배포는 `chezmoi apply`로 한다.
+이 표는 quality-goal 판정 명령 표의 정본이다. `QG_PY`는 3.12 이상 인터프리터를 가리키고 `QG_BASE`는 `6d60011cbdaead7946b191d3f12029eef5c141c8`로 설정한다.
+
+| ID | 명령 | 통과 조건 |
+|---|---|---|
+| CMD-1 | `"$QG_PY" dot_claude/skills/quality-goal/tests/assert_python_version.py && PYTHONDONTWRITEBYTECODE=1 "$QG_PY" -m unittest discover -s dot_claude/skills/quality-goal/tests -p 'test_*.py'` | 종료 코드 0, `OK` |
+| CMD-2 | `"$QG_PY" dot_claude/skills/quality-goal/tests/assert_python_version.py && PYTHONDONTWRITEBYTECODE=1 "$QG_PY" -m unittest discover -s dot_claude/skills/quality-goal/tests -p 'test_*.py' -k <테스트 이름>` | 종료 코드 0 |
+| CMD-3 | `wc -l < dot_claude/skills/quality-goal/SKILL.md` | 500 미만 |
+| CMD-4 | `"$QG_PY" dot_claude/skills/quality-goal/tests/assert_preserved_sections.py "$QG_BASE"` | 종료 코드 0, `보존 대상 절 불변` |
+| CMD-5 | `"$QG_PY" -c "import json; d=json.load(open('dot_claude/skills/quality-goal/schemas/readiness-result.schema.json')); assert d['type']=='object'; assert d['additionalProperties'] is False; print('OK')"` | 종료 코드 0, `OK` |
+| CMD-6 | `"$QG_PY" dot_claude/skills/quality-goal/tests/assert_tests_preserved.py "$QG_BASE"` | 종료 코드 0, `기존 테스트 보존` |
+| CMD-7 | `OLD_PY=/usr/bin/python3; "$OLD_PY" -c 'import sys; raise SystemExit(0 if sys.version_info<(3,12) else 1)' && "$QG_PY" dot_claude/skills/quality-goal/tests/assert_python_version.py && ! "$OLD_PY" dot_claude/skills/quality-goal/tests/assert_python_version.py` | 종료 코드 0 |
+
+테스트 스위트의 최소 인터프리터 버전은 3.12다. `enterContext`는 Python 3.11에 도입됐고, `NO TESTS RAN`의 종료 코드 5는 Python 3.12에 도입됐으므로 CMD-1·CMD-2는 공용 `tests/assert_python_version.py`로 이 전제를 먼저 확인한다.
+
+스킬을 수정한 뒤에는 반드시 CMD-1 통과를 확인하고, 배포는 `chezmoi apply`로 한다.
 
 ## 평가
 

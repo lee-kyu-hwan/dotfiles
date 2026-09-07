@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unicodedata
 
-from validate_review import validate_review, validate_revision_check
+from validate_review import validate_readiness_result, validate_review, validate_revision_check
 
 
 ALLOWED_TRANSITIONS = {
@@ -203,6 +203,8 @@ def new_state(
         },
         "rounds": {"spec": 0, "plan": 0, "code": 0},
         "reviews": {"spec": [], "plan": [], "code": []},
+        "readiness": {"spec": [], "plan": []},
+        "draft_attempts": {"spec": 0, "plan": 0},
         "revision_checks": {"spec": [], "plan": []},
         "open_finding_ids": {"spec": [], "plan": [], "code": []},
         "review_validation_retry": None,
@@ -264,6 +266,91 @@ def load_state(path):
     if type(value.get("schema_version")) is not int or value["schema_version"] != 1:
         raise StateError(f"state {source} must have schema_version 1")
     return value
+
+
+def record_draft_attempt(state, artifact):
+    """Record one Codex author invocation without consuming a review round."""
+    state = _require_state(state)
+    if state.get("mode") == "light":
+        raise StateError("record-draft-attempt is unavailable in light mode")
+    if artifact not in {"spec", "plan"}:
+        raise StateError(f"invalid draft artifact: {artifact!r}")
+    attempts = state.get("draft_attempts")
+    if attempts is None:
+        attempts = {"spec": 0, "plan": 0}
+        state["draft_attempts"] = attempts
+    if not isinstance(attempts, dict) or not isinstance(attempts.get(artifact), int):
+        raise StateError(f"state draft_attempts missing {artifact}")
+    attempts[artifact] += 1
+    state["updated_at"] = _now_timestamp()
+    return state
+
+
+def record_readiness(
+    state, artifact, result_path, artifact_digest, formal_round, reviewer_model,
+    invocation_status, stderr_path=None,
+):
+    """Append an advisory readiness attempt without changing workflow control."""
+    state = _require_state(state)
+    if state.get("mode") == "light":
+        raise StateError("record-readiness is unavailable in light mode")
+    if artifact not in {"spec", "plan"}:
+        raise StateError(f"invalid readiness artifact: {artifact!r}")
+    artifacts = state.get("artifacts")
+    if not isinstance(artifacts, dict) or not isinstance(artifacts.get(artifact), str):
+        raise StateError(f"state artifact missing {artifact}")
+    if _file_digest(artifacts[artifact]) != artifact_digest:
+        raise StateError(f"{artifact} artifact digest mismatch")
+    rounds = state.get("rounds")
+    if not isinstance(rounds, dict) or formal_round != rounds.get(artifact, 0) + 1:
+        raise StateError("readiness formal_round must equal the next review round")
+    if invocation_status not in {"ok", "failed"}:
+        raise StateError("invocation_status must be ok or failed")
+    if invocation_status == "failed" and (not stderr_path or not Path(stderr_path).is_file()):
+        raise StateError("failed readiness invocation requires an existing stderr_path")
+    readiness = state.get("readiness")
+    if readiness is None:
+        readiness = {"spec": [], "plan": []}
+        state["readiness"] = readiness
+    if not isinstance(readiness, dict) or not isinstance(readiness.get(artifact), list):
+        raise StateError(f"state readiness missing {artifact}")
+    record = {
+        "attempt": len(readiness[artifact]) + 1,
+        "formal_round": formal_round,
+        "outcome": None,
+        "verdict": None,
+        "score": None,
+        "checklist": [],
+        "findings": [],
+        "resolved_finding_ids": [],
+        "artifact_digest": artifact_digest,
+        "reviewer_model": reviewer_model,
+        "result_path": str(stderr_path if invocation_status == "failed" else result_path),
+        "recorded_at": _now_timestamp(),
+    }
+    if invocation_status == "failed":
+        record["outcome"] = "invocation_failed"
+    else:
+        try:
+            with Path(result_path).open(encoding="utf-8") as stream:
+                result = json.load(stream)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            result = None
+        errors = validate_readiness_result(result)
+        if errors:
+            record["outcome"] = "schema_invalid"
+        elif result["artifact_digest"] != artifact_digest:
+            record["outcome"] = "digest_mismatch"
+        else:
+            record.update({
+                "outcome": "recorded", "verdict": result["verdict"],
+                "score": result["score"], "checklist": result["checklist"],
+                "findings": result["findings"],
+                "resolved_finding_ids": result["resolved_finding_ids"],
+            })
+    readiness[artifact].append(record)
+    state["updated_at"] = _now_timestamp()
+    return state
 
 
 def classify(state, mode, reasons):
@@ -1244,6 +1331,20 @@ def _build_parser():
     review_error_parser.add_argument("--round", required=True, type=int)
     review_error_parser.add_argument("--errors", required=True)
 
+    draft_attempt_parser = subparsers.add_parser("record-draft-attempt")
+    draft_attempt_parser.add_argument("--state", required=True)
+    draft_attempt_parser.add_argument("--artifact", required=True, choices=("spec", "plan"))
+
+    readiness_parser = subparsers.add_parser("record-readiness")
+    readiness_parser.add_argument("--state", required=True)
+    readiness_parser.add_argument("--artifact", required=True, choices=("spec", "plan"))
+    readiness_parser.add_argument("--result", required=True)
+    readiness_parser.add_argument("--artifact-digest", required=True)
+    readiness_parser.add_argument("--formal-round", required=True, type=int)
+    readiness_parser.add_argument("--reviewer-model", required=True)
+    readiness_parser.add_argument("--invocation-status", required=True)
+    readiness_parser.add_argument("--stderr-path")
+
     approval_parser = subparsers.add_parser("approve-plan")
     approval_parser.add_argument("--state", required=True)
     approval_parser.add_argument("--plan", required=True)
@@ -1374,6 +1475,20 @@ def main(argv=None):
                     args.artifact,
                     args.round,
                     errors,
+                ),
+            )
+        elif args.command == "record-draft-attempt":
+            _mutating_result(
+                args.state,
+                lambda state: record_draft_attempt(state, args.artifact),
+            )
+        elif args.command == "record-readiness":
+            _mutating_result(
+                args.state,
+                lambda state: record_readiness(
+                    state, args.artifact, args.result, args.artifact_digest,
+                    args.formal_round, args.reviewer_model, args.invocation_status,
+                    args.stderr_path,
                 ),
             )
         elif args.command == "approve-plan":
