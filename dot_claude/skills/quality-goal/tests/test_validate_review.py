@@ -10,6 +10,7 @@ import unittest
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import validate_review as validate_review_module  # noqa: E402
 from validate_review import (  # noqa: E402
     ARTIFACTS,
     EVIDENCE_FIELDS,
@@ -24,6 +25,12 @@ from validate_review import (  # noqa: E402
 
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+READINESS_SCHEMA_PATH = Path(__file__).resolve().parents[1] / "schemas" / "readiness-result.schema.json"
+
+
+def readiness_schema():
+    with READINESS_SCHEMA_PATH.open(encoding="utf-8") as stream:
+        return json.load(stream)
 
 
 def valid_review(artifact="plan", score=87, verdict="PASS"):
@@ -99,6 +106,155 @@ def carried_over_high_review(finding_id="PLAN-CARRIED-001"):
     review["findings"] = [high_finding(finding_id)]
     review["blockers"] = [finding_id]
     return review
+
+
+class ReadinessSchemaTests(unittest.TestCase):
+    def test_readiness_schema_uses_type_not_const(self):
+        def properties_with_paths(node, path="$"):
+            if isinstance(node, dict):
+                for name, value in node.get("properties", {}).items():
+                    yield f"{path}.{name}", value
+                    yield from properties_with_paths(value, f"{path}.{name}")
+                if "items" in node:
+                    yield from properties_with_paths(node["items"], f"{path}[]")
+
+        schema = readiness_schema()
+        self.assertNotIn("const", json.dumps(schema))
+        for path, property_schema in properties_with_paths(schema):
+            self.assertIn("type", property_schema, path)
+
+    def test_readiness_schema_attempt_has_no_maximum(self):
+        attempt = readiness_schema()["properties"]["attempt"]
+        self.assertEqual("integer", attempt["type"])
+        self.assertEqual(1, attempt["minimum"])
+        self.assertNotIn("maximum", attempt)
+
+    def test_readiness_schema_required_fields(self):
+        self.assertEqual(
+            {
+                "artifact", "attempt", "formal_round", "score", "verdict",
+                "checklist", "blockers", "findings", "prior_findings", "evidence",
+                "required_next_action", "artifact_digest", "resolved_finding_ids",
+            },
+            set(readiness_schema()["required"]),
+        )
+
+    def test_readiness_schema_digest_pattern_and_verdict_enum(self):
+        properties = readiness_schema()["properties"]
+        self.assertEqual("^[0-9a-f]{64}$", properties["artifact_digest"]["pattern"])
+        self.assertEqual({"READY", "REVISE"}, set(properties["verdict"]["enum"]))
+
+    def test_readiness_schema_evidence_min_items(self):
+        evidence = readiness_schema()["properties"]["evidence"]
+        self.assertEqual(6, evidence["minItems"])
+        item = evidence["items"]
+        self.assertEqual({"claim", "location", "verified"}, set(item["required"]))
+        self.assertFalse(item["additionalProperties"])
+
+    def test_readiness_schema_resolved_ids_and_namespace_patterns(self):
+        properties = readiness_schema()["properties"]
+        self.assertEqual("array", properties["resolved_finding_ids"]["type"])
+        self.assertEqual("string", properties["resolved_finding_ids"]["items"]["type"])
+        self.assertEqual("^(READY-|SPEC-)", properties["resolved_finding_ids"]["items"]["pattern"])
+        self.assertEqual("^READY-", properties["blockers"]["items"]["pattern"])
+        self.assertEqual("^READY-", properties["findings"]["items"]["properties"]["id"]["pattern"])
+        self.assertEqual(
+            "^(READY-|SPEC-)",
+            properties["prior_findings"]["items"]["properties"]["id"]["pattern"],
+        )
+
+
+class ValidateReadinessResultTests(unittest.TestCase):
+    def test_readiness_verdict_requires_all_checks_and_no_high(self):
+        ready = load_fixture("readiness-ready.json")
+        ready["checklist"][0]["status"] = "not_applicable"
+
+        self.assertEqual([], validate_review_module.validate_readiness_result(ready))
+
+    def test_readiness_verdict_blocks_on_failed_check_or_high_finding(self):
+        failed_check = load_fixture("readiness-failed-check.json")
+        high_finding = load_fixture("readiness-high-finding.json")
+
+        self.assertEqual([], validate_review_module.validate_readiness_result(failed_check))
+        self.assertEqual([], validate_review_module.validate_readiness_result(high_finding))
+        for result in (failed_check, high_finding):
+            result["verdict"] = "READY"
+            self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+    def test_issued_finding_ids_require_ready_prefix(self):
+        result = load_fixture("readiness-failed-check.json")
+        result["findings"][0]["id"] = "SPEC-01"
+        result["blockers"] = ["SPEC-01"]
+
+        self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+    def test_spec_prefix_is_reference_only_not_issuable(self):
+        result = load_fixture("readiness-ready.json")
+        result["prior_findings"] = [{
+            "id": "SPEC-01", "source": "formal", "judgement": "resolved",
+            "evidence": "spec.md:10",
+        }]
+        result["resolved_finding_ids"] = ["SPEC-01"]
+        self.assertEqual([], validate_review_module.validate_readiness_result(result))
+
+        result["findings"] = [{
+            "id": "SPEC-01", "severity": "Medium", "description": "bad prefix",
+            "evidence_location": "spec.md:10", "rubric_item": "C1",
+            "required_resolution": "Use a readiness identifier.",
+        }]
+        result["blockers"] = ["SPEC-01"]
+        result["verdict"] = "REVISE"
+        self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+    def test_readiness_schema_checklist_shape(self):
+        result = load_fixture("readiness-ready.json")
+        result["checklist"][-1]["id"] = "C1"
+
+        self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+        for field in ("id", "status", "evidence"):
+            with self.subTest(missing_field=field):
+                result = load_fixture("readiness-ready.json")
+                del result["checklist"][0][field]
+                self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+        result = load_fixture("readiness-ready.json")
+        result["checklist"][0]["status"] = "unknown"
+        self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+    def test_prior_findings_shape_and_resolved_set_equality(self):
+        result = load_fixture("readiness-ready.json")
+        result["prior_findings"] = [{
+            "id": "READY-01", "source": "readiness", "judgement": "resolved",
+            "evidence": "spec.md:10",
+        }]
+        result["resolved_finding_ids"] = []
+        self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+        result["resolved_finding_ids"] = ["READY-01"]
+        self.assertEqual([], validate_review_module.validate_readiness_result(result))
+
+        for field in ("id", "source", "judgement", "evidence"):
+            with self.subTest(missing_field=field):
+                result = load_fixture("readiness-ready.json")
+                result["prior_findings"] = [{
+                    "id": "READY-01", "source": "readiness", "judgement": "resolved",
+                    "evidence": "spec.md:10",
+                }]
+                result["resolved_finding_ids"] = ["READY-01"]
+                del result["prior_findings"][0][field]
+                self.assertTrue(validate_review_module.validate_readiness_result(result))
+
+        for field, value in (("source", "unknown"), ("judgement", "unknown")):
+            with self.subTest(invalid_enum=f"{field}={value}"):
+                result = load_fixture("readiness-ready.json")
+                result["prior_findings"] = [{
+                    "id": "READY-01", "source": "readiness", "judgement": "resolved",
+                    "evidence": "spec.md:10",
+                }]
+                result["resolved_finding_ids"] = ["READY-01"]
+                result["prior_findings"][0][field] = value
+                self.assertTrue(validate_review_module.validate_readiness_result(result))
 
 
 class ValidateReviewTests(unittest.TestCase):

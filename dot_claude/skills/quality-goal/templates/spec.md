@@ -37,6 +37,14 @@ Define every criterion so it is objectively verifiable and individually numbered
 
 {{ACCEPTANCE_CRITERIA}}
 
+## Requirements traceability
+
+This table maps every requirement to acceptance criteria and the judgement method that proves the mapping.
+
+| Requirement | Acceptance criteria | Judgement method |
+|---|---|---|
+{{REQUIREMENTS_TRACEABILITY}}
+
 ## Architecture
 
 Describe the relevant components, responsibilities, boundaries, and decisions that make the design feasible.
@@ -64,6 +72,12 @@ Describe security properties, trust assumptions, data sensitivity, risks, and mi
 ## Test strategy
 
 Describe the tests and deterministic checks that will demonstrate the requirements and acceptance criteria.
+
+### 판정 명령 표
+
+| ID | 명령 | 통과 조건 |
+|---|---|---|
+{{JUDGEMENT_COMMAND_TABLE}}
 
 {{TEST_STRATEGY}}
 

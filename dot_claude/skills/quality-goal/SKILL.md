@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 5.0.0
+version: 5.1.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -59,6 +59,7 @@ each one when its stage is reached:
 - ${CLAUDE_SKILL_DIR}/references/plan-rubric.md
 - ${CLAUDE_SKILL_DIR}/references/code-rubric.md
 - ${CLAUDE_SKILL_DIR}/references/model-routing.md
+- ${CLAUDE_SKILL_DIR}/references/readiness-policy.md
 - ${CLAUDE_SKILL_DIR}/templates/spec.md
 - ${CLAUDE_SKILL_DIR}/templates/plan.md
 - ${CLAUDE_SKILL_DIR}/templates/report.md
@@ -154,6 +155,13 @@ spec review is a passing review with no blockers and no open findings, so the
 review gate cannot be skipped by transitioning straight to SPEC_PASSED.
 
 Light creates no durable Spec and skips SPEC_REVIEW.
+
+For standard and strict, the Codex author writes the first Spec draft and every
+Spec revision; the orchestrator does not directly write the Spec body. After
+each author write, run the advisory readiness review before the formal review.
+Attach the readiness evidence attachment paths to the official review context
+as described in `references/readiness-policy.md`; advisory readiness never
+decides a transition or blocks the formal review.
 
 Drafts follow `references/revision-check-policy.md` identifier grammar:
 `- **R<n>.<m>**`, `- **AC-<n>**`, `[실행]`, `[문서]`, 추적표, 판정 명령 표,

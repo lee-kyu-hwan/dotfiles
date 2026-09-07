@@ -332,6 +332,50 @@ class CodeRubricContentTests(unittest.TestCase):
 
 
 class ModelRoutingContentTests(unittest.TestCase):
+    def test_model_routing_includes_author_and_readiness_rows(self):
+        text = read_reference("model-routing.md")
+        lower = text.casefold()
+
+        for pattern in (
+            r"\|\s*spec author \(standard\)\s*\|\s*gpt-5\.6-terra\s*\|\s*high\s*\|",
+            r"\|\s*spec author \(strict\)\s*\|\s*gpt-5\.6-sol\s*\|\s*high\s*\|",
+            r"\|\s*readiness reviewer \(fresh\)\s*\|\s*gpt-5\.6-sol\s*\|\s*high\s*\|",
+        ):
+            with self.subTest(route=pattern):
+                self.assertRegex(lower, pattern)
+
+        self.assertRegex(
+            lower,
+            r"model-routing\.md.{0,180}model.{0,80}effort.{0,180}"
+            r"runnable.{0,100}template",
+        )
+        self.assertRegex(
+            lower,
+            r"readiness-policy\.md.{0,180}template.{0,180}procedure.{0,180}"
+            r"prompt.{0,180}record",
+        )
+        templates = {
+            "### author 호출 템플릿": (
+                "--sandbox workspace-write",
+                "schemas/codex-result.schema.json",
+            ),
+            "### readiness 호출 템플릿": (
+                "--sandbox read-only",
+                "schemas/readiness-result.schema.json",
+            ),
+        }
+        for heading, tokens in templates.items():
+            with self.subTest(template=heading):
+                section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+                block = re.search(r"```bash\n(.*?)```", section, re.DOTALL)
+                self.assertIsNotNone(block)
+                self.assertIn("codex exec", block.group(1))
+                for token in tokens:
+                    self.assertIn(token, block.group(1))
+
+        policy = read_reference("readiness-policy.md")
+        self.assertEqual(2, policy.count("실행 가능한 정본은 `references/model-routing.md`"))
+
     def test_model_routing_contract(self):
         text = read_reference("model-routing.md")
         lower = text.casefold()
@@ -413,6 +457,302 @@ class CrossDocumentContentTests(unittest.TestCase):
             content = path.read_text(encoding="utf-8")
             self.assertIsNone(marker_pattern.search(content), str(path))
 
+    def test_forbidden_codex_flags_contract(self):
+        documents = list(REFERENCE_DIR.parent.rglob("*.md"))
+        documents.append(
+            REFERENCE_DIR.parent.parent.parent.parent / "docs" / "quality-goal-maintenance.md"
+        )
+        prohibition = re.compile(r"(?:금지|사용하지 않는다|쓰지 않는다|forbidden|prohibited)", re.I)
+        for path in documents:
+            paragraphs = path.read_text(encoding="utf-8").split("\n\n")
+            for paragraph in paragraphs:
+                if not any(
+                    flag in paragraph
+                    for flag in (
+                        "--skip-git-repo-check",
+                        "--dangerously-bypass-approvals-and-sandbox",
+                        "--dangerously-bypass-hook-trust",
+                        "--approve-for-me",
+                        "--ignore-rules",
+                        "--ignore-user-config",
+                        "--add-dir",
+                        "--yolo",
+                        "--full-auto",
+                    )
+                ):
+                    continue
+                with self.subTest(path=path, paragraph=paragraph):
+                    self.assertRegex(paragraph, prohibition)
+                    self.assertNotIn("```", paragraph)
+
+
+class ReadinessPolicyContentTests(unittest.TestCase):
+    POLICY_PATH = REFERENCE_DIR / "readiness-policy.md"
+
+    def read_policy(self):
+        self.assertTrue(self.POLICY_PATH.is_file(), "readiness-policy.md must exist")
+        return self.POLICY_PATH.read_text(encoding="utf-8")
+
+    def test_author_prompt_required_elements_contract(self):
+        text = self.read_policy()
+        lower = text.casefold()
+        for path in (
+            "templates/spec.md",
+            "references/spec-rubric.md",
+            "references/brainstorming-policy.md",
+            "references/revision-check-policy.md",
+        ):
+            with self.subTest(required_path=path):
+                self.assertRegex(text, rf"/{re.escape(path)}")
+        for term in (
+            "절대 경로",
+            "findings",
+            "식별자 문법",
+            "revision note",
+            "git 쓰기",
+            "cross-regression",
+            "material ambiguity",
+        ):
+            with self.subTest(required_instruction=term):
+                self.assertIn(term, lower)
+
+    def test_author_invocation_template_contract(self):
+        text = self.read_policy()
+        author_section = text.split("## Spec author", 1)[1].split("\n## ", 1)[0]
+        blocks = re.findall(r"```bash\n(.*?)```", author_section, re.DOTALL)
+        self.assertEqual(1, len(blocks))
+        template = blocks[0]
+        for token in (
+            "codex exec",
+            "-C",
+            "--sandbox workspace-write",
+            "--ephemeral",
+            "--model",
+            "model_reasoning_effort",
+            "--output-schema",
+            "--output-last-message",
+            "--json",
+            "< \"$PROMPT_PATH\"",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, template)
+        self.assertIn("Spec author (standard)", text)
+        self.assertIn("Spec author (strict)", text)
+
+    def test_forbidden_codex_flags_enumerate_current_cli(self):
+        text = self.read_policy()
+        self.assertIn("codex-cli 0.153.4", text)
+        prohibited = re.compile(r"(?:금지|사용하지 않는다|쓰지 않는다|forbidden|prohibited)", re.I)
+        for flag in (
+            "--skip-git-repo-check",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--dangerously-bypass-hook-trust",
+            "--approve-for-me",
+            "--ignore-rules",
+            "--ignore-user-config",
+            "--add-dir",
+            "--yolo",
+        ):
+            lines = [line for line in text.splitlines() if flag in line]
+            self.assertTrue(lines, flag)
+            for line in lines:
+                self.assertRegex(line, prohibited)
+                self.assertFalse(re.match(r"\s*codex\s", line, re.I))
+
+    def test_codex_exec_has_no_approval_flag_contract(self):
+        text = self.read_policy()
+        self.assertIn("`-a`", text)
+        self.assertIn("`--ask-for-approval`", text)
+        self.assertIn("codex exec", text.casefold())
+        self.assertIn("옵션이 없으므로", text)
+
+    def test_author_revision_note_format_contract(self):
+        text = self.read_policy()
+        self.assertIn("## 라운드 <n> 개정", text)
+        self.assertIn("| 요구사항 | 해소 finding | 함께 바뀐 항목 | 상호작용 판정 | 치환 근거 |", text)
+        self.assertRegex(text, r"공식 라운드.{0,120}정확히 하나")
+        self.assertRegex(text, r"새 행을 누적.{0,100}갱신")
+        self.assertIn("snapshots/<artifact>-r<N-1>.md", text)
+
+    def test_author_cross_regression_review_contract(self):
+        text = self.read_policy()
+        for finding in ("PLAN-009", "PLAN-010", "PLAN-012", "SPEC-31", "SPEC-34"):
+            with self.subTest(finding=finding):
+                self.assertIn(finding, text)
+        self.assertIn("cross-regression", text.casefold())
+
+    def test_author_write_scope_contract(self):
+        text = self.read_policy()
+        lower = text.casefold()
+        self.assertRegex(text, r"Spec과 revision note만 쓸 수")
+        self.assertIn("git status --porcelain", text)
+        self.assertIn("initial_dirty_paths", text)
+        self.assertIn("changed_files", text)
+
+    def test_author_failure_recovery_contract(self):
+        text = self.read_policy()
+        lower = text.casefold()
+        for term in ("비정상 종료", "결과 파일", "스키마 검증", "digest"):
+            with self.subTest(failure=term):
+                self.assertIn(term, lower)
+        self.assertIn("BLOCKED_MODEL_UNAVAILABLE", text)
+        self.assertRegex(text, r"모델을 임의로 대체하지 않는다")
+
+    def test_author_no_change_is_failure_contract(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"전후 artifact digest가 같게.{0,100}실패")
+
+    def test_routing_and_policy_split_is_documented(self):
+        policy = self.read_policy().casefold()
+        routing = read_reference("model-routing.md").casefold()
+        self.assertIn("model-routing.md", policy)
+        self.assertIn("readiness-policy.md", routing)
+        self.assertIn("절차", policy)
+        self.assertIn("runnable templates", routing)
+        self.assertIn("author 호출 템플릿", routing)
+        self.assertIn("readiness 호출 템플릿", routing)
+
+    def test_readiness_reviewer_is_fresh_contract(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"author와 분리된 fresh codex 프로세스")
+        self.assertRegex(text, r"대화, 세션, 문맥.{0,120}상속하지 않는다")
+        self.assertIn("revision-note 주장", text)
+
+    def test_readiness_invocation_template_contract(self):
+        text = self.read_policy()
+        self.assertIn("## readiness reviewer", text)
+        section = text.split("## readiness reviewer", 1)[1].split("\n## ", 1)[0]
+        blocks = re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+        self.assertEqual(1, len(blocks))
+        template = blocks[0]
+        for token in (
+            "codex exec",
+            "-C",
+            "--sandbox read-only",
+            "--ephemeral",
+            "--model",
+            "model_reasoning_effort",
+            "--output-schema",
+            "--output-last-message",
+            "--json",
+            "< \"$PROMPT_PATH\"",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, template)
+        self.assertIn("readiness reviewer (fresh)", text)
+
+    def test_readiness_read_only_contract(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"read-only.{0,180}파일 수정.{0,120}금지")
+        self.assertRegex(text, r"git 쓰기 명령을 금지")
+
+    def test_readiness_stdin_guard_contract(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"author.{0,160}readiness.{0,180}표준 입력")
+        self.assertIn("< /dev/null", text)
+        self.assertIn("non-interactive infinite wait", text)
+        self.assertRegex(text, r"두 형태 모두 금지하지 않지만.{0,100}금지")
+
+    def test_readiness_prompt_treats_notes_as_claims(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"revision note.{0,100}근거가 아니라 verification target")
+        self.assertIn("file:line", text)
+        self.assertIn("design-preference deductions는 금지", text)
+
+    def test_readiness_is_advisory_not_authority_contract(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"advisory.{0,140}official judgement를 대체하지 않고.{0,120}공식 리뷰를 막지 않는다")
+        self.assertIn("official judgement", text)
+
+    def test_readiness_prompt_carries_prior_findings(self):
+        text = self.read_policy().casefold()
+        for term in ("직전 readiness", "open findings", "required_resolution", "ready-", "reference only"):
+            with self.subTest(term=term):
+                self.assertIn(term, text)
+        self.assertRegex(text, r"상속하지 않는 규칙과 충돌하지 않는다")
+
+    def test_readiness_score_computation_instruction(self):
+        text = self.read_policy().casefold()
+        self.assertRegex(text, r"rubric weights로 계산")
+        self.assertIn("blocker가 있다고 0을 넣지 않는다", text)
+
+    def test_readiness_unverified_evidence_reason_contract(self):
+        text = self.read_policy()
+        lower = text.casefold()
+        self.assertRegex(lower, r"verified.{0,140}<path>:<line>")
+        self.assertRegex(lower, r"false.{0,180}확인하지 못한 reason")
+        self.assertIn("description", text)
+        self.assertIn("같은 물질적 문제", text)
+
+    def test_readiness_checklist_defines_eight_items(self):
+        text = self.read_policy()
+        self.assertIn("## 체크리스트", text)
+        section = text.split("## 체크리스트", 1)[1].split("\n## ", 1)[0]
+        definitions = {
+            1: ("templates/spec.md", "필수 절", "순서가 유지"),
+            2: ("<!-- strict-only:start -->", "<!-- strict-only:end -->", "한쪽만 남은 상태는 미충족"),
+            3: ("요구사항 정의 수", "추적표 행 수", "같다"),
+            4: ("누락·중복·유령 참조", "본문에 정의되지 않은"),
+            5: ("모든 AC", "[실행]", "[문서]"),
+            6: ("AC 번호", "연속", "고유"),
+            7: ("모든 `[실행]` 판정 명령", "판정 명령 표", "등재"),
+        }
+        for item, terms in definitions.items():
+            with self.subTest(item=item):
+                match = re.search(
+                    rf"(?ms)^### C{item}\b(.*?)(?=^### C|^## |\Z)", section
+                )
+                self.assertIsNotNone(match)
+                for term in terms:
+                    self.assertIn(term, match.group(1))
+        self.assertRegex(section, r"(?m)^### C8\b")
+        self.assertIn("<!-- strict-only:start -->", section)
+        self.assertIn("<!-- strict-only:end -->", section)
+        for term in ("프롬프트에 실린", "정확히 하나", "partial", "빈 배열", "원 접두"):
+            with self.subTest(c8_requirement=term):
+                self.assertIn(term, section)
+        self.assertRegex(section, r"설계 정합성.*넣지 않는다")
+        self.assertRegex(section, r"아키텍처 타당성.*넣지 않는다")
+        self.assertRegex(section, r"시간축.*넣지 않는다")
+
+    def test_readiness_score_is_advisory_contract(self):
+        text = self.read_policy()
+        self.assertIn("## readiness 지위", text)
+        section = text.split("## readiness 지위", 1)[1].split("\n## ", 1)[0]
+        self.assertRegex(section, r"score는 record-only advisory 값.{0,100}결정하는 데 쓰지 않는다")
+        self.assertIn("어떤 상태 전이도 결정하지 않는다", section)
+        self.assertIn("공식 리뷰의 시작 조건이 아니다", section)
+        self.assertIn("READY", section)
+        self.assertIn("한도를 코드로 강제하지 않는다", section)
+        self.assertIn("비용 상한", section)
+
+    def test_readiness_evidence_attachment_contract(self):
+        text = self.read_policy()
+        self.assertIn("## 근거 첨부", text)
+        section = text.split("## 근거 첨부", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("마지막 readiness 결과 JSON", section)
+        self.assertIn(".claude/quality-state/<task-id>/readiness-evidence-spec-r<N>.md", section)
+        self.assertIn("내용을 인라인하지 않는다", section)
+        self.assertIn("Review invocation contract", section)
+        self.assertIn("구속하지 않는다", section)
+        self.assertIn("유효한 결과가 없으면", section)
+
+    def test_readiness_path_and_digest_precede_invocation(self):
+        text = self.read_policy()
+        self.assertIn("## digest 대조", text)
+        section = text.split("## digest 대조", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("artifacts[artifact]", section)
+        self.assertIn("artifact_digests", section)
+        self.assertRegex(
+            section,
+            r"(?m)^경로 불일치는 reviewer 호출 자체를 하지 않는 사전 중단이다\.$",
+        )
+        self.assertRegex(
+            section,
+            r"(?m)^경로가 일치하는 정상 경로에서 현재 SHA-256을 계산해 프롬프트에 싣고 심사 시점 digest로 기록한다\.$",
+        )
+        self.assertLess(text.index("## digest 대조"), text.index("## readiness reviewer"))
+
 
 class TemplateContentContractTests(unittest.TestCase):
     TEMPLATE_DIR = REFERENCE_DIR.parent / "templates"
@@ -483,6 +823,26 @@ class TemplateContentContractTests(unittest.TestCase):
             with self.subTest(heading=heading):
                 self.assertRegex(text, rf"(?m)^#{{1,3}}\s+.*{re.escape(heading)}.*$")
         self.assert_strict_only_contract(text)
+
+    def test_spec_template_has_traceability_and_command_table(self):
+        text = (self.TEMPLATE_DIR / "spec.md").read_text(encoding="utf-8")
+        traceability = "## Requirements traceability"
+        acceptance = "## Acceptance criteria"
+        architecture = "## Architecture"
+        test_strategy = "## Test strategy"
+        command_table = "### 판정 명령 표"
+        self.assertIn(traceability, text)
+        self.assertLess(text.index(acceptance), text.index(traceability))
+        self.assertLess(text.index(traceability), text.index(architecture))
+        traceability_section = text.split(traceability, 1)[1].split("\n## ", 1)[0]
+        self.assertIn("{{REQUIREMENTS_TRACEABILITY}}", traceability_section)
+        self.assertIn("maps every requirement to acceptance criteria", traceability_section)
+
+        self.assertIn(command_table, text)
+        strategy_section = text.split(test_strategy, 1)[1].split("\n## ", 1)[0]
+        self.assertEqual(command_table, re.search(r"(?m)^### .+$", strategy_section).group(0))
+        self.assertIn("| ID | 명령 | 통과 조건 |", strategy_section)
+        self.assertIn("{{JUDGEMENT_COMMAND_TABLE}}", strategy_section)
 
     def test_plan_template_contract(self):
         path = self.TEMPLATE_DIR / "plan.md"
@@ -607,7 +967,70 @@ class RevisionCheckContentContractTests(unittest.TestCase):
 
     def test_skill_version_is_major_bumped(self):
         frontmatter, _ = parse_yaml_frontmatter(QualityGoalSkillContentTests().read_skill())
-        self.assertEqual("5.0.0", frontmatter["version"])
+        self.assertEqual("5", frontmatter["version"].split(".", 1)[0])
+
+    def test_spec_authoring_is_delegated_to_codex_contract(self):
+        text = QualityGoalSkillContentTests().read_skill()
+        section = text.split("### Spec", 1)[1].split("### Plan", 1)[0]
+        normalized = " ".join(section.split())
+        self.assertRegex(normalized, r"Codex author.{0,120}(?:first )?Spec draft.{0,120}revision")
+        self.assertRegex(normalized, r"orchestrator.{0,100}does not directly write.{0,80}Spec body")
+        self.assertRegex(normalized, r"readiness.{0,180}formal review")
+        self.assertRegex(normalized, r"evidence attachment.{0,180}official review")
+
+    def test_readiness_policy_is_referenced_from_skill(self):
+        text = QualityGoalSkillContentTests().read_skill()
+        self.assertIn("${CLAUDE_SKILL_DIR}/references/readiness-policy.md", text)
+
+    def test_skill_version_bumped_for_contract_extension(self):
+        frontmatter, _ = parse_yaml_frontmatter(QualityGoalSkillContentTests().read_skill())
+        version = tuple(int(component) for component in frontmatter["version"].split("."))
+        baseline = (5, 0, 0)
+        self.assertGreater(version, baseline)
+        self.assertTrue(
+            version[0] > baseline[0]
+            or (version[0] == baseline[0] and version[1] > baseline[1])
+        )
+
+    def test_maintenance_doc_covers_readiness(self):
+        text = (REFERENCE_DIR.parent.parent.parent.parent / "docs" / "quality-goal-maintenance.md").read_text(encoding="utf-8")
+        for term in (
+            "codex exec",
+            "--skip-git-repo-check",
+            "readiness-result.schema.json",
+            "Spec author (standard)",
+            "readiness reviewer (fresh)",
+            "references/model-routing.md",
+            "references/readiness-policy.md",
+            "동기화",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, text)
+
+    def test_maintenance_doc_replaces_test_section_with_command_table(self):
+        text = (REFERENCE_DIR.parent.parent.parent.parent / "docs" / "quality-goal-maintenance.md").read_text(encoding="utf-8")
+        self.assertIn("## 판정 명령 표", text)
+        self.assertNotIn("## 결정적 테스트", text)
+        section = text.split("## 판정 명령 표", 1)[1].split("\n## ", 1)[0]
+        for command_id in range(1, 8):
+            with self.subTest(command_id=command_id):
+                self.assertIn(f"| CMD-{command_id} |", section)
+        self.assertIn("정본", section)
+
+    def test_version_guard_is_shared_not_inlined(self):
+        text = (REFERENCE_DIR.parent.parent.parent.parent / "docs" / "quality-goal-maintenance.md").read_text(encoding="utf-8")
+        section = text.split("## 판정 명령 표", 1)[1].split("\n## ", 1)[0]
+        for command_id in (1, 2):
+            row = next(line for line in section.splitlines() if line.startswith(f"| CMD-{command_id} |"))
+            with self.subTest(command_id=command_id):
+                self.assertIn("tests/assert_python_version.py", row)
+                self.assertNotRegex(row, r"version_info|3\s*[,.]\s*12")
+
+    def test_formal_pass_gate_threshold_unchanged(self):
+        for name in ("spec-rubric.md", "plan-rubric.md"):
+            pass_gate = read_reference(name).split("## Pass gate", 1)[1].split("\n## ", 1)[0]
+            with self.subTest(name=name):
+                self.assertRegex(pass_gate, r"score is at least 85")
 
     def test_skill_names_identifier_grammar_for_authors(self):
         text = QualityGoalSkillContentTests().read_skill()
@@ -1069,7 +1492,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "5.0.0",
+            "version": "5.1.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
