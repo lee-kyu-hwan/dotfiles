@@ -131,6 +131,33 @@ Recommendation: fix
         second, _ = review_state.normalize_reviewer_findings("codex", [{"severity": "low", "confidence": 1, "file": "a.py", "line_start": 1, "line_end": 1, "title": "x", "body": "two", "recommendation": "r"}], "B")
         self.assertEqual(first[0]["body"].split(":", 1)[0], second[0]["body"].split(":", 1)[0])
 
+    def test_the_reviewer_agent_severity_scale_is_accepted(self):
+        """Producers are asked for a Severity label on the Critical/Important/Minor/Trivial scale,
+        so the lower half of that scale must map instead of dropping the whole record."""
+        template = """Title: {label} finding
+Severity: {label}
+Confidence: 80
+File: lib/a.py
+Line: 3
+Body: {label} detail
+Recommendation: fix
+"""
+        for label, expected in (("Critical", "critical"), ("Important", "high"), ("Minor", "low"), ("Trivial", "low")):
+            with self.subTest(label=label):
+                findings, rejected = review_state.normalize_reviewer_findings("pr-review-toolkit:code-reviewer", template.format(label=label), "A")
+                self.assertEqual(rejected, [])
+                self.assertEqual(findings[0]["severity"], expected)
+
+    def test_the_round_zero_prompt_names_every_severity_word_normalization_accepts(self):
+        """A producer that guesses a plausible-but-unlisted word loses its whole finding, so the
+        prompt must state the vocabulary and cannot drift from what normalization admits."""
+        prompt = review_state.build_round_zero_prompts({"base_sha": "a", "head_sha": "b", "files": [], "diff": ""})["claude"]
+        self.assertTrue(review_state.SEVERITY_BY_WORD)
+        for word in review_state.SEVERITY_BY_WORD:
+            with self.subTest(word=word):
+                self.assertIn(word, prompt)
+                self.assertIsNotNone(review_state._severity(word))
+
 
 if __name__ == "__main__":
     unittest.main()

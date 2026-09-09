@@ -8,6 +8,8 @@
 
 ## Findings
 
+## 버려진 finding
+
 ## Critiques
 
 ## Synthesis

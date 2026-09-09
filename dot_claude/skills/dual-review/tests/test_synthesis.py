@@ -296,6 +296,62 @@ print(json.dumps(review_state.build_anonymous_view('run', 1, findings, [])[1], e
             outputs.append(subprocess.check_output([sys.executable, "-c", script, scripts], text=True, env=environment))
         self.assertEqual(outputs[0], outputs[1])
 
+    def test_a_refuted_finding_makes_a_one_sided_disagreement_valid(self):
+        """Spec R6.4: a valid refutation is a 불일치, and a refutation arrives as a critique verdict
+        rather than as a counterpart finding, so the opposing group has nothing to cite."""
+        decision = {"classification": "불일치", "decision_confidence": .8, "rationale": "the opposing side refuted it with in-hunk evidence", "group_a_finding_ids": ["fid_a"], "group_b_finding_ids": [], "claims": {"A": "the guard is missing", "B": "the guard is on the preceding line"}}
+        manifest = {"A": {"fid_a"}, "B": set()}
+        self.assertEqual(review_state.normalize_synthesis_decisions([decision], manifest, refuted_ids={"fid_a"}), [decision])
+
+    def test_a_one_sided_disagreement_without_a_refutation_is_still_rejected(self):
+        decision = {"classification": "불일치", "decision_confidence": .8, "rationale": "nothing refuted this", "group_a_finding_ids": ["fid_a"], "group_b_finding_ids": [], "claims": {"A": "the guard is missing", "B": ""}}
+        manifest = {"A": {"fid_a"}, "B": set()}
+        with self.assertRaises(ValueError):
+            review_state.normalize_synthesis_decisions([decision], manifest, refuted_ids=set())
+
+    def test_a_refutation_only_disagreement_does_not_terminate_the_run(self):
+        """The most common disagreement — one side raises it, the other refutes it — must survive
+        the pipeline instead of failing normalization and reporting reviewer_failure."""
+        envelopes = {
+            "claude": {"verdict": "ok", "summary": "", "findings": [{"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "claude issue", "body": "claude detail", "recommendation": "fix"}], "next_steps": []},
+            "codex": {"verdict": "ok", "summary": "", "findings": [{"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 2, "line_end": 2, "title": "codex issue", "body": "codex detail", "recommendation": "fix"}], "next_steps": []},
+        }
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, source): return {"status": "ok", "payload": envelopes[source]}
+        class Critique:
+            def start(self, source, prompt): return (source, prompt)
+            def read(self, started):
+                reviewer, prompt = started
+                verdict = "반증됨" if reviewer == "codex" else "유지"
+                return {"status": "ok", "payload": {"critiques": [{"finding_id": item["finding_id"], "verdict": verdict, "evidence": [{"file": "x.py", "line_start": 1, "line_end": 2}], "new_findings": []} for item in json.loads(prompt)["opposing_findings"]]}}
+        class Synthesizer:
+            def start(self, source, prompt): return prompt
+            def read(self, prompt):
+                view = json.loads(prompt)["anonymous_view"]
+                refuted = {item["finding_id"] for item in view["critiques"] if item.get("verdict") == "반증됨"}
+                decisions = []
+                for item in sorted(view["findings"], key=lambda entry: entry["finding_id"]):
+                    ids = {"group_a_finding_ids": [], "group_b_finding_ids": []}
+                    ids["group_%s_finding_ids" % item["group"].lower()] = [item["finding_id"]]
+                    is_refuted = item["finding_id"] in refuted
+                    decisions.append(dict(ids, classification="불일치" if is_refuted else "단일 출처", decision_confidence=.7, rationale="refuted with evidence" if is_refuted else "only one group reported it", claims={"A": "claim one", "B": "claim two"}))
+                return {"status": "ok", "payload": {"decisions": decisions}}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 2]]}}, {"claude": Reviewer(), "codex": Reviewer()}, Critique(), Synthesizer(), requested_rounds=1)
+            run_dir = pathlib.Path(result["run_dir"])
+            synthesis = json.loads((run_dir / "synthesis.json").read_text())
+            report = (run_dir / "report.md").read_text()
+            sidecar = json.loads((run_dir / "provenance.json").read_text())
+        self.assertNotEqual(result["termination_reason"], "reviewer_failure")
+        self.assertIsNotNone(sidecar["synthesis_status"])
+        self.assertEqual(sidecar["synthesis_status"]["status"], "ok")
+        self.assertEqual(sorted(item["classification"] for item in synthesis), ["단일 출처", "불일치"])
+        disagreement = [item for item in synthesis if item["classification"] == "불일치"][0]
+        self.assertEqual(len(disagreement["group_a_finding_ids"]) + len(disagreement["group_b_finding_ids"]), 1)
+        self.assertIn("## 두 리뷰어가 갈린 지점", report)
+        self.assertIn("반증됨", report)
+
 
 if __name__ == "__main__":
     unittest.main()

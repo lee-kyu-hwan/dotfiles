@@ -42,7 +42,8 @@ def make_run_id(base_sha, head_sha, execution_number):
 def build_round_zero_prompts(snapshot):
     target = "base=%s\nhead=%s\nfiles:\n%s\ndiff:\n%s" % (snapshot.get("base_sha", ""), snapshot.get("head_sha", ""), "\n".join(snapshot.get("files", [])), snapshot.get("diff", ""))
     return {
-        "claude": "Independently review this target. Return labeled findings only: one finding per block, with Title: first, one bare Label: value per line, and Body: and Recommendation: last. Every block must label Title, Severity, Confidence, File, Line, Body, and Recommendation.\n" + target,
+        "claude": "Independently review this target. Return labeled findings only: one finding per block, with Title: first, one bare Label: value per line, and Body: and Recommendation: last. Every block must label Title, Severity, Confidence, File, Line, Body, and Recommendation. Severity must be one of: "
+                  + ", ".join(SEVERITY_BY_WORD) + ".\n" + target,
         "codex": "Independently review this target. Return one JSON object conforming exactly to the supplied reviewer schema.\n" + target,
     }
 
@@ -106,10 +107,15 @@ def _markdown_records(markdown):
     return records
 
 
+# The one vocabulary: normalization admits exactly these words and the round-zero prompt
+# advertises exactly these words, so a producer can never guess one that would be dropped.
+SEVERITY_BY_WORD = {"critical": "critical", "important": "high", "high": "high", "medium": "medium", "low": "low", "minor": "low", "trivial": "low"}
+
+
 def _severity(value):
     if value is None or not str(value).strip():
         return "medium"
-    return {"critical": "critical", "important": "high", "high": "high", "medium": "medium", "low": "low"}.get(str(value).strip().lower())
+    return SEVERITY_BY_WORD.get(str(value).strip().lower())
 
 
 def _source_for(producer, source):
@@ -259,7 +265,8 @@ def build_anonymous_view(run_id, execution_number, findings, critiques, producer
     return view, sidecar
 
 
-def normalize_synthesis_decisions(decisions, manifest=None):
+def normalize_synthesis_decisions(decisions, manifest=None, *, refuted_ids=None):
+    refuted = set(refuted_ids or ())
     normalized = []
     for decision in decisions:
         if not isinstance(decision, dict) or decision.get("classification") not in {"합의", "불일치", "단일 출처"}: raise ValueError("unknown synthesis classification")
@@ -269,7 +276,13 @@ def normalize_synthesis_decisions(decisions, manifest=None):
         a, b = list(decision.get("group_a_finding_ids", [])), list(decision.get("group_b_finding_ids", []))
         if not all(isinstance(item, str) for item in a + b): raise ValueError("finding ids must be strings")
         if manifest and (not set(a).issubset(manifest.get("A", set())) or not set(b).issubset(manifest.get("B", set()))): raise ValueError("finding id is absent from anonymous group")
-        if decision["classification"] in {"합의", "불일치"} and (not a or not b): raise ValueError("two-source decision needs both groups")
+        if decision["classification"] == "합의" and (not a or not b): raise ValueError("two-source decision needs both groups")
+        if decision["classification"] == "불일치":
+            # R6.4 gives 불일치 two shapes: conflicting claims, which cite both groups, and a
+            # valid refutation, which reaches the synthesizer as a critique verdict rather than
+            # as a counterpart finding — so the refuting group has no finding_id to cite.
+            if not a and not b: raise ValueError("two-source decision needs both groups")
+            if (not a or not b) and not refuted.intersection(a + b): raise ValueError("one-sided disagreement needs a refuted finding")
         if decision["classification"] == "단일 출처" and bool(a) == bool(b): raise ValueError("single-source decision needs exactly one group")
         claims = decision.get("claims")
         if not isinstance(claims, dict) or set(claims) != {"A", "B"} or not all(isinstance(claims[group], str) for group in claims):
@@ -440,6 +453,7 @@ def render_report(state, provenance_path=None):
         "Reviewer status": [f"- {source}: {item.get('status', 'unknown')}; reason={item.get('reason', '')}; attempts={item.get('attempts', 0)}; stderr={item.get('stderr', '')}; exit={item.get('exit_code', '')}" for source, item in sorted(state.get("reviewers", {}).items())],
         "Findings": [f"- {item.get('finding_id', '')} ({source_map.get(item.get('finding_id', ''), {}).get('source', 'unknown')}): {item.get('title', '')} — {item.get('body', '')}" for item in sorted(state.get("findings", []), key=lambda item: item.get("finding_id", ""))],
         "Critiques": [f"- {item.get('finding_id', '')}: {item.get('verdict', '')}; evidence=" + ", ".join(f"{e.get('file', '')}:{e.get('line_start', '')}-{e.get('line_end', '')}" for e in sorted(item.get("evidence", []), key=_canonical)) for item in sorted(state.get("critiques", []), key=_canonical)],
+        "버려진 finding": [f"- {item.get('original_id', '')}: {item.get('reason', '')}" for item in sorted(provenance.get("rejected_findings", []), key=_canonical)],
         "Synthesis": [], "두 리뷰어가 갈린 지점": []}
     synthesis = sorted(restore(state.get("synthesis", [])), key=_canonical)
     data["Synthesis"] = [f"- {item.get('classification', '')}: confidence={item.get('decision_confidence', '')}; {source_ids(item, 'A')}; {source_ids(item, 'B')}; {relabel(item.get('rationale', ''))}" for item in synthesis]
@@ -547,7 +561,7 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
         status = _call_status(response, "synthesis", "fresh-claude")
         if response.get("status") == "ok" and isinstance(response.get("payload"), dict):
             try:
-                synthesis = normalize_synthesis_decisions(response["payload"].get("decisions", []), manifest); synthesis_calls = 1
+                synthesis = normalize_synthesis_decisions(response["payload"].get("decisions", []), manifest, refuted_ids={item.get("finding_id") for item in view.get("critiques", []) if item.get("verdict") == "반증됨"}); synthesis_calls = 1
             except (TypeError, ValueError) as exc:
                 status.update({"status": "error", "reason": str(exc), "stderr": (status["stderr"] + "\n" + f"{type(exc).__name__}: {exc}").strip()})
                 pipeline_failed = True

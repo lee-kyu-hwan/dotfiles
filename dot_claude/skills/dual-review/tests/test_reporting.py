@@ -79,6 +79,23 @@ class ReportingTests(unittest.TestCase):
         for line in report.splitlines():
             self.assertNotRegex(line, r"(?<![0-9A-Za-z_])[AB]=")
 
+    def test_report_surfaces_findings_that_normalization_rejected(self):
+        """A dropped finding must be visible in the deliverable, not only inside provenance.json."""
+        state = {
+            "target": {"base_sha": "base", "head_sha": "head", "files": ["a.py"]},
+            "termination_reason": "round_cap",
+            "reviewers": {"claude": {"status": "valid"}},
+            "findings": [], "critiques": [], "synthesis": [],
+            "provenance": {"source_groups": {"claude": "A"}, "masks": [], "findings": {},
+                           "rejected_findings": [{"original_id": "producer=comment-analyzer;ordinal=4",
+                                                  "reason": "invalid finding fields",
+                                                  "raw": {"severity": "Minor", "title": "dropped one"}}]},
+        }
+        report = review_state.render_report(state)
+        self.assertIn("## 버려진 finding", report)
+        self.assertIn("producer=comment-analyzer;ordinal=4", report)
+        self.assertIn("invalid finding fields", report)
+
 
 if __name__ == "__main__":
     unittest.main()

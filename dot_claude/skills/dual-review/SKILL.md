@@ -1,6 +1,6 @@
 ---
 name: dual-review
-version: 1.0.0
+version: 1.1.0
 description: Run independent read-only reviews, cross-critique them, and render a local report.
 argument-hint: "[--base <ref>] [--rounds 1|2]"
 disable-model-invocation: true
