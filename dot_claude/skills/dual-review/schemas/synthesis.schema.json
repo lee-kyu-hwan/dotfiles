@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["decisions"],
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["classification", "decision_confidence", "rationale", "group_a_finding_ids", "group_b_finding_ids", "claims"],
+        "properties": {
+          "classification": {"enum": ["합의", "불일치", "단일 출처"]},
+          "decision_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "rationale": {"type": "string"},
+          "group_a_finding_ids": {"type": "array", "items": {"type": "string"}},
+          "group_b_finding_ids": {"type": "array", "items": {"type": "string"}},
+          "claims": {"type": "object", "required": ["A", "B"], "properties": {"A": {"type": "string"}, "B": {"type": "string"}}}
+        }
+      }
+    }
+  }
+}
