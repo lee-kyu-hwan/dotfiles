@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 5.1.0
+version: 5.2.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -171,6 +171,57 @@ Drafts follow `references/revision-check-policy.md` identifier grammar:
 Use `python3 ${CLAUDE_SKILL_DIR}/scripts/revision_check.py --artifact spec --current <artifacts.spec absolute path> --state <project_root>/.claude/quality-state/<task-id>/state.json --out <same directory>/revision-check-spec-r<round>.json`.
 Repeat without consuming a review round until exit code 0, include the check
 JSON and notes path in reviewer evidence, and use `record-review --revision-check`.
+
+### Execution watchdog
+
+Wrap every preassembled Codex child argv with `scripts/execution_watchdog.py`.
+The wrapper owns the child process session and transports its argv, events
+stdout, and stderr unchanged for implementation, author, readiness, and
+preflight calls. Each wrapper call supplies `--stdin-path "$PROMPT_PATH"`, so
+the wrapper opens that prompt file as the child's stdin. All prompt, result, events, stderr, execution-record, and
+preservation-bundle files belong only in
+`.claude/quality-state/<task-id>/<execution-id>/`; no fixed `/tmp` path is
+allowed.
+
+For calls with a result path, poll in result-first order: result existence,
+the recorded pid's liveness, then events or stderr activity. A discovered
+result stops start, activity-stall, and hard-timeout waiting, but first uses
+the separate `EXIT_COLLECT_WAIT_SECONDS = 5` collection window. The accepted
+matrix requires a passed result schema and child exit code zero or an unknown
+exit code after that collection window. Python `subprocess` and a monotonic
+clock provide finite polling. Forbid the external `timeout` and `gtimeout`
+tools.
+
+`ACTIVITY_STALL_SECONDS = 600` has an operational range of 480--600 seconds.
+`ABORT_GRACE_SECONDS = 60` and `REAP_GRACE_SECONDS = 60` give owned children
+the same bounded exit opportunity. `REAP_WAIT_CAP_SECONDS = 300` is the
+five-minute operational cap: it is at least the 60-second reap grace, bounds
+post-result cleanup, and preserves the ordering `5 < 60 = 60 < 300 < 600`.
+Fixtures may inject shorter settings without changing those operating values.
+
+Before a resultless abort, preserve the current diff, staged diff, untracked
+content archive, events, stderr, and metadata fingerprint using project root
+and base revision. If preservation or recorded pid/pgid ownership fails, send
+no signal and surface the failure. Otherwise abort only the recorded owned
+group with SIGTERM and then SIGKILL after the abort grace. An accepted result
+uses the separate reap path; reap failure records residual pids but never
+turns into abort or blocks result delivery.
+
+An unaccepted present result never receives abort signals. Its execution record
+contains child exit code, result existence, result-schema validation, a null
+preservation-bundle location with `not_created_no_abort` status, and watchdog reason before the existing
+`BLOCKED_MODEL_UNAVAILABLE` recovery is used. The wrapper records only restart
+candidacy and reason. The parent alone records a finite
+`WATCHDOG_RESTART_BUDGET` (default 1) per implementation, author, or readiness
+phase, then records initial and remaining values, exactly one consumption for
+each candidate, whether restart was attempted, and whether zero budget stopped
+the phase. Preflight never consumes this budget.
+
+Pass the execution record to final-report rendering: it must include the R6.2
+identity, timing, result, watchdog, signal, preservation, abort, reap, and
+residual fields, plus every restart-budget value. Abort and reap remain
+distinct report values so a successful result with reap trouble is not
+misreported as an abort.
 
 ### Plan
 

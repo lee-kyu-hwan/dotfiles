@@ -1492,7 +1492,7 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "5.1.0",
+            "version": "5.2.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
@@ -2083,6 +2083,67 @@ class QualityGoalSkillContentTests(unittest.TestCase):
             re.IGNORECASE,
         )
         self.assertIsNone(marker_pattern.search(self.read_skill()), str(self.SKILL_PATH))
+
+
+class ExecutionWatchdogContentTests(unittest.TestCase):
+    SKILL_PATH = Path(__file__).resolve().parents[1] / "SKILL.md"
+    REPORT_PATH = Path(__file__).resolve().parents[1] / "templates" / "report.md"
+
+    def test_execution_watchdog_documented_reap_grace_is_60(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertRegex(text, r"REAP_GRACE_SECONDS\s*=\s*60")
+        self.assertRegex(text, r"REAP_WAIT_CAP_SECONDS\s*=\s*300")
+
+    def test_execution_watchdog_contract_is_outside_preserved_sections(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertLess(text.index("### Execution watchdog"), text.index("### Plan"))
+        self.assertIn("result-first", text)
+
+    def test_execution_watchdog_wrapper_block_omits_codex_exec_literal(self):
+        routing = read_reference("model-routing.md")
+        blocks = re.findall(r"```bash\n(.*?)```", routing, re.DOTALL)
+        wrapper_blocks = [block for block in blocks if "execution_watchdog.py" in block]
+        self.assertEqual(4, len(wrapper_blocks))
+        self.assertTrue(all("codex exec" not in block for block in wrapper_blocks))
+
+    def test_execution_watchdog_wrapper_passes_named_prompt_path(self):
+        routing = read_reference("model-routing.md")
+        blocks = re.findall(r"```bash\n(.*?)```", routing, re.DOTALL)
+        wrapper_blocks = [block for block in blocks if "execution_watchdog.py" in block]
+        self.assertEqual(4, len(wrapper_blocks))
+        for block in wrapper_blocks:
+            with self.subTest(wrapper=block):
+                self.assertIn('--stdin-path "$PROMPT_PATH"', block)
+
+    def test_execution_watchdog_contract_forbids_external_timeout_tools(self):
+        skill = self.SKILL_PATH.read_text(encoding="utf-8").casefold()
+        self.assertIn("subprocess", skill)
+        self.assertIn("monotonic", skill)
+        self.assertRegex(skill, r"(?:never|forbid|prohibit).{0,80}(?:g?timeout)")
+
+    def test_execution_watchdog_documents_equal_abort_and_reap_grace(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertRegex(text, r"ABORT_GRACE_SECONDS\s*=\s*60")
+        self.assertRegex(text, r"REAP_GRACE_SECONDS\s*=\s*60")
+
+    def test_execution_watchdog_routing_preserves_child_argv_start_lines(self):
+        routing = read_reference("model-routing.md")
+        self.assertEqual(4, len(re.findall(r"(?m)^codex exec\b", routing)))
+        for heading in ("### author 호출 템플릿", "### readiness 호출 템플릿", "## Preflight"):
+            section = routing.split(heading, 1)[1]
+            block = re.search(r"```bash\n(.*?)```", section, re.DOTALL).group(1)
+            self.assertRegex(block, r"(?m)^codex exec\b")
+
+    def test_execution_report_renders_watchdog_and_restart_budget_payload(self):
+        text = self.REPORT_PATH.read_text(encoding="utf-8")
+        for token in (
+            "EXECUTION_ID", "CHILD_EXIT_CODE", "RESULT_EXISTS", "RESULT_SCHEMA_VALIDATION",
+            "WATCHDOG_REASON", "PRESERVATION_BUNDLE", "ABORT", "REAP", "RESIDUAL_PIDS",
+            "RETRY_BUDGET_INITIAL", "RETRY_BUDGET_REMAINING", "RETRY_CONSUMED",
+            "RESTART_ATTEMPTED", "RESTART_STOPPED",
+        ):
+            with self.subTest(token=token):
+                self.assertIn("{{" + token + "}}", text)
 
 
 class QualityStateGitignoreContentTests(unittest.TestCase):
