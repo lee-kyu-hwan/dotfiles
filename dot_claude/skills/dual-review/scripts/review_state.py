@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-TERMINATION_REASONS = ("no_changes", "reviewer_failure", "single_reviewer", "abstraction_drift", "two_quiet_rounds", "requested_round_limit", "no_new_high", "round_cap")
+TERMINATION_REASONS = ("no_changes", "reviewer_failure", "pipeline_failure", "single_reviewer", "abstraction_drift", "two_quiet_rounds", "requested_round_limit", "no_new_high", "round_cap")
 CLAUDE_PRODUCERS = ("pr-review-toolkit:code-reviewer", "pr-test-analyzer", "comment-analyzer", "silent-failure-hunter", "type-design-analyzer")
 MASKED_PRODUCERS = tuple(sorted({name for item in CLAUDE_PRODUCERS for name in (item, item.split(":", 1)[-1])}))
 PUBLIC_FINDING_FIELDS = ("finding_id", "group", "severity", "title", "body", "file", "line_start", "line_end", "finding_confidence", "recommendation")
@@ -39,8 +39,28 @@ def make_run_id(base_sha, head_sha, execution_number):
     return f"{target}-{int(execution_number):06d}"
 
 
+MAX_PROMPT_DIFF_BYTES = 262144
+
+
+def _capped_diff(diff):
+    """Bound the diff a prompt carries.
+
+    One real run embedded a 1.1MB diff and sent a 1.16MB prompt to every reviewer and to each
+    of the four critique calls. Withholding hunks silently would trade that cost for a worse
+    one, so the marker states how much was cut and tells the reviewer to declare it.
+    """
+    raw = (diff or "").encode("utf-8")
+    if len(raw) <= MAX_PROMPT_DIFF_BYTES:
+        return diff or "", 0
+    kept = raw[:MAX_PROMPT_DIFF_BYTES]
+    boundary = kept.rfind(b"\n")
+    if boundary > 0: kept = kept[:boundary]
+    omitted = len(raw) - len(kept)
+    return kept.decode("utf-8", "ignore") + ("\n[diff truncated: %d of %d bytes withheld. Review the hunks shown and state in your findings that the diff was incomplete.]" % (omitted, len(raw))), omitted
+
+
 def build_round_zero_prompts(snapshot):
-    target = "base=%s\nhead=%s\nfiles:\n%s\ndiff:\n%s" % (snapshot.get("base_sha", ""), snapshot.get("head_sha", ""), "\n".join(snapshot.get("files", [])), snapshot.get("diff", ""))
+    target = "base=%s\nhead=%s\nfiles:\n%s\ndiff:\n%s" % (snapshot.get("base_sha", ""), snapshot.get("head_sha", ""), "\n".join(snapshot.get("files", [])), _capped_diff(snapshot.get("diff", ""))[0])
     return {
         "claude": "Independently review this target. Return labeled findings only: one finding per block, with Title: first, one bare Label: value per line, and Body: and Recommendation: last. Every block must label Title, Severity, Confidence, File, Line, Body, and Recommendation. Severity must be one of: "
                   + ", ".join(SEVERITY_BY_WORD) + ".\n" + target,
@@ -525,7 +545,7 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
             round_number = requested[index]; completed_rounds.append(round_number); before = len(all_findings); round_findings = list(all_findings)
             for reviewer, opposing_source in (("claude", "codex"), ("codex", "claude")):
                 opposing = [item for item in round_findings if item["source"] == opposing_source]
-                prompt = json.dumps({"contract": "Return one critiques array item for every requested finding_id, each with verdict, evidence, and new_findings.", "round": round_number, "opposing_findings": opposing, "diff": snapshot.get("diff", "")}, ensure_ascii=False)
+                prompt = json.dumps({"contract": "Return one critiques array item for every requested finding_id, each with verdict, evidence, and new_findings.", "round": round_number, "opposing_findings": opposing, "diff": _capped_diff(snapshot.get("diff", ""))[0]}, ensure_ascii=False)
                 response = _call(critique_adapter, reviewer, prompt)
                 status = _call_status(response, "critique", reviewer)
                 try:
@@ -568,11 +588,15 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
         else:
             pipeline_failed = True
         provenance["synthesis_status"] = status
+    elif synthesis_adapter:
+        provenance["synthesis_status"] = {"source": "fresh-claude", "status": "skipped", "reason": "upstream failure skipped synthesis", "attempts": 0, "stderr": "", "exit_code": None}
     for name, value in (("normalized.json", all_findings), ("critiques.json", critiques), ("synthesis.json", synthesis)):
         (run_dir / name).write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
     original_high = sum(item["severity"] in {"high", "critical"} for item in findings)
     candidates = set()
-    if pipeline_failed: candidates.add("reviewer_failure")
+    # 라운드 0 는 성공했는데 교차 비평·종합이 무너진 경우다. reviewer_failure 와 같은 값을
+    # 쓰면 소비자가 "리뷰어가 아무것도 못 냈다" 와 구별할 수 없고, 둘은 대응이 다르다.
+    if pipeline_failed: candidates.add("pipeline_failure")
     if completed_rounds and completed_rounds[-1] == 2: candidates.add("round_cap")
     elif critique_adapter is None or requested_rounds == 1: candidates.add("requested_round_limit")
     elif round_high_counts and round_high_counts[-1] == 0: candidates.add("no_new_high")

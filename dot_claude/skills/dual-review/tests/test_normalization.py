@@ -158,6 +158,24 @@ Recommendation: fix
                 self.assertIn(word, prompt)
                 self.assertIsNotNone(review_state._severity(word))
 
+    def test_round_zero_prompts_cap_the_embedded_diff(self):
+        """The real run embedded a 1.1MB diff and produced a 1.16MB prompt per reviewer. The
+        prompt must be bounded and must tell the reviewer that hunks were withheld."""
+        big = "\n".join("+line %d" % index for index in range(200000))
+        self.assertGreater(len(big.encode()), review_state.MAX_PROMPT_DIFF_BYTES)
+        prompts = review_state.build_round_zero_prompts({"base_sha": "a", "head_sha": "b", "files": ["a.py"], "diff": big})
+        for source, prompt in prompts.items():
+            with self.subTest(source=source):
+                self.assertLess(len(prompt.encode()), review_state.MAX_PROMPT_DIFF_BYTES + 4096)
+                self.assertIn("diff truncated", prompt)
+
+    def test_a_diff_within_the_cap_is_embedded_whole_and_unmarked(self):
+        prompts = review_state.build_round_zero_prompts({"base_sha": "a", "head_sha": "b", "files": ["a.py"], "diff": "+one small line"})
+        for source, prompt in prompts.items():
+            with self.subTest(source=source):
+                self.assertIn("+one small line", prompt)
+                self.assertNotIn("diff truncated", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

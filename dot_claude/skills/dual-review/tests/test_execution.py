@@ -397,7 +397,8 @@ print(json.dumps(wrapper))
             report = (run_dir / "report.md").read_text()
         self.assertEqual(failure.calls, 1)
         self.assertEqual(result["cross_critique_calls"], 2)
-        self.assertEqual(result["termination_reason"], "reviewer_failure")
+        # 라운드 0 는 성공했고 종합만 무너졌으므로 reviewer_failure 가 아니다.
+        self.assertEqual(result["termination_reason"], "pipeline_failure")
         self.assertEqual(provenance["synthesis_status"]["status"], "error")
         self.assertIn("synthesis transport down", report)
 
@@ -474,7 +475,8 @@ print(json.dumps(wrapper))
             result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}}, {"claude": Reviewer(), "codex": Reviewer()}, critique_adapter=Failure(), synthesis_adapter=Failure())
             report = (pathlib.Path(result["run_dir"]) / "report.md").read_text()
             sidecar = json.loads((pathlib.Path(result["run_dir"]) / "provenance.json").read_text())
-        self.assertEqual(result["termination_reason"], "reviewer_failure")
+        # 두 리뷰어는 유효한 결과를 냈고 교차 비평 전송이 실패한 것이므로 하류 실패다.
+        self.assertEqual(result["termination_reason"], "pipeline_failure")
         self.assertIn("transport down", report)
         self.assertEqual(sidecar["critique_statuses"][0]["status"], "error")
 
@@ -547,6 +549,46 @@ print(json.dumps(wrapper))
             review_state.assert_nonwriting_actions(actions + ["external-write"])
         with self.assertRaises(ValueError):
             review_state.assert_nonwriting_actions(actions + ["code-mutation"])
+
+    def test_a_downstream_failure_is_distinguished_from_a_reviewer_failure(self):
+        """reviewer_failure must mean the reviewers produced nothing. A critique transport error
+        after two valid round-zero reviews is a different situation demanding a different response,
+        and reusing one string for both leaves the consumer unable to tell them apart."""
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, handle):
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [{"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": handle, "body": "detail", "recommendation": "fix"}], "next_steps": []}}
+        class Failure:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "error", "stderr": "transport down", "exit_code": 9}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}}, {"claude": Reviewer(), "codex": Reviewer()}, critique_adapter=Failure(), synthesis_adapter=Failure())
+            sidecar = json.loads((pathlib.Path(result["run_dir"]) / "provenance.json").read_text())
+        self.assertEqual(result["termination_reason"], "pipeline_failure")
+        self.assertEqual({source: item["status"] for source, item in sidecar["reviewers"].items()}, {"claude": "valid", "codex": "valid"})
+
+    def test_a_skipped_synthesis_records_that_it_was_skipped(self):
+        """A critique error skips synthesis entirely. Without a status row the report is
+        indistinguishable from a run where synthesis ran and produced no decisions."""
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, handle):
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [{"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": handle, "body": "detail", "recommendation": "fix"}], "next_steps": []}}
+        class Failure:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "error", "stderr": "transport down", "exit_code": 9}
+        started = []
+        class Synthesizer:
+            def start(self, source, prompt): started.append(source); return source
+            def read(self, handle): return {"status": "ok", "payload": {"decisions": []}}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}}, {"claude": Reviewer(), "codex": Reviewer()}, critique_adapter=Failure(), synthesis_adapter=Synthesizer())
+            report = (pathlib.Path(result["run_dir"]) / "report.md").read_text()
+            sidecar = json.loads((pathlib.Path(result["run_dir"]) / "provenance.json").read_text())
+        self.assertEqual(started, [])
+        self.assertIsNotNone(sidecar["synthesis_status"])
+        self.assertEqual(sidecar["synthesis_status"]["status"], "skipped")
+        self.assertIn("synthesis: skipped", report)
 
 
 if __name__ == "__main__":
