@@ -460,6 +460,7 @@ def collect_repository_hits(
     *,
     safe_leaves: Optional[list[dict[str, object]]] = None,
     on_safe_leaf: Optional[Callable[[dict[str, object]], None]] = None,
+    on_split_observation: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> RepositorySearchResult:
     """Collect one repository's ordered search candidates without hydration.
 
@@ -571,6 +572,20 @@ def collect_repository_hits(
                 )
                 return
             midpoint = start + timedelta(seconds=int((end - start).total_seconds()) // 2)
+            if on_split_observation is not None:
+                on_split_observation({
+                    "repository": repository,
+                    "interval": [_utc_string(start), _utc_string(end)],
+                    "query": query,
+                    "total_count": total_count,
+                    "returned_count": len(first_items),
+                    "incomplete_results": incomplete_results,
+                    "observed_at": _run_timestamp(None),
+                    "split_reasons": (["search-result-limit"] if total_count >= 1000 else [])
+                                     + (["incomplete-results"] if incomplete_results else []),
+                    "children": [[_utc_string(start), _utc_string(midpoint)],
+                                 [_utc_string(midpoint), _utc_string(end)]],
+                })
             collect_partition(start, midpoint)
             collect_partition(midpoint, end)
             return
@@ -2419,6 +2434,8 @@ def collect(
         checkpoint_repo = {
             "repository": repository, "collection_status": "partial",
             "safe_leaves": deepcopy(previous.get("safe_leaves", [])) if previous else [],
+            "split_observations": deepcopy(previous.get("split_observations", [])) if previous else [],
+            "split_observation_history": previous.get("split_observation_history", "legacy-unavailable") if previous else "complete-since-run-start",
             "completed_records": [], "selected_count": 0, "warnings": [],
         }
         reusable_records = {
@@ -2432,9 +2449,16 @@ def collect(
             checkpoint_repo["safe_leaves"].append(deepcopy(leaf))
             save_checkpoint()
 
+        def checkpoint_split(observation: dict[str, object]) -> None:
+            # Parents are observations, not selectable/completed leaves. Persist
+            # before requesting a child so an interrupt cannot erase the cause.
+            checkpoint_repo["split_observations"].append(deepcopy(observation))
+            save_checkpoint()
+
         try:
             search = collect_repository_hits(client, repository, interval, outcome, max_per_repository,
-                                             safe_leaves=checkpoint_repo["safe_leaves"], on_safe_leaf=checkpoint_leaf)
+                                             safe_leaves=checkpoint_repo["safe_leaves"], on_safe_leaf=checkpoint_leaf,
+                                             on_split_observation=checkpoint_split)
         except KeyboardInterrupt:
             search = _empty_repository_search_result(repository, "partial", "partial", "collection interrupted during search")
         except (ApiFailure, BudgetExhausted, ValueError, TypeError) as error:

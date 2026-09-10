@@ -2153,6 +2153,82 @@ class Task7OrchestrationTests(unittest.TestCase):
         self.assertEqual(repository["partial_records"][0]["state_history"], [])
         self.assertEqual(run.corpus["records"], [])
 
+    def test_saved_manifest_retains_split_parent_observations(self):
+        collector = self.collector
+        class Client:
+            api_version = "2026-03-10"
+            budget = collector.RequestBudget(100)
+            def get_json(self, endpoint, params=None):
+                if endpoint.startswith("/repos/"):
+                    return collector.ApiResponse(200, {}, {"node_id": "R_repo", "full_name": "owner/repo"})
+                root = "00:00:00Z..2026-09-01T23:59:59Z" in params["q"]
+                return collector.ApiResponse(200, {}, {"total_count": 1000 if root else 0, "incomplete_results": root, "items": []})
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "manifest.json"
+            run = collector.collect(Client(), ["owner/repo"], self.interval, manifest_output=manifest)
+            saved = json.loads(manifest.read_text())["records"][-1]
+        self.assertEqual(run.exit_code, 0, "a resolved split is not a collection gap")
+        repository = saved["repositories"][0]
+        observations = repository.get("split_observations", [])
+        self.assertEqual(len(observations), 1, "executed split parent must survive in saved manifest")
+        parent = observations[0]
+        self.assertEqual(parent["query"], collector.build_closed_query("owner/repo", self.interval, "all"))
+        self.assertEqual(parent["interval"], [self.interval.start_at, self.interval.end_at])
+        self.assertEqual(parent["total_count"], 1000)
+        self.assertIs(parent["incomplete_results"], True)
+        self.assertEqual(parent["split_reasons"], ["search-result-limit", "incomplete-results"])
+        self.assertEqual(parent["children"], [p["interval"] for p in repository["partitions"]])
+        self.assertEqual(parent["returned_count"], 0)
+        self.assertTrue(parent["observed_at"])
+        self.assertEqual(repository["split_observation_history"], "complete-since-run-start")
+        legacy = deepcopy(run.manifest)
+        legacy_repository = legacy["records"][-1]["repositories"][0]
+        del legacy_repository["split_observations"]
+        del legacy_repository["split_observation_history"]
+        reused = collector.collect(Client(), ["owner/repo"], self.interval, existing_corpus=run.corpus, existing_manifest=legacy, run_id=run.record["run_id"])
+        self.assertNotIn("split_observations", reused.record["repositories"][0], "complete legacy checkpoint must not gain invented parent observations")
+
+    def test_split_observation_checkpoint_survives_interrupt_before_first_leaf(self):
+        collector = self.collector
+        class Client:
+            api_version = "2026-03-10"
+            budget = collector.RequestBudget(100)
+            interrupted = False
+            def get_json(self, endpoint, params=None):
+                if endpoint.startswith("/repos/"):
+                    return collector.ApiResponse(200, {}, {"node_id": "R_repo", "full_name": "owner/repo"})
+                root = "00:00:00Z..2026-09-01T23:59:59Z" in params["q"]
+                if not root and not self.interrupted:
+                    self.interrupted = True
+                    raise KeyboardInterrupt()
+                return collector.ApiResponse(200, {}, {"total_count": 1000 if root else 0, "incomplete_results": False, "items": []})
+        with tempfile.TemporaryDirectory() as directory:
+            output, manifest = Path(directory) / "corpus.json", Path(directory) / "manifest.json"
+            client = Client()
+            collector.collect(client, ["owner/repo"], self.interval, output=output, manifest_output=manifest)
+            saved = json.loads(manifest.read_text())
+            before = saved["records"][-1]["repositories"][0].get("split_observations", [])
+            self.assertEqual(len(before), 1, "parent evidence must precede the first child request")
+            resumed = collector.collect(client, ["owner/repo"], self.interval, existing_corpus=json.loads(output.read_text()), existing_manifest=saved, run_id=saved["records"][-1]["run_id"], output=output, manifest_output=manifest)
+            after = json.loads(manifest.read_text())["records"][-1]["repositories"][0]["split_observations"]
+            self.assertEqual(resumed.exit_code, 0)
+            self.assertEqual(after[:len(before)], before)
+            self.assertEqual(len(after), 2, "a genuinely repeated parent request adds an observation")
+            self.assertEqual(saved["records"][-1]["repositories"][0]["split_observations"], before)
+            class FailedPreflightClient(Client):
+                def global_preflight(self):
+                    raise collector.ApiFailure("fixture authentication failure", status=401)
+            failed = collector.collect(FailedPreflightClient(), ["owner/repo"], self.interval, existing_corpus=resumed.corpus, existing_manifest=resumed.manifest, run_id=resumed.record["run_id"])
+            self.assertEqual(failed.exit_code, 4)
+            self.assertEqual(failed.record["repositories"][0]["split_observations"], after)
+            legacy = deepcopy(saved)
+            del legacy["records"][-1]["repositories"][0]["split_observations"]
+            del legacy["records"][-1]["repositories"][0]["split_observation_history"]
+            legacy_retry = collector.collect(client, ["owner/repo"], self.interval, existing_corpus=json.loads(output.read_text()), existing_manifest=legacy, run_id=legacy["records"][-1]["run_id"])
+            legacy_repository = legacy_retry.record["repositories"][0]
+            self.assertEqual(legacy_repository["split_observation_history"], "legacy-unavailable")
+            self.assertEqual(len(legacy_repository["split_observations"]), 1, "only the new request may supply a legacy retry observation")
+
     def test_safe_leaf_survives_interruption_and_is_not_requested_on_resume(self):
         collector = self.collector
         queries = []

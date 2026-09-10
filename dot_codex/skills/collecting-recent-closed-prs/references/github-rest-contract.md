@@ -29,6 +29,10 @@ Split at a whole-second midpoint when total_count is at least 1000 or
 incomplete_results is true. A still-unsafe one-second leaf is partial. Only
 safe, fully paginated leaves supply selectable hits. Count drift, contradictory
 pages, failures, and exhausted budgets remain explicit partition evidence.
+Before descending, checkpoint the parent's exact query, interval, response
+counts/incomplete flag, capture time, split causes, and proposed child intervals
+in the repository's append-only `split_observations`. This audit is separate
+from final leaf outcomes and does not claim proposed children were requested.
 Deduplicate by PR node ID, order by closed_at/number descending, and apply the
 cap per repository. Keep ordered overflow for outcome-race backfill.
 
