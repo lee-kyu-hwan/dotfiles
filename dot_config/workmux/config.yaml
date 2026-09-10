@@ -1,16 +1,16 @@
 # workmux 전역 설정
 # https://workmux.raine.dev
 #
-# 레이아웃: 좌 nvim(세로 전체) / 우상 claude / 우하 codex
+# 레이아웃: 좌측 pane(세로 전체) / 우측 상단 pane / 우측 하단 pane
 #
 # split 방향은 tmux와 같다 (horizontal=좌우, vertical=위아래).
 # Orca는 반대이므로 혼동하지 않도록 주의.
 #
-# nvim만 자동 실행한다. command를 생략한 pane은 빈 셸로 열리며,
-# claude·codex는 필요할 때 직접 시작한다 — 에이전트가 개당 400MB/55MB를
-# 쓰므로 worktree를 만들 때마다 띄우지 않는다.
+# 어떤 프로그램도 자동 실행하지 않는다. 모든 pane은 빈 셸로 열리며,
+# 필요할 때 사용자가 직접 시작한다 — 에이전트는 개당 400MB/55MB를 쓰므로
+# worktree를 만들 때마다 띄우지 않는다.
 panes:
-  - command: nvim
+  - {}
   - split: horizontal
     focus: true
   - split: vertical
