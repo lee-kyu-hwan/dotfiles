@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {},
+  "analysis_generated_by": {},
+  "records": [],
+  "patterns": [
+    {
+      "pattern_id": "PAT-001",
+      "description": "Budget fixture pattern.",
+      "search_clues": ["budget clue"],
+      "applicability": [],
+      "counterconditions": [],
+      "expected_tests": [],
+      "maintainer_judgment_required": [],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [],
+      "confidence": {},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]
+    }
+  ],
+  "limitations": []
+}

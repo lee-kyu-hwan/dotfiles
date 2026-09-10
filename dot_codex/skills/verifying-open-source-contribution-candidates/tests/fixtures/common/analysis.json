@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {
+    "name": "collecting-recent-closed-prs",
+    "revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "analysis_generated_by": {
+    "name": "analyzing-open-source-pr-patterns",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "records": [],
+  "patterns": [
+    {
+      "pattern_id": "PAT-001",
+      "description": "Keep validation decisions at an explicit boundary.",
+      "search_clues": ["validation boundary", "invalid input", "validation error"],
+      "applicability": ["Input reaches a public boundary."],
+      "counterconditions": ["The boundary already rejects malformed input."],
+      "expected_tests": ["Malformed input is rejected before side effects."],
+      "maintainer_judgment_required": ["Confirm the preferred error surface."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-001", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-001"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+    },
+    {
+      "pattern_id": "PAT-002",
+      "description": "Preserve prior records while appending observations.",
+      "search_clues": ["append only", "history prefix", "preserve records"],
+      "applicability": ["Stored history is auditable."],
+      "counterconditions": ["The format is explicitly replace-only."],
+      "expected_tests": ["Earlier history remains deeply equal."],
+      "maintainer_judgment_required": ["Confirm retention expectations."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-002", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-002"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]
+    },
+    {
+      "pattern_id": "PAT-003",
+      "description": "Report incomplete evidence without inferring absence.",
+      "search_clues": ["partial result", "incomplete evidence", "failed scope"],
+      "applicability": ["Remote evidence collection can partially fail."],
+      "counterconditions": ["All relevant evidence is local and complete."],
+      "expected_tests": ["Failed scopes remain visible in output."],
+      "maintainer_judgment_required": ["Decide whether partial evidence is actionable."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-003", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-003"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]
+    },
+    {
+      "pattern_id": "PAT-004",
+      "description": "Keep remote text inert throughout processing.",
+      "search_clues": ["untrusted text", "data not instructions", "safe rendering"],
+      "applicability": ["Remote free text enters persisted evidence."],
+      "counterconditions": ["No remote free text is processed."],
+      "expected_tests": ["Embedded instructions never affect commands or decisions."],
+      "maintainer_judgment_required": ["Review the presentation of untrusted evidence."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-004", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-004"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+    }
+  ],
+  "limitations": ["Fixture evidence is synthetic and offline."]
+}

@@ -1,0 +1,7 @@
+{
+  "repositories": [
+    {"repository": "example-org/example-archived", "status": "not-applicable", "status_reason": "archived-or-disabled"},
+    {"repository": "example-org/example-duplicate", "status": "duplicate", "status_reason": "duplicate-open"},
+    {"repository": "example-org/example-policy", "status": "policy-review", "status_reason": "policy-prohibited"}
+  ]
+}

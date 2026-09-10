@@ -1,0 +1,9 @@
+{
+  "cases": [
+    "base-moved",
+    "unchanged",
+    "duplicate-search-changed",
+    "policy-files-changed",
+    "base-sha-unknown"
+  ]
+}

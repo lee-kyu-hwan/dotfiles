@@ -1,0 +1,77 @@
+{
+  "/repos/example-org/example-secret": {
+    "status": 200,
+    "headers": {
+      "ETag": "ghp_AAAAAAAAAAAAAAAAAAAA",
+      "Authorization": "token ghp_CCCCCCCCCCCCCCCCCCCC",
+      "Set-Cookie": "session=github_pat_BBBBBBBBBBBBBBBBBBBB",
+      "Content-Type": "application/json"
+    },
+    "payload": {
+      "node_id": "NODE-example-secret",
+      "full_name": "example-org/example-secret",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "MIT"}
+    }
+  },
+  "/repos/example-org/example-secret/commits/main": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"sha": "0123456789abcdef0123456789abcdef01234567"}
+  },
+  "/repos/example-org/example-secret/community/profile": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"files": {"contributing": {"url": "https://docs.github.com/contributing"}}}
+  },
+  "/repos/example-org/example-secret/private-vulnerability-reporting": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"enabled": true}
+  },
+  "/repos/example-org/example-secret/contents/CONTRIBUTING.md?ref=main": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "type": "file",
+      "encoding": "base64",
+      "content": "cGF5bG9hZCBnaHBfQUFBQUFBQUFBQUFBQUFBQUFBQUEgYW5kIGdpdGh1Yl9wYXRfQkJCQkJCQkJCQkJCQkJCQkJCQkI=",
+      "fixture_raw": "payload ghp_AAAAAAAAAAAAAAAAAAAA and github_pat_BBBBBBBBBBBBBBBBBBBB",
+      "size": 78,
+      "sha": "fixture-policy",
+      "html_url": "https://docs.github.com/contributing"
+    }
+  },
+  "/search/issues?q=repo:example-org/example-secret+%22secret+fixture%22+is:issue+is:open": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"total_count": 0, "incomplete_results": false, "items": []}
+  },
+  "/search/issues?q=repo:example-org/example-secret+%22secret+fixture%22+is:issue+is:closed": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"total_count": 0, "incomplete_results": false, "items": []}
+  },
+  "/search/issues?q=repo:example-org/example-secret+%22secret+fixture%22+is:pr+is:open": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"total_count": 0, "incomplete_results": false, "items": []}
+  },
+  "/search/issues?q=repo:example-org/example-secret+%22secret+fixture%22+is:pr+is:closed": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"total_count": 0, "incomplete_results": false, "items": []}
+  },
+  "/search/code?q=repo:example-org/example-secret+%22secret+fixture%22": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"total_count": 0, "incomplete_results": false, "items": []}
+  }
+}
