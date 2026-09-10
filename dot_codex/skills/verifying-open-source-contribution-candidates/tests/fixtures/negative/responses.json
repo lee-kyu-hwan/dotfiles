@@ -1,0 +1,71 @@
+{
+  "/repos/example-org/example-archived": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "node_id": "NODE-example-archived",
+      "full_name": "example-org/example-archived",
+      "archived": true,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "MIT"}
+    }
+  },
+  "/repos/example-org/example-duplicate": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "node_id": "NODE-example-duplicate",
+      "full_name": "example-org/example-duplicate",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "MIT"}
+    }
+  },
+  "/repos/example-org/example-policy": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "node_id": "NODE-example-policy",
+      "full_name": "example-org/example-policy",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "MIT"}
+    }
+  },
+  "/search/issues?q=repo:example-org/example-duplicate+%22fixture%22+is:pr+is:open": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "total_count": 1,
+      "incomplete_results": false,
+      "items": [{
+        "number": 1,
+        "title": "Existing duplicate fixture",
+        "state": "open",
+        "html_url": "https://docs.github.com/duplicate",
+        "created_at": null,
+        "closed_at": null,
+        "pull_request": {},
+        "state_reason": null
+      }]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "repository": "example-org/example-insufficient",
+  "code_search_status": 403,
+  "allow_clone": false,
+  "claimed_status": "issue-ready",
+  "expected_exit": 2
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {},
+  "analysis_generated_by": {},
+  "records": [],
+  "patterns": [
+    {
+      "pattern_id": "PAT-001",
+      "description": "First cap fixture pattern.",
+      "search_clues": [],
+      "applicability": [],
+      "counterconditions": [],
+      "expected_tests": [],
+      "maintainer_judgment_required": [],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [],
+      "confidence": {},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+    },
+    {
+      "pattern_id": "PAT-002",
+      "description": "Second cap fixture pattern.",
+      "search_clues": [],
+      "applicability": [],
+      "counterconditions": [],
+      "expected_tests": [],
+      "maintainer_judgment_required": [],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [],
+      "confidence": {},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]
+    },
+    {
+      "pattern_id": "PAT-003",
+      "description": "Third cap fixture pattern.",
+      "search_clues": [],
+      "applicability": [],
+      "counterconditions": [],
+      "expected_tests": [],
+      "maintainer_judgment_required": [],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [],
+      "confidence": {},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]
+    },
+    {
+      "pattern_id": "PAT-004",
+      "description": "Fourth cap fixture pattern.",
+      "search_clues": [],
+      "applicability": [],
+      "counterconditions": [],
+      "expected_tests": [],
+      "maintainer_judgment_required": [],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [],
+      "confidence": {},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+    }
+  ],
+  "limitations": []
+}

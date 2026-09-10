@@ -1,0 +1,9 @@
+{
+  "repository_failures": [
+    {"repository": "example-org/example-not-found", "http_status": 404, "outcome": "not-found-or-inaccessible"},
+    {"repository": "example-org/example-unauthorized", "http_status": 401, "outcome": "unauthorized"},
+    {"repository": "example-org/example-forbidden", "http_status": 403, "outcome": "forbidden"},
+    {"repository": "example-org/example-transport", "http_status": 500, "outcome": "failed"}
+  ],
+  "head_only_failure": {"repository": "example-org/example-head-missing", "head_sha": null}
+}

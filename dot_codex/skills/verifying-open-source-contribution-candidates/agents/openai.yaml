@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Open-Source Contribution Candidates"
+  short_description: "PAT-* 패턴의 현재 기여 후보를 근거 기반으로 검증"
+  default_prompt: "Use $verifying-open-source-contribution-candidates to validate supplied PAT-* patterns against my specified candidate repositories without making GitHub writes."
