@@ -31,35 +31,66 @@ from execution_watchdog import (
 PYTHON = sys.executable
 SKILL_DIRECTORY = Path(__file__).resolve().parents[1]
 SKILL_BYTES_AT_SUITE_START = (SKILL_DIRECTORY / "SKILL.md").read_bytes()
-TEST_STATE_ROOT = Path("/private/tmp") / ".claude" / "quality-state"
+REPOSITORY_ROOT = SKILL_DIRECTORY.parents[2]
+REPOSITORY_STATE_ROOT = REPOSITORY_ROOT / ".claude" / "quality-state"
+SUITE_UUID = uuid.uuid4().hex
+SUITE_ROOT = REPOSITORY_STATE_ROOT / f"watchdog-test-{SUITE_UUID}"
+
+
+def _assert_owned_suite_root():
+    if (
+        SUITE_ROOT.parent != REPOSITORY_STATE_ROOT
+        or SUITE_ROOT.name != f"watchdog-test-{SUITE_UUID}"
+        or not SUITE_ROOT.name.startswith("watchdog-test-")
+    ):
+        raise AssertionError(f"refusing cleanup of unowned watchdog suite root: {SUITE_ROOT}")
+
+
+def _wait_for_path(path, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"liveness timeout waiting for {path}")
+
+
+class FakeMonotonicClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _run_import_barrier_if_requested():
+    barrier_directory = os.environ.get("WATCHDOG_SUITE_BARRIER_DIRECTORY")
+    label = os.environ.get("WATCHDOG_SUITE_BARRIER_LABEL")
+    if not barrier_directory or not label:
+        return
+    barrier = Path(barrier_directory)
+    SUITE_ROOT.mkdir(parents=True, exist_ok=False)
+    (SUITE_ROOT / "lifetime-marker").write_text(label, encoding="utf-8")
+    (barrier / f"{label}.ready").write_text(str(SUITE_ROOT), encoding="utf-8")
+    _wait_for_path(barrier / f"{label}.release")
+
+
+_run_import_barrier_if_requested()
 
 
 def tearDownModule():
-    """Prove this suite leaves no test state or fixture writes in the skill tree."""
-    directory_residue = subprocess.run(
-        [
-            "find", str(SKILL_DIRECTORY), "-type", "d", "(", "-name", ".claude",
-            "-o", "-name", ".watchdog-*", ")", "-print",
-        ],
-        capture_output=True, text=True, check=False,
-    )
-    fixture_residue = subprocess.run(
-        ["find", str(SKILL_DIRECTORY), "-name", ".watchdog-*", "-print"],
-        capture_output=True, text=True, check=False,
-    )
-    leftovers = "\n".join(filter(None, (
-        directory_residue.stdout.strip(), fixture_residue.stdout.strip(),
-    )))
-    if directory_residue.returncode or fixture_residue.returncode or leftovers:
-        raise AssertionError(f"skill directory test-state residue: {leftovers}")
+    """Remove and inspect only the exact suite root owned by this import."""
     if (SKILL_DIRECTORY / "SKILL.md").read_bytes() != SKILL_BYTES_AT_SUITE_START:
         raise AssertionError("SKILL.md changed while the watchdog suite ran")
-    test_roots = subprocess.run(
-        ["find", str(TEST_STATE_ROOT), "-maxdepth", "1", "-type", "d", "-name", "watchdog-test-*", "-print"],
-        capture_output=True, text=True, check=False,
-    )
-    if test_roots.returncode or test_roots.stdout.strip():
-        raise AssertionError(f"watchdog test-directory residue: {test_roots.stdout.strip()}")
+    _assert_owned_suite_root()
+    shutil.rmtree(SUITE_ROOT, ignore_errors=False) if SUITE_ROOT.exists() else None
+    if SUITE_ROOT.exists():
+        raise AssertionError(f"watchdog test-directory residue: {SUITE_ROOT}")
 
 
 class WatchdogProcessTestCase(unittest.TestCase):
@@ -100,10 +131,10 @@ class WatchdogProcessTestCase(unittest.TestCase):
             shutil.rmtree(directory, ignore_errors=True)
 
     def directory(self):
-        test_root = TEST_STATE_ROOT / f"watchdog-test-{uuid.uuid4().hex}"
-        directory = test_root / f"execution-{uuid.uuid4().hex}"
+        _assert_owned_suite_root()
+        directory = SUITE_ROOT / f"execution-{uuid.uuid4().hex}"
         directory.mkdir(parents=True)
-        self._directories.append(test_root)
+        self._directories.append(directory)
         return directory
 
     def preservation_project(self, execution_dir):
@@ -157,7 +188,7 @@ class WatchdogProcessTestCase(unittest.TestCase):
             monotonic_clock=monotonic_clock or time.monotonic,
             sleep=sleep or time.sleep,
             settings=settings or WatchdogSettings(
-                start_deadline_seconds=0.08,
+                start_deadline_seconds=0.5,
                 activity_stall_seconds=0.08,
                 hard_timeout_seconds=0.25,
                 poll_interval_seconds=0.01,
@@ -206,14 +237,137 @@ class WatchdogProcessTestCase(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual("a prompt from the orchestrator\n", (directory / "events.jsonl").read_text())
 
+    def test_cli_rejects_invalid_explicit_stdin_paths(self):
+        cases = (
+            ("empty", "", "empty"),
+            ("missing", None, "does not exist"),
+            ("directory", None, "directory"),
+        )
+        discrepancies = []
+        for label, configured_path, reason in cases:
+            directory = self.directory()
+            child_marker = directory / "child-started"
+            if label == "missing":
+                configured_path = str(directory / "missing-prompt.txt")
+            elif label == "directory":
+                configured_path = str(directory)
+            completed = subprocess.run(
+                [
+                    PYTHON, str(Path(execution_watchdog.__file__).resolve()),
+                    "--project-root", str(Path.cwd()), "--base-revision", "HEAD",
+                    "--execution-dir", str(directory),
+                    "--events-path", str(directory / "events.jsonl"),
+                    "--stderr-path", str(directory / "stderr.log"),
+                    "--stdin-path", configured_path, "--", PYTHON, "-c",
+                    f"import pathlib; pathlib.Path({str(child_marker)!r}).write_text('started')",
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            if completed.returncode != 2:
+                discrepancies.append(
+                    f"{label}: expected exit 2, got {completed.returncode}; stderr={completed.stderr!r}"
+                )
+            if "stdin-path" not in completed.stderr:
+                discrepancies.append(f"{label}: stderr lacks 'stdin-path': {completed.stderr!r}")
+            if reason not in completed.stderr.casefold():
+                discrepancies.append(f"{label}: stderr lacks {reason!r}: {completed.stderr!r}")
+            if child_marker.exists():
+                discrepancies.append(f"{label}: child started unexpectedly at {child_marker}")
+        self.assertFalse(discrepancies, "INVALID_STDIN_ASSERTION:\n" + "\n".join(discrepancies))
+
+    def test_preflight_cli_argv_prompt_without_stdin_path(self):
+        directory = self.directory()
+        script = "print('argv-only preflight reply')"
+        completed = subprocess.run(
+            [
+                PYTHON, str(Path(execution_watchdog.__file__).resolve()),
+                "--project-root", str(Path.cwd()), "--base-revision", "HEAD",
+                "--execution-dir", str(directory),
+                "--events-path", str(directory / "events.jsonl"),
+                "--stderr-path", str(directory / "stderr.log"),
+                "--", PYTHON, "-c", script,
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("argv-only preflight reply\n", (directory / "events.jsonl").read_text())
+        record = json.loads(completed.stdout)
+        self.assertEqual(0, record["child_exit_code"])
+        self.assertFalse(record["preflight_termination"]["attempted"])
+
     def test_execution_artifacts_use_unique_state_directory_not_tmp(self):
-        outcome, directory = self.run_child("print('reply')", result=False)
+        directory = self.directory()
+        project_root, _ = self.preservation_project(directory)
+        prompt_path = directory / "prompt.txt"
+        prompt_path.write_text("artifact prompt\n", encoding="utf-8")
+        outcome, directory = self.run_child(
+            "import time; time.sleep(1)", project_root=project_root,
+            execution_dir=directory, stdin_text="artifact prompt\n",
+        )
+        result_path = directory / "result.json"
+        result_path.write_text("{}\n", encoding="utf-8")
         self.assertEqual(directory, Path(outcome.record["execution_dir"]))
-        state_root = TEST_STATE_ROOT
-        self.assertTrue(directory.is_relative_to(state_root))
-        for artifact in (directory / "execution-record.json", directory / "events.jsonl", directory / "stderr.log"):
-            self.assertTrue(artifact.exists())
-            self.assertTrue(artifact.is_relative_to(directory))
+        self.assertTrue(directory.is_relative_to(REPOSITORY_STATE_ROOT))
+        artifacts = {
+            "prompt": prompt_path,
+            "result": result_path,
+            "events": directory / "events.jsonl",
+            "stderr": directory / "stderr.log",
+            "execution-record": Path(outcome.record["execution_record_path"]),
+            "preservation-bundle": Path(outcome.record["preservation_bundle"]),
+        }
+        forbidden_roots = (Path("/", "tmp"), Path("/", "private", "tmp"))
+        for kind, artifact in artifacts.items():
+            with self.subTest(kind=kind):
+                message = f"ARTIFACT_ROOT_ASSERTION:{kind}"
+                self.assertTrue(artifact.exists(), message)
+                self.assertTrue(artifact.is_relative_to(directory), message)
+                self.assertTrue(artifact.is_relative_to(REPOSITORY_STATE_ROOT), message)
+                for forbidden in forbidden_roots:
+                    self.assertFalse(artifact.is_relative_to(forbidden), message)
+
+    def test_concurrent_module_runs_isolate_suite_roots_during_overlapping_lifetimes(self):
+        barrier = self.directory() / "barrier"
+        barrier.mkdir()
+        processes = {}
+        for label in ("a", "b"):
+            environment = os.environ.copy()
+            environment.update({
+                "WATCHDOG_SUITE_BARRIER_DIRECTORY": str(barrier),
+                "WATCHDOG_SUITE_BARRIER_LABEL": label,
+            })
+            process = subprocess.Popen(
+                [
+                    PYTHON, "-m", "unittest",
+                    "tests.test_execution_watchdog.WatchdogProcessTestCase."
+                    "test_named_watchdog_settings_allow_short_fixture_values",
+                ],
+                cwd=SKILL_DIRECTORY, env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self._handles.append(process)
+            processes[label] = process
+        for label in processes:
+            _wait_for_path(barrier / f"{label}.ready")
+        roots = {
+            label: Path((barrier / f"{label}.ready").read_text(encoding="utf-8"))
+            for label in processes
+        }
+        self.assertNotEqual(roots["a"], roots["b"])
+        for label, root in roots.items():
+            self.assertEqual(REPOSITORY_STATE_ROOT, root.parent)
+            self.assertTrue(root.name.startswith("watchdog-test-"))
+            self.assertEqual(label, (root / "lifetime-marker").read_text(encoding="utf-8"))
+        (barrier / "a.release").touch()
+        stdout, stderr = processes["a"].communicate(timeout=10)
+        self.assertEqual(0, processes["a"].returncode, stdout + stderr)
+        self.assertFalse(roots["a"].exists())
+        self.assertTrue(roots["b"].exists())
+        self.assertTrue((roots["b"] / "lifetime-marker").exists())
+        (barrier / "b.release").touch()
+        stdout, stderr = processes["b"].communicate(timeout=10)
+        self.assertEqual(0, processes["b"].returncode, stdout + stderr)
+        self.assertFalse(roots["b"].exists())
 
     def test_preflight_accepts_stderr_activity_and_nonempty_reply(self):
         outcome, _ = self.run_child("import sys; print('reply'); print('activity', file=sys.stderr)", result=False)
@@ -229,16 +383,65 @@ class WatchdogProcessTestCase(unittest.TestCase):
         self.assertTrue(reply.record["started"])
 
     def test_start_deadline_records_no_output_reason(self):
-        outcome, _ = self.run_child("import time; time.sleep(1)", result=False)
+        clock = FakeMonotonicClock()
+        settings = WatchdogSettings(
+            start_deadline_seconds=3, activity_stall_seconds=20,
+            hard_timeout_seconds=30, poll_interval_seconds=1,
+            exit_collect_wait_seconds=1, abort_grace_seconds=1,
+            reap_grace_seconds=1, reap_wait_cap_seconds=2,
+            preflight_grace_seconds=1,
+        )
+        outcome, _ = self.run_child(
+            "import time; time.sleep(30)", result=False, settings=settings,
+            monotonic_clock=clock.monotonic, sleep=clock.sleep,
+        )
         self.assertEqual("start_deadline", outcome.record["watchdog_reason"])
+        self.assertGreaterEqual(clock.now, settings.start_deadline_seconds)
 
     def test_missing_streams_trigger_stall_and_hard_timeout_reasons(self):
-        settings = WatchdogSettings(start_deadline_seconds=0.15, activity_stall_seconds=0.03, hard_timeout_seconds=0.2, poll_interval_seconds=0.01, exit_collect_wait_seconds=0.02, abort_grace_seconds=0.01, reap_grace_seconds=0.01, reap_wait_cap_seconds=0.02)
-        outcome, _ = self.run_child("import sys,time; print('started'); sys.stdout.flush(); time.sleep(1)", result=False, settings=settings)
+        directory = self.directory()
+        clock = FakeMonotonicClock()
+        settings = WatchdogSettings(
+            start_deadline_seconds=10, activity_stall_seconds=2,
+            hard_timeout_seconds=20, poll_interval_seconds=1,
+            exit_collect_wait_seconds=1, abort_grace_seconds=1,
+            reap_grace_seconds=1, reap_wait_cap_seconds=2,
+            preflight_grace_seconds=1,
+        )
+        first_sleep = True
+
+        def sleep_after_started(seconds):
+            nonlocal first_sleep
+            if first_sleep:
+                first_sleep = False
+                events_path = directory / "events.jsonl"
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not events_path.stat().st_size:
+                    time.sleep(0.01)
+                self.assertGreater(events_path.stat().st_size, 0, "stall fixture liveness marker")
+            clock.sleep(seconds)
+
+        outcome, _ = self.run_child(
+            "import sys,time; print('started'); sys.stdout.flush(); time.sleep(30)",
+            result=False, settings=settings, execution_dir=directory,
+            monotonic_clock=clock.monotonic, sleep=sleep_after_started,
+        )
         self.assertEqual("activity_stall", outcome.record["watchdog_reason"])
-        settings = WatchdogSettings(start_deadline_seconds=1, activity_stall_seconds=1, hard_timeout_seconds=0.03, poll_interval_seconds=0.01, exit_collect_wait_seconds=0.02, abort_grace_seconds=0.01, reap_grace_seconds=0.01, reap_wait_cap_seconds=0.02)
-        outcome, _ = self.run_child("import time; time.sleep(1)", result=False, settings=settings)
+        self.assertGreaterEqual(clock.now, settings.activity_stall_seconds)
+
+        clock = FakeMonotonicClock()
+        settings = WatchdogSettings(
+            start_deadline_seconds=20, activity_stall_seconds=20,
+            hard_timeout_seconds=3, poll_interval_seconds=1,
+            exit_collect_wait_seconds=1, abort_grace_seconds=1,
+            reap_grace_seconds=1, reap_wait_cap_seconds=2,
+        )
+        outcome, _ = self.run_child(
+            "import time; time.sleep(30)", settings=settings,
+            monotonic_clock=clock.monotonic, sleep=clock.sleep,
+        )
         self.assertEqual("hard_timeout", outcome.record["watchdog_reason"])
+        self.assertGreaterEqual(clock.now, settings.hard_timeout_seconds)
 
     def test_named_watchdog_settings_allow_short_fixture_values(self):
         self.assertEqual(600, ACTIVITY_STALL_SECONDS)
@@ -255,11 +458,38 @@ class WatchdogProcessTestCase(unittest.TestCase):
         self.assertTrue((directory / "result.json").exists())
 
     def test_result_created_before_final_abort_recheck_wins(self):
-        settings = WatchdogSettings(start_deadline_seconds=.2, activity_stall_seconds=.2, hard_timeout_seconds=.4, poll_interval_seconds=.01, exit_collect_wait_seconds=.08, abort_grace_seconds=.03, reap_grace_seconds=.03, reap_wait_cap_seconds=.08)
-        outcome, _ = self.run_child("import json,pathlib,time; time.sleep(.04); pathlib.Path('result.json').write_text(json.dumps({'ok': True})); time.sleep(.02)", validator=lambda path: True, settings=settings)
-        self.assertEqual("completed", outcome.status)
-        self.assertFalse(outcome.record["abort"]["attempted"])
-        self.assertIsNone(outcome.record["watchdog_reason"])
+        directory = self.directory()
+        result_path = directory / "result.json"
+        clock = FakeMonotonicClock()
+        exists_calls = 0
+        reason_was_due_before_result = False
+        original_exists = Path.exists
+
+        def create_result_at_final_recheck(path):
+            nonlocal exists_calls, reason_was_due_before_result
+            if path == result_path:
+                exists_calls += 1
+                if exists_calls == 3:
+                    reason_was_due_before_result = clock.now >= 1
+                    path.write_text('{"ok": true}\n', encoding="utf-8")
+            return original_exists(path)
+
+        settings = WatchdogSettings(
+            start_deadline_seconds=10, activity_stall_seconds=10,
+            hard_timeout_seconds=1, poll_interval_seconds=1,
+            exit_collect_wait_seconds=0, abort_grace_seconds=0,
+            reap_grace_seconds=0, reap_wait_cap_seconds=0,
+        )
+        with mock.patch.object(Path, "exists", create_result_at_final_recheck):
+            outcome, _ = self.run_child(
+                "import time; time.sleep(30)", validator=lambda path: True,
+                settings=settings, execution_dir=directory,
+                monotonic_clock=clock.monotonic, sleep=clock.sleep,
+            )
+        self.assertTrue(reason_was_due_before_result, "RACE_RESET_ASSERTION: reason was not due first")
+        self.assertEqual("completed", outcome.status, "RACE_RESET_ASSERTION: result did not win")
+        self.assertFalse(outcome.record["abort"]["attempted"], "RACE_RESET_ASSERTION: abort attempted")
+        self.assertIsNone(outcome.record["watchdog_reason"], "RACE_RESET_ASSERTION: stale reason was not reset")
 
     def test_accepted_result_with_live_owned_child_is_reap_candidate(self):
         outcome, _ = self.run_child("import json,pathlib,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); time.sleep(1)", validator=lambda path: True)
@@ -267,10 +497,76 @@ class WatchdogProcessTestCase(unittest.TestCase):
         self.assertTrue(outcome.record["reap"]["candidate"])
 
     def test_first_poll_result_and_terminal_paths_return_within_bounds(self):
-        started = time.monotonic()
-        outcome, _ = self.run_child("import json,pathlib; pathlib.Path('result.json').write_text(json.dumps({'ok': True}))", validator=lambda path: True)
-        self.assertEqual("completed", outcome.status)
-        self.assertLess(time.monotonic() - started, 0.3)
+        class AlreadyExitedProcess:
+            pid = 99999999
+
+            def __init__(self, argv, **kwargs):
+                del argv
+                kwargs["stdout"].write(b"reply\n")
+                kwargs["stdout"].flush()
+
+            def poll(self):
+                return 0
+
+        for result in (True, False):
+            with self.subTest(result=result):
+                directory = self.directory()
+                if result:
+                    (directory / "result.json").write_text('{"ok": true}\n', encoding="utf-8")
+                clock = FakeMonotonicClock()
+                with mock.patch.object(execution_watchdog, "_resolve_base_revision", return_value="HEAD"), \
+                     mock.patch.object(execution_watchdog.subprocess, "Popen", AlreadyExitedProcess):
+                    outcome, _ = self.run_child(
+                        "pass", result=result,
+                        validator=(lambda path: True) if result else None,
+                        execution_dir=directory, monotonic_clock=clock.monotonic,
+                        sleep=clock.sleep,
+                    )
+                self.assertEqual("completed", outcome.status)
+                self.assertEqual([], clock.sleeps, "first-poll path must not sleep")
+
+    def test_start_deadline_records_preflight_termination_payload(self):
+        directory = self.directory()
+        marker = directory / "child-ready"
+        clock = FakeMonotonicClock()
+        first_sleep = True
+
+        def sleep_after_ready(seconds):
+            nonlocal first_sleep
+            if first_sleep:
+                first_sleep = False
+                _wait_for_path(marker)
+            clock.sleep(seconds)
+
+        settings = WatchdogSettings(
+            start_deadline_seconds=1, activity_stall_seconds=10,
+            hard_timeout_seconds=20, poll_interval_seconds=1,
+            exit_collect_wait_seconds=0, abort_grace_seconds=1,
+            reap_grace_seconds=1, reap_wait_cap_seconds=2,
+            preflight_grace_seconds=1,
+        )
+        script = (
+            "import pathlib,signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"pathlib.Path({str(marker)!r}).write_text('ready'); "
+            "time.sleep(30)"
+        )
+        outcome, _ = self.run_child(
+            script, result=False, settings=settings, execution_dir=directory,
+            monotonic_clock=clock.monotonic, sleep=sleep_after_ready,
+        )
+        termination = outcome.record["preflight_termination"]
+        message = "PREFLIGHT_TERMINATION_ASSERTION"
+        self.assertTrue(termination["attempted"], message)
+        self.assertEqual(["SIGTERM", "SIGKILL"], termination["signals"], message)
+        self.assertIn(termination["outcome"], {"killed", "cap_exceeded"}, message)
+        self.assertIsInstance(outcome.record["residual_pids"], list, message)
+        self.assertEqual(termination, outcome.record["report_payload"].get("preflight_termination"), message)
+        self.assertEqual(
+            outcome.record["residual_pids"],
+            outcome.record["report_payload"]["residual_pids"],
+            message,
+        )
 
     def test_result_exit_schema_decision_matrix_and_natural_exit(self):
         matrix = ((0, True, "completed"), (1, True, "failed"), (0, False, "failed"))
@@ -285,7 +581,13 @@ class WatchdogProcessTestCase(unittest.TestCase):
 
     def test_dead_recorded_pid_without_result_records_five_facts_immediately(self):
         started = time.monotonic()
-        outcome, _ = self.run_child("pass")
+        settings = WatchdogSettings(
+            start_deadline_seconds=2, activity_stall_seconds=2,
+            hard_timeout_seconds=3, poll_interval_seconds=0.01,
+            exit_collect_wait_seconds=0.08, abort_grace_seconds=0.03,
+            reap_grace_seconds=0.03, reap_wait_cap_seconds=0.08,
+        )
+        outcome, _ = self.run_child("pass", settings=settings)
         self.assertEqual("failed", outcome.status)
         self.assertEqual(0, outcome.record["child_exit_code"])
         self.assertFalse(outcome.record["result_exists"])

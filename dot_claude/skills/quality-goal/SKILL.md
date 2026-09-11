@@ -177,8 +177,12 @@ JSON and notes path in reviewer evidence, and use `record-review --revision-chec
 Wrap every preassembled Codex child argv with `scripts/execution_watchdog.py`.
 The wrapper owns the child process session and transports its argv, events
 stdout, and stderr unchanged for implementation, author, readiness, and
-preflight calls. Each wrapper call supplies `--stdin-path "$PROMPT_PATH"`, so
-the wrapper opens that prompt file as the child's stdin. All prompt, result, events, stderr, execution-record, and
+preflight calls. For implementation, author, and readiness calls, the wrapper
+supplies `--stdin-path "$PROMPT_PATH"` and opens that prompt file as the
+child's stdin. Preflight carries its one-line argv prompt in the assembled
+child argv and omits `--stdin-path`. An explicitly supplied empty, missing, or
+directory stdin path fails before child launch; omitting stdin-path remains
+valid. All prompt, result, events, stderr, execution-record, and
 preservation-bundle files belong only in
 `.claude/quality-state/<task-id>/<execution-id>/`; no fixed `/tmp` path is
 allowed.

@@ -2108,12 +2108,50 @@ class ExecutionWatchdogContentTests(unittest.TestCase):
 
     def test_execution_watchdog_wrapper_passes_named_prompt_path(self):
         routing = read_reference("model-routing.md")
-        blocks = re.findall(r"```bash\n(.*?)```", routing, re.DOTALL)
-        wrapper_blocks = [block for block in blocks if "execution_watchdog.py" in block]
+        sections = {
+            "implementation": routing.split("## Codex invocation", 1)[1].split("### author 호출 템플릿", 1)[0],
+            "author": routing.split("### author 호출 템플릿", 1)[1].split("### readiness 호출 템플릿", 1)[0],
+            "readiness": routing.split("### readiness 호출 템플릿", 1)[1].split("## Preflight", 1)[0],
+            "preflight": routing.split("## Preflight", 1)[1].split("## Recovery and state", 1)[0],
+        }
+        wrapper_blocks = {
+            name: next(
+                block for block in re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+                if "execution_watchdog.py" in block
+            )
+            for name, section in sections.items()
+        }
         self.assertEqual(4, len(wrapper_blocks))
-        for block in wrapper_blocks:
-            with self.subTest(wrapper=block):
-                self.assertIn('--stdin-path "$PROMPT_PATH"', block)
+        message = "WRAPPER_STDIN_3_TO_1_ASSERTION"
+        for name in ("implementation", "author", "readiness"):
+            with self.subTest(wrapper=name):
+                self.assertEqual(1, wrapper_blocks[name].count('--stdin-path "$PROMPT_PATH"'), message)
+        self.assertNotIn('--stdin-path "$PROMPT_PATH"', wrapper_blocks["preflight"], message)
+
+        skill = self.SKILL_PATH.read_text(encoding="utf-8")
+        watchdog_section = skill.split("### Execution watchdog", 1)[1].split("\n### Plan", 1)[0]
+        self.assertIn("implementation, author, and readiness", watchdog_section, message)
+        self.assertIn("argv prompt", watchdog_section, message)
+        self.assertIn("preflight", watchdog_section, message)
+
+    def test_execution_watchdog_fixture_root_is_repository_state(self):
+        source = (self.SKILL_PATH.parent / "tests" / "test_execution_watchdog.py").read_text(
+            encoding="utf-8"
+        )
+        message = "FIXED_TMP_ROOT_ASSERTION"
+        self.assertIn(
+            'REPOSITORY_STATE_ROOT = REPOSITORY_ROOT / ".claude" / "quality-state"',
+            source,
+            message,
+        )
+        self.assertIn(
+            'SUITE_ROOT = REPOSITORY_STATE_ROOT / f"watchdog-test-{SUITE_UUID}"',
+            source,
+            message,
+        )
+        self.assertNotIn('Path("/private/tmp")', source, message)
+        self.assertNotIn('Path("/tmp")', source, message)
+        self.assertNotIn('"watchdog-test-*"', source, message)
 
     def test_execution_watchdog_contract_forbids_external_timeout_tools(self):
         skill = self.SKILL_PATH.read_text(encoding="utf-8").casefold()

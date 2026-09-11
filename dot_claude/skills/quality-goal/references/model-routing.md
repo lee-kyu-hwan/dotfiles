@@ -147,7 +147,6 @@ python3 "$SKILL_DIR/scripts/execution_watchdog.py" \
   --execution-dir "$EXECUTION_DIR" \
   --events-path "$EVENTS_PATH" \
   --stderr-path "$STDERR_PATH" \
-  --stdin-path "$PROMPT_PATH" \
   -- "${PREFLIGHT_CHILD_ARGV[@]}"
 ```
 

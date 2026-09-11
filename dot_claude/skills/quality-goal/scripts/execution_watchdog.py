@@ -49,6 +49,10 @@ class BaseRevisionError(ValueError):
     """The requested preservation baseline cannot be used by this checkout."""
 
 
+class StdinPathError(ValueError):
+    """An explicitly supplied stdin path cannot be opened as a regular file."""
+
+
 def _utcnow():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -238,6 +242,16 @@ def run_execution(
 ):
     """Run one child argv and return its record without deciding a restart."""
     project_root = Path(project_root)
+    if stdin_path is not None:
+        if stdin_path == "":
+            raise StdinPathError("invalid --stdin-path: value is empty")
+        stdin_path = Path(stdin_path)
+        if not stdin_path.exists():
+            raise StdinPathError(f"invalid --stdin-path {stdin_path}: does not exist")
+        if stdin_path.is_dir():
+            raise StdinPathError(f"invalid --stdin-path {stdin_path}: path is a directory")
+        if not stdin_path.is_file():
+            raise StdinPathError(f"invalid --stdin-path {stdin_path}: not a regular file")
     base_revision = _resolve_base_revision(project_root, base_revision)
     execution_dir = Path(execution_dir)
     execution_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +264,7 @@ def run_execution(
     started_at = _utcnow()
     started = monotonic_clock()
     with events_path.open("wb") as events, stderr_path.open("wb") as stderr:
-        stdin = Path(stdin_path).open("rb") if stdin_path else None
+        stdin = stdin_path.open("rb") if stdin_path is not None else None
         try:
             process = subprocess.Popen(
                 child_argv, cwd=execution_dir, stdin=stdin, stdout=events, stderr=stderr, start_new_session=True,
@@ -402,7 +416,7 @@ def main(argv=None):
             base_revision=arguments.base_revision, result_path=arguments.result_path, events_path=arguments.events_path,
             stderr_path=arguments.stderr_path, stdin_path=arguments.stdin_path,
         )
-    except BaseRevisionError as error:
+    except (BaseRevisionError, StdinPathError) as error:
         parser.exit(2, f"watchdog initialization failed: {error}\n")
     print(json.dumps(outcome.record, ensure_ascii=False))
     return 0 if outcome.status == "completed" else 1
