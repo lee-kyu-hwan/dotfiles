@@ -986,70 +986,77 @@ def _warn_for_nonstandard_state_root(state_root, project_root):
     )
 
 
-def _read_untracked_value(digest, path, relative_path, include_path=True):
+def _read_untracked_value(digest, path, relative_path):
     relative_bytes = os.fsencode(relative_path)
-    if include_path:
-        _frame(digest, "path", relative_bytes)
+    _frame(digest, "path", relative_bytes)
     try:
         file_stat = os.lstat(path)
     except (OSError, UnicodeError, TypeError) as exc:
         raise _filesystem_error(path, exc) from exc
 
+    _frame(
+        digest,
+        "lstat-type",
+        f"{stat.S_IFMT(file_stat.st_mode):06o}".encode("ascii"),
+    )
+    _frame(
+        digest,
+        "lstat-permissions",
+        f"{stat.S_IMODE(file_stat.st_mode):04o}".encode("ascii"),
+    )
     if stat.S_ISLNK(file_stat.st_mode):
         try:
             link_target = os.readlink(path)
         except (OSError, UnicodeError, TypeError) as exc:
             raise _filesystem_error(path, exc) from exc
         _frame(digest, "symlink", os.fsencode(link_target))
+        return False
     elif stat.S_ISREG(file_stat.st_mode):
         try:
             contents = Path(path).read_bytes()
         except (OSError, UnicodeError, TypeError) as exc:
             raise _filesystem_error(path, exc) from exc
         _frame(digest, "file", contents)
+        return False
+    elif stat.S_ISDIR(file_stat.st_mode):
+        _frame(digest, "dir", b"")
+        return True
     else:
         _frame(digest, "special", b"")
+        return False
 
 
 def _walk_untracked_directory(digest, root, relative_path):
-    top = root / relative_path
+    stack = [("scan", root / relative_path, relative_path)]
+    while stack:
+        action, path, relative = stack.pop()
+        if action == "entry":
+            if _read_untracked_value(digest, path, relative):
+                stack.append(("scan", path, relative))
+            continue
 
-    def onerror(error):
-        path = error.filename or top
-        raise _filesystem_error(path, error)
+        try:
+            with os.scandir(path) as entries:
+                children = []
+                for entry in entries:
+                    child_path = path / entry.name
+                    child_relative = os.path.relpath(child_path, root)
+                    if _is_state_path(child_relative):
+                        continue
+                    children.append(
+                        (os.fsencode(child_relative), child_path, child_relative)
+                    )
+        except (OSError, UnicodeError, TypeError) as exc:
+            raise _filesystem_error(
+                getattr(exc, "filename", None) or path, exc
+            ) from exc
 
-    for current, dirnames, filenames in os.walk(
-        top,
-        followlinks=False,
-        onerror=onerror,
-    ):
-        dirnames.sort()
-        filenames.sort()
-        symlink_directories = []
-        for dirname in list(dirnames):
-            path = Path(current) / dirname
-            relative = os.path.relpath(path, root)
-            if _is_state_path(relative):
-                dirnames.remove(dirname)
-                continue
-            try:
-                file_stat = os.lstat(path)
-            except (OSError, UnicodeError, TypeError) as exc:
-                raise _filesystem_error(path, exc) from exc
-            if stat.S_ISLNK(file_stat.st_mode):
-                dirnames.remove(dirname)
-                symlink_directories.append(path)
-        for path in symlink_directories:
-            relative = os.path.relpath(path, root)
-            if _is_state_path(relative):
-                continue
-            _read_untracked_value(digest, path, relative)
-        for filename in filenames:
-            path = Path(current) / filename
-            relative = os.path.relpath(path, root)
-            if _is_state_path(relative):
-                continue
-            _read_untracked_value(digest, path, relative)
+        stack.extend(
+            ("entry", child_path, child_relative)
+            for _, child_path, child_relative in reversed(
+                sorted(children, key=lambda child: child[0])
+            )
+        )
 
 
 def _status_paths(status_output):
@@ -1139,19 +1146,74 @@ def compute_workspace_fingerprint(project_root):
         f":(exclude){STATE_DIR_RELATIVE}",
     )
     untracked_paths = sorted(
-        path_bytes for path_bytes in untracked_output.split(b"\0") if path_bytes
+        path_bytes[:-1] if path_bytes.endswith(b"/") else path_bytes
+        for path_bytes in untracked_output.split(b"\0")
+        if path_bytes
     )
     for path_bytes in untracked_paths:
         path = os.fsdecode(path_bytes)
         if _is_state_path(path):
             continue
-        _frame(digest, "path", path_bytes)
-        if path.endswith("/"):
-            _frame(digest, "dir", path_bytes)
+        if _read_untracked_value(digest, root / path, path):
             _walk_untracked_directory(digest, root, path)
-        else:
-            _read_untracked_value(digest, root / path, path, include_path=False)
     return digest.hexdigest()
+
+
+def _validate_completion_workspace(state):
+    """Validate completion evidence against the currently observed workspace."""
+    _validate_transition_request(state, "COMPLETED", None)
+    project_root = state.get("project_root")
+    if not isinstance(project_root, str) or not project_root.strip():
+        raise StateError("project_root must be a non-empty string")
+
+    current_fingerprint = compute_workspace_fingerprint(project_root)
+    verification = state.get("verification")
+    verified_fingerprint = (
+        verification.get("workspace_fingerprint")
+        if isinstance(verification, dict)
+        else None
+    )
+    if (
+        not isinstance(verification, dict)
+        or verification.get("valid") is not True
+        or not isinstance(verified_fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", verified_fingerprint) is None
+    ):
+        raise TransitionError(
+            "completion requires a valid verification workspace fingerprint"
+        )
+
+    reviews = state.get("reviews")
+    code_reviews = reviews.get("code") if isinstance(reviews, dict) else None
+    final_review = (
+        code_reviews[-1]
+        if isinstance(code_reviews, list) and code_reviews
+        else None
+    )
+    reviewed_digest = (
+        final_review.get("artifact_digest")
+        if isinstance(final_review, dict)
+        else None
+    )
+    if (
+        not isinstance(final_review, dict)
+        or final_review.get("verdict") != "PASS"
+        or not isinstance(reviewed_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", reviewed_digest) is None
+    ):
+        raise TransitionError(
+            "completion requires the final code review record itself to be PASS "
+            "with a valid artifact digest"
+        )
+
+    if not (
+        current_fingerprint == verified_fingerprint == reviewed_digest
+    ):
+        raise TransitionError(
+            "completion requires exact equality between the current workspace, "
+            "valid verification, and final PASS review fingerprints"
+        )
+    return current_fingerprint
 
 
 def record_verification(state, verification_path, workspace_fingerprint):
@@ -1444,9 +1506,14 @@ def main(argv=None):
         elif args.command == "show":
             _write_json(load_state(args.state))
         elif args.command == "transition":
+            def apply_transition(state):
+                if args.to == "COMPLETED":
+                    _validate_completion_workspace(state)
+                return transition(state, args.to, args.reason)
+
             _mutating_result(
                 args.state,
-                lambda state: transition(state, args.to, args.reason),
+                apply_transition,
             )
         elif args.command == "record-review":
             _mutating_result(

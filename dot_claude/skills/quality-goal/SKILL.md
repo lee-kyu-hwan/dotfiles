@@ -1,6 +1,6 @@
 ---
 name: quality-goal
-version: 5.2.0
+version: 6.0.0
 description: Use when the user explicitly requests a quality-gated, documented software change workflow.
 argument-hint: '[--mode=auto|light|standard|strict] <goal>'
 disable-model-invocation: true
@@ -122,7 +122,7 @@ artifact's SHA-256 approval digest via approve-plan.
 | AWAITING_PLAN_APPROVAL | Show the final Plan or the light compact Plan and ask exactly once for explicit implementation approval |
 | IMPLEMENTING | Confirm the approval digest and invoke the exact Codex route for the selected mode |
 | CODE_REVIEW | Independently verify each Codex round, create the review context, review, validate, gate, and fix at most three rounds |
-| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED | Render report.md from templates/report.md and register it with set-artifact --kind report (absolute path) BEFORE transitioning into the terminal state; then transition and explain the terminal outcome. When a helper has already transitioned automatically, register the report in the terminal state as the Terminal section describes. |
+| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED | For COMPLETED, report.md and every other durable file included in the workspace fingerprint must reach final bytes before measuring the fingerprint used by record-verification and before the formal code review. Any fingerprint-included workspace write after verification or review requires fresh verification and a fresh code review before completion. For other terminal outcomes, render and register report.md before transition. When a helper has already transitioned automatically, register the report in the terminal state as the Terminal section describes. |
 
 ## Stage procedures
 
@@ -323,12 +323,19 @@ verification, or model recovery path.
 
 ### Terminal
 
+For `COMPLETED`, report.md and every other durable file included in the workspace
+fingerprint must reach final bytes before measuring the fingerprint used by
+record-verification and before the formal code review. Any fingerprint-included
+workspace write after verification or review requires fresh verification and a
+fresh code review before completion.
+
 For every terminal outcome, render report.md from templates/report.md and
-register it with set-artifact --kind report (absolute path) BEFORE
-transitioning into COMPLETED, BLOCKED, NEEDS_REDESIGN, or CANCELLED, unless a
-helper has already transitioned automatically, in which case register the
-report in the terminal state as described below. Then
-transition into the selected terminal state and only then explain the
+register it with set-artifact --kind report (absolute path) BEFORE transitioning
+into COMPLETED, BLOCKED, NEEDS_REDESIGN, or CANCELLED, unless a helper has
+already transitioned automatically, in which case register the report in the
+terminal state as described below. For `COMPLETED`, this rendering and
+registration is the final fingerprint-included write before the ordering above.
+Then transition into the selected terminal state and only then explain the
 outcome, evidence, unresolved advisory findings, and any next decision. The
 state file remains the authoritative record of the terminal status and status
 reason.
@@ -418,6 +425,32 @@ changed_files, commands with exit codes and results, plan deviations, and
 remaining concerns. A model-unavailable recovery asks the user while staying
 in the current stage; a user-declined substitution becomes BLOCKED with
 BLOCKED_MODEL_UNAVAILABLE.
+
+## Completion integrity
+
+report.md and every other durable file included in the workspace fingerprint
+must reach final bytes before measuring the fingerprint used by
+record-verification and before the formal code review. Any fingerprint-included
+workspace write after verification or review requires fresh verification and a
+fresh code review before completion.
+
+Immediately before saving `COMPLETED`, the transition CLI must recompute the
+current actual workspace fingerprint by directly measuring the exact path
+stored in `state.project_root`.
+
+Completion may proceed only when `verification.valid is True` and its
+verification fingerprint is valid. The final `reviews.code[-1]` record itself
+must be `PASS`, and its valid `artifact_digest`, the current actual fingerprint,
+and the valid verification fingerprint must be exactly equal. The CLI must
+never search backward for an earlier passing review.
+
+Any failure refuses completion and leaves `COMPLETED` unsaved. In the protected
+text below, “last passing code review” means only that the final
+`reviews.code[-1]` record itself is `PASS`; it never permits backward search.
+
+Without a lock or generation counter, this guarantee covers the workspace
+observed during recomputation and does not guarantee against concurrent changes
+immediately after measurement.
 
 ## Independent verification
 

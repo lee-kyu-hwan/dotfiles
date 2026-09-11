@@ -3,10 +3,13 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import io
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2037,6 +2040,358 @@ class ReviewValidationRetryTests(unittest.TestCase):
             self.assertEqual(1, result["rounds"]["plan"])
 
 
+class FingerprintMetadataTests(unittest.TestCase):
+    @staticmethod
+    def capture_frames(operation):
+        frames = []
+        real_frame = quality_state._frame
+
+        def record_frame(digest, label, payload):
+            frames.append((label, payload))
+            real_frame(digest, label, payload)
+
+        with patch.object(quality_state, "_frame", side_effect=record_frame):
+            result = operation()
+        return frames, result
+
+    @staticmethod
+    def expected_entry(path, relative_path):
+        mode = os.lstat(path).st_mode
+        frames = [
+            ("path", os.fsencode(relative_path)),
+            ("lstat-type", f"{stat.S_IFMT(mode):06o}".encode("ascii")),
+            ("lstat-permissions", f"{stat.S_IMODE(mode):04o}".encode("ascii")),
+        ]
+        if stat.S_ISREG(mode):
+            frames.append(("file", path.read_bytes()))
+        elif stat.S_ISDIR(mode):
+            frames.append(("dir", b""))
+        elif stat.S_ISLNK(mode):
+            frames.append(("symlink", os.fsencode(os.readlink(path))))
+        else:
+            frames.append(("special", b""))
+        return frames
+
+    def make_embedded_repository(self, root, name="d"):
+        embedded = root / name
+        embedded.mkdir()
+        run_git(embedded, "init")
+        return embedded
+
+    def untracked_frames(self, root):
+        frames, fingerprint = self.capture_frames(
+            lambda: quality_state.compute_workspace_fingerprint(root)
+        )
+        first_path = next(index for index, frame in enumerate(frames) if frame[0] == "path")
+        return frames[first_path:], fingerprint
+
+    def test_untracked_entry_frames_path_type_permissions_before_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            regular = root / "regular.txt"
+            regular.write_bytes(b"regular payload")
+            top_directory = root / "top-directory"
+            top_directory.mkdir()
+            nested_directory = top_directory / "nested-directory"
+            nested_directory.mkdir()
+            symlink_directory = root / "symlink-directory"
+            symlink_directory.symlink_to(top_directory.name, target_is_directory=True)
+            ordinary_symlink = root / "ordinary-symlink"
+            ordinary_symlink.symlink_to("missing-target")
+            special = root / "special"
+            os.mkfifo(special)
+
+            entries = (
+                (regular, "regular.txt"),
+                (top_directory, "top-directory"),
+                (nested_directory, "top-directory/nested-directory"),
+                (symlink_directory, "symlink-directory"),
+                (ordinary_symlink, "ordinary-symlink"),
+                (special, "special"),
+            )
+            for path, relative_path in entries:
+                with self.subTest(relative_path=relative_path):
+                    frames, _ = self.capture_frames(
+                        lambda path=path, relative_path=relative_path: quality_state._read_untracked_value(
+                            hashlib.sha256(), path, relative_path
+                        )
+                    )
+                    self.assertEqual(self.expected_entry(path, relative_path), frames)
+
+    def test_untracked_reader_has_no_path_framing_bypass(self):
+        self.assertEqual(
+            ["digest", "path", "relative_path"],
+            list(inspect.signature(quality_state._read_untracked_value).parameters),
+        )
+
+    def test_deep_untracked_walk_does_not_consume_python_call_stack(self):
+        depth = sys.getrecursionlimit() + 50
+        relative_paths = []
+
+        class Entry:
+            name = "d"
+
+        class Entries:
+            def __enter__(self):
+                return iter((Entry(),))
+
+            def __exit__(self, *_args):
+                return False
+
+        def read_entry(_digest, _path, relative_path):
+            relative_paths.append(relative_path)
+            return len(relative_paths) < depth
+
+        with (
+            patch.object(os, "scandir", side_effect=lambda _path: Entries()),
+            patch.object(
+                quality_state,
+                "_read_untracked_value",
+                side_effect=read_entry,
+            ),
+        ):
+            try:
+                quality_state._walk_untracked_directory(
+                    hashlib.sha256(), Path("/mock-root"), "start"
+                )
+            except RecursionError:
+                self.fail("untracked walking consumed Python call-stack depth")
+
+        self.assertEqual(depth, len(relative_paths))
+        self.assertEqual("start/d", relative_paths[0])
+        self.assertEqual(
+            "start/" + "/".join("d" for _ in range(depth)),
+            relative_paths[-1],
+        )
+
+    def test_regular_file_permissions_change_and_restore_fingerprint(self):
+        root = make_git_repo(self)
+        path = root / "executable-candidate"
+        path.write_bytes(b"same payload")
+        path.chmod(0o644)
+        original = quality_state.compute_workspace_fingerprint(root)
+
+        path.chmod(0o755)
+        changed = quality_state.compute_workspace_fingerprint(root)
+        path.chmod(0o644)
+        restored = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(original, changed)
+        self.assertEqual(original, restored)
+
+    def test_top_level_and_nested_directory_permissions_change_and_restore_fingerprint(self):
+        root = make_git_repo(self)
+        top = self.make_embedded_repository(root, "container")
+        nested = top / "nested"
+        nested.mkdir()
+        child = nested / "child.txt"
+        child.write_bytes(b"child")
+        top.chmod(0o755)
+        nested.chmod(0o755)
+        self.assertIn(
+            "container/",
+            run_git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"),
+        )
+        original = quality_state.compute_workspace_fingerprint(root)
+
+        top.chmod(0o700)
+        top_changed = quality_state.compute_workspace_fingerprint(root)
+        top.chmod(0o755)
+        self.assertEqual(original, quality_state.compute_workspace_fingerprint(root))
+
+        nested.chmod(0o700)
+        nested_changed = quality_state.compute_workspace_fingerprint(root)
+        nested.chmod(0o755)
+        frames, restored = self.untracked_frames(root)
+
+        self.assertNotEqual(original, top_changed)
+        self.assertNotEqual(original, nested_changed)
+        self.assertEqual(original, restored)
+        nested_frames = self.expected_entry(nested, "container/nested")
+        nested_index = frames.index(nested_frames[0])
+        self.assertEqual(nested_frames, frames[nested_index:nested_index + 4])
+        self.assertEqual(("path", b"container/nested/child.txt"), frames[nested_index + 4])
+
+    def test_root_and_nested_mixed_kinds_use_normalized_byte_path_depth_first_order(self):
+        root = make_git_repo(self)
+        embedded = self.make_embedded_repository(root, "d")
+        root_file = root / "d.txt"
+        root_file.write_bytes(b"root file")
+        special = embedded / "a-special"
+        os.mkfifo(special)
+        nested = embedded / "b-directory"
+        nested.mkdir()
+        child = nested / "child.txt"
+        child.write_bytes(b"nested child")
+        symlink_directory = embedded / "c-symlink-directory"
+        symlink_directory.symlink_to("b-directory", target_is_directory=True)
+        regular = embedded / "d-file"
+        regular.write_bytes(b"nested file")
+
+        discovery = run_git(
+            root, "ls-files", "--others", "--exclude-standard", "-z"
+        ).stdout.split("\0")
+        self.assertIn("d/", discovery)
+        self.assertIn("d.txt", discovery)
+        self.assertNotIn("d/a-special", discovery)
+
+        frames, _ = self.untracked_frames(root)
+        self.assertEqual(0, len(frames) % 4)
+        groups = [frames[index:index + 4] for index in range(0, len(frames), 4)]
+        paths = [group[0][1] for group in groups]
+        self.assertNotIn(b"d/", paths)
+        self.assertIn(b"d", paths)
+        self.assertIn(b"d.txt", paths)
+        self.assertLess(paths.index(b"d"), paths.index(b"d.txt"))
+        expected = [
+            self.expected_entry(embedded, "d"),
+            self.expected_entry(special, "d/a-special"),
+            self.expected_entry(nested, "d/b-directory"),
+            self.expected_entry(child, "d/b-directory/child.txt"),
+            self.expected_entry(symlink_directory, "d/c-symlink-directory"),
+            self.expected_entry(regular, "d/d-file"),
+            self.expected_entry(root_file, "d.txt"),
+        ]
+        fixture_paths = {group[0][1] for group in expected}
+        self.assertEqual(expected, [group for group in groups if group[0][1] in fixture_paths])
+
+    def test_symlinks_are_not_dereferenced_and_symlink_directories_are_pruned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target-directory"
+            target.mkdir()
+            secret = target / "must-not-be-read.txt"
+            secret.write_bytes(b"secret")
+            alternate_target = root / "alternate-target-directory"
+            alternate_target.mkdir()
+            alternate_secret = alternate_target / "must-not-be-read.txt"
+            alternate_secret.write_bytes(b"secret")
+            links = (
+                root / "existing-link",
+                root / "broken-link",
+                root / "directory-link",
+            )
+            links[0].symlink_to(secret)
+            links[1].symlink_to(root / "missing")
+            links[2].symlink_to(target, target_is_directory=True)
+
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("target read")):
+                for link in links:
+                    quality_state._read_untracked_value(
+                        hashlib.sha256(), link, link.name
+                    )
+
+            walk_root = root / "walk-root"
+            walk_root.mkdir()
+            pruned = walk_root / "pruned-link"
+            pruned.symlink_to(target, target_is_directory=True)
+            frames, _ = self.capture_frames(
+                lambda: quality_state._walk_untracked_directory(
+                    hashlib.sha256(), root, "walk-root"
+                )
+            )
+            self.assertIn(("symlink", os.fsencode(os.readlink(pruned))), frames)
+            self.assertNotIn(("path", b"target-directory/must-not-be-read.txt"), frames)
+
+            def entry_fingerprint(link):
+                digest = hashlib.sha256()
+                with patch.object(
+                    Path, "read_bytes", side_effect=AssertionError("target read")
+                ):
+                    quality_state._read_untracked_value(digest, link, link.name)
+                return digest.hexdigest()
+
+            replacements = (
+                (links[0], alternate_secret),
+                (links[1], root / "different-missing"),
+                (links[2], alternate_target),
+            )
+            for link, replacement in replacements:
+                with self.subTest(link=link.name):
+                    before = entry_fingerprint(link)
+                    link.unlink()
+                    link.symlink_to(
+                        replacement,
+                        target_is_directory=link.name == "directory-link",
+                    )
+                    self.assertNotEqual(before, entry_fingerprint(link))
+
+    def test_special_files_are_never_opened_or_readlinked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            special = Path(directory) / "never-read"
+            os.mkfifo(special)
+            with (
+                patch.object(Path, "read_bytes", side_effect=AssertionError("payload read")) as read_bytes,
+                patch.object(Path, "open", side_effect=AssertionError("payload opened")) as path_open,
+                patch.object(os, "readlink", side_effect=AssertionError("readlink called")) as readlink,
+            ):
+                frames, _ = self.capture_frames(
+                    lambda: quality_state._read_untracked_value(
+                        hashlib.sha256(), special, "never-read"
+                    )
+                )
+            self.assertEqual(self.expected_entry(special, "never-read"), frames)
+            read_bytes.assert_not_called()
+            path_open.assert_not_called()
+            readlink.assert_not_called()
+
+    def test_metadata_fingerprint_is_repeatable_and_preserves_existing_inputs(self):
+        first = make_git_repo(self)
+        second_parent = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        second = second_parent / "cloned"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(first), str(second)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        def materialize(root, order):
+            embedded = self.make_embedded_repository(root, "bundle")
+            operations = {
+                "file": lambda: (embedded / "a-file").write_bytes(b"same"),
+                "directory": lambda: (embedded / "b-directory").mkdir(),
+                "child": lambda: (embedded / "b-directory" / "child").write_bytes(b"child"),
+                "symlink": lambda: (embedded / "c-symlink").symlink_to(
+                    "b-directory", target_is_directory=True
+                ),
+                "special": lambda: os.mkfifo(embedded / "d-special"),
+            }
+            for operation in order:
+                operations[operation]()
+
+        materialize(first, ("file", "directory", "child", "symlink", "special"))
+        materialize(second, ("directory", "child", "special", "file", "symlink"))
+        self.assertEqual(
+            ["bundle/", ""],
+            run_git(first, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"),
+        )
+        first_frames, first_fingerprint = self.untracked_frames(first)
+        second_frames, second_fingerprint = self.untracked_frames(second)
+
+        self.assertEqual(first_frames, second_frames)
+        self.assertEqual(first_fingerprint, second_fingerprint)
+        self.assertEqual(
+            first_fingerprint,
+            quality_state.compute_workspace_fingerprint(first),
+        )
+
+        state_path = first / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text("state evidence\n", encoding="utf-8")
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").write_text("tracked change\n", encoding="utf-8")
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").write_text("base\n", encoding="utf-8")
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").chmod(0o755)
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").chmod(0o644)
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        run_git(first, "commit", "--allow-empty", "-m", "different head")
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+
+
 class FingerprintTests(unittest.TestCase):
     def test_unignored_state_files_do_not_change_fingerprint_but_normal_untracked_files_do(self):
         root = make_git_repo(self)
@@ -2982,6 +3337,253 @@ class RevisionCheckCLITests(unittest.TestCase):
                 ])
             self.assertNotEqual(0, result)
             self.assertIn("--revision-check", errors.getvalue())
+
+
+class CompletionIntegrityCLITests(unittest.TestCase):
+    def invoke_main(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = quality_state.main(args)
+        return result, output.getvalue(), errors.getvalue()
+
+    def save_completion_ready_state(self, directory, root, *, fingerprint=None):
+        fingerprint = fingerprint or quality_state.compute_workspace_fingerprint(root)
+        state = state_at("CODE_REVIEW", project_root=root)
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": fingerprint,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": fingerprint,
+            "valid": True,
+        }
+        state_path = Path(directory) / "state.json"
+        quality_state.save_state(state_path, state)
+        return state_path
+
+    def assert_refused_without_saving(self, state_path, expected_exit=3):
+        before = state_path.read_bytes()
+        result, _, errors = self.invoke_main(
+            ["transition", "--state", str(state_path), "--to", "COMPLETED"]
+        )
+        self.assertEqual(expected_exit, result, errors)
+        self.assertTrue(errors.startswith("error:"), errors)
+        self.assertEqual(before, state_path.read_bytes())
+        self.assertNotEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+        return errors
+
+    def test_unchanged_workspace_completes_with_current_verified_final_pass_digest(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            result, output, errors = self.invoke_main(
+                ["transition", "--state", str(state_path), "--to", "COMPLETED"]
+            )
+
+            self.assertEqual(0, result, errors)
+            self.assertEqual("COMPLETED", json.loads(output)["stage"])
+            self.assertEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+
+    def test_tracked_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            (root / "app.txt").write_text("changed after verification\n", encoding="utf-8")
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_untracked_mode_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        untracked = root / "mode-sensitive"
+        untracked.write_bytes(b"unchanged payload")
+        untracked.chmod(0o644)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            untracked.chmod(0o755)
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_head_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            run_git(root, "commit", "--allow-empty", "-m", "new head")
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_final_revise_never_back_searches_an_earlier_pass(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            state = quality_state.load_state(state_path)
+            state["rounds"]["code"] = 2
+            state["reviews"]["code"].append(
+                {"verdict": "REVISE", "blockers": [], "artifact_digest": "b" * 64}
+            )
+            quality_state.save_state(state_path, state)
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("passing final review", errors)
+
+    def test_final_pass_digest_mismatch_refuses_without_saving(self):
+        root = make_git_repo(self)
+        cases = (
+            ("digest-mismatch", "b" * 64, None, True),
+            ("invalid-verification", None, None, False),
+            ("malformed-stored-digests", "A" * 64, "A" * 64, True),
+        )
+        for label, review_digest, verification_digest, verification_valid in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(directory, root)
+                state = quality_state.load_state(state_path)
+                if review_digest is not None:
+                    state["reviews"]["code"][-1]["artifact_digest"] = review_digest
+                if verification_digest is not None:
+                    state["verification"]["workspace_fingerprint"] = verification_digest
+                state["verification"]["valid"] = verification_valid
+                quality_state.save_state(state_path, state)
+                errors = self.assert_refused_without_saving(state_path)
+                self.assertIn("requires", errors)
+
+    def test_malformed_project_root_returns_two_without_saving(self):
+        root = make_git_repo(self)
+        cases = (("missing", None), ("empty", ""), ("non-string", 7))
+        for label, value in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(directory, root)
+                state = quality_state.load_state(state_path)
+                if label == "missing":
+                    del state["project_root"]
+                else:
+                    state["project_root"] = value
+                quality_state.save_state(state_path, state)
+                errors = self.assert_refused_without_saving(state_path, expected_exit=2)
+                self.assertIn("project_root", errors)
+
+    def test_repository_observation_failures_return_four_without_saving(self):
+        valid_root = make_git_repo(self)
+        non_git_context = tempfile.TemporaryDirectory()
+        self.addCleanup(non_git_context.cleanup)
+        empty_context = tempfile.TemporaryDirectory()
+        self.addCleanup(empty_context.cleanup)
+        empty_root = Path(empty_context.name)
+        run_git(empty_root, "init")
+        cases = (
+            ("non-git", Path(non_git_context.name), None),
+            ("no-commit", empty_root, None),
+            ("git-failure", valid_root, quality_state.GitError("git observation failed")),
+            (
+                "filesystem-failure",
+                valid_root,
+                quality_state.FilesystemError("filesystem observation failed"),
+            ),
+        )
+
+        for label, root, error in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(
+                    directory,
+                    root,
+                    fingerprint="a" * 64,
+                )
+                context = (
+                    patch.object(
+                        quality_state,
+                        "compute_workspace_fingerprint",
+                        side_effect=error,
+                    )
+                    if error is not None
+                    else patch.object(
+                        quality_state,
+                        "compute_workspace_fingerprint",
+                        wraps=quality_state.compute_workspace_fingerprint,
+                    )
+                )
+                with context:
+                    errors = self.assert_refused_without_saving(
+                        state_path, expected_exit=4
+                    )
+                self.assertIn("error:", errors)
+
+
+class TransitionPurityTests(unittest.TestCase):
+    @staticmethod
+    def completion_state(digest="c" * 64):
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {"verdict": "PASS", "blockers": [], "artifact_digest": digest}
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": digest,
+            "valid": True,
+        }
+        return state
+
+    def test_pure_completion_transition_performs_no_git_or_filesystem_io(self):
+        state = self.completion_state()
+        with (
+            patch.object(
+                quality_state,
+                "compute_workspace_fingerprint",
+                side_effect=AssertionError("fingerprint I/O"),
+            ),
+            patch.object(
+                quality_state,
+                "_git_run",
+                side_effect=AssertionError("Git I/O"),
+            ),
+            patch.object(os, "lstat", side_effect=AssertionError("filesystem I/O")),
+        ):
+            result = quality_state.transition(state, "COMPLETED")
+        self.assertEqual("COMPLETED", result["stage"])
+
+    def test_pure_completion_transition_keeps_stored_digest_guard(self):
+        accepted = self.completion_state()
+        self.assertEqual("COMPLETED", quality_state.transition(accepted, "COMPLETED")["stage"])
+
+        refused = self.completion_state()
+        refused["verification"]["workspace_fingerprint"] = "d" * 64
+        before = deepcopy(refused)
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(refused, "COMPLETED")
+        self.assertEqual(before, refused)
+
+    def test_state_schema_and_transition_parser_surface_are_unchanged(self):
+        state = state_at("CODE_REVIEW")
+        keys = set(state)
+        transitions = deepcopy(quality_state.ALLOWED_TRANSITIONS)
+        terminal_states = set(quality_state.TERMINAL_STATES)
+        parser = quality_state._build_parser()
+        subparsers = next(
+            action for action in parser._actions if hasattr(action, "choices") and action.choices
+        )
+        transition_parser = subparsers.choices["transition"]
+        options = {
+            option
+            for action in transition_parser._actions
+            for option in action.option_strings
+        }
+
+        self.assertEqual(1, state["schema_version"])
+        self.assertEqual(keys, set(quality_state.load_state(self._save_and_return(state))))
+        self.assertEqual({"-h", "--help", "--state", "--to", "--reason"}, options)
+        self.assertEqual(transitions, quality_state.ALLOWED_TRANSITIONS)
+        self.assertEqual(terminal_states, set(quality_state.TERMINAL_STATES))
+
+    def _save_and_return(self, state):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "state.json"
+        quality_state.save_state(path, state)
+        return path
 
 
 class CLITests(unittest.TestCase):

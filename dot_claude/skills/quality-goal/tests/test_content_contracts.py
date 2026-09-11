@@ -967,7 +967,7 @@ class RevisionCheckContentContractTests(unittest.TestCase):
 
     def test_skill_version_is_major_bumped(self):
         frontmatter, _ = parse_yaml_frontmatter(QualityGoalSkillContentTests().read_skill())
-        self.assertEqual("5", frontmatter["version"].split(".", 1)[0])
+        self.assertEqual("6", frontmatter["version"].split(".", 1)[0])
 
     def test_spec_authoring_is_delegated_to_codex_contract(self):
         text = QualityGoalSkillContentTests().read_skill()
@@ -1488,11 +1488,65 @@ class QualityGoalSkillContentTests(unittest.TestCase):
     def normalize(text):
         return " ".join(text.casefold().split())
 
+    def test_completion_current_workspace_exact_guarantee(self):
+        text = self.read_skill()
+        heading = "## Completion integrity\n"
+        independent = "## Independent verification\n"
+        self.assertEqual(1, text.count(heading))
+        self.assertEqual(1, text.count(independent))
+        self.assertIn(f"{heading}\n", text)
+        self.assertLess(text.index(heading), text.index(independent))
+        section = text.split(heading, 1)[1].split(independent, 1)[0]
+        self.assertNotRegex(section, r"(?m)^## ")
+        normalized = self.normalize(section)
+        self.assertRegex(
+            normalized,
+            r"immediately before saving `completed`.{0,160}recompute.{0,100}current actual workspace fingerprint",
+        )
+        self.assertRegex(
+            normalized,
+            r"directly measuring.{0,80}`state\.project_root`",
+        )
+        self.assertIn("`verification.valid is true`", normalized)
+        self.assertRegex(
+            normalized,
+            r"final `reviews\.code\[-1\]` record itself.{0,80}`pass`.{0,180}exactly equal",
+        )
+        self.assertRegex(normalized, r"never search backward|no backward search")
+        self.assertRegex(normalized, r"any failure refuses completion")
+        self.assertIn("without a lock or generation counter", normalized)
+        self.assertRegex(
+            normalized,
+            r"does not guarantee.{0,120}concurrent changes immediately after measurement",
+        )
+        self.assertRegex(
+            normalized,
+            r"last passing code review.{0,180}final `reviews\.code\[-1\]` record itself.{0,80}`pass`",
+        )
+        stage_row = next(
+            line for line in text.splitlines()
+            if line.startswith("| COMPLETED, BLOCKED, NEEDS_REDESIGN, CANCELLED |")
+        )
+        terminal = text.split("### Terminal\n", 1)[1].split("\n## ", 1)[0]
+        for location in (stage_row, terminal, section):
+            with self.subTest(location=location[:40]):
+                ordered = self.normalize(location)
+                self.assertRegex(
+                    ordered,
+                    r"report\.md.{0,240}(?:final bytes|finalized).{0,240}fingerprint.{0,240}"
+                    r"record-verification.{0,240}(?:formal )?code review",
+                )
+                self.assertRegex(
+                    ordered,
+                    r"(?:write|change).{0,180}(?:after|post).{0,180}"
+                    r"(?:verification|review).{0,240}fresh verification.{0,160}fresh (?:code )?review",
+                )
+
     def test_frontmatter_contract(self):
         frontmatter, _ = parse_yaml_frontmatter(self.read_skill())
         expected = {
             "name": "quality-goal",
-            "version": "5.2.0",
+            "version": "6.0.0",
             "description": "Use when the user explicitly requests a quality-gated, documented software change workflow.",
             "argument-hint": "[--mode=auto|light|standard|strict] <goal>",
             "disable-model-invocation": "true",
