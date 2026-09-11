@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {
+    "name": "fixture-collector",
+    "revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "analysis_generated_by": {
+    "name": "fixture-analyzer",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "records": [],
+  "patterns": [
+    {
+      "pattern_id": "PAT-001",
+      "description": "Keep secrets out of serialized artifacts.",
+      "search_clues": ["secret fixture"],
+      "applicability": ["Remote payloads can contain secret-like strings."],
+      "counterconditions": ["No remote data is serialized."],
+      "expected_tests": ["Secret-like strings are redacted."],
+      "maintainer_judgment_required": ["Review redaction warnings."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-001", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-001"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]
+    }
+  ],
+  "limitations": ["Synthetic offline redaction fixture."]
+}

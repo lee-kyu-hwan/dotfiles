@@ -1,0 +1,7 @@
+{
+  "repositories": [
+    {"repository": "example-org/example-normal", "outcome": "checked", "reason": "budget-exhausted"},
+    {"repository": "example-org/example-missing", "outcome": "not-found-or-inaccessible", "reason": "http-404"},
+    {"repository": "example-org/example-unstarted", "outcome": "budget-exhausted", "reason": "budget-exhausted"}
+  ]
+}

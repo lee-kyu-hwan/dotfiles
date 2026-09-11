@@ -1,0 +1,17 @@
+{
+  "valid": {
+    "status": "private-report-ready",
+    "status_reason": "security-sensitive",
+    "sensitivity": "security-sensitive",
+    "private_evidence_reference": "PRIVATE-001",
+    "public_steps": null,
+    "output_excerpt": null
+  },
+  "invalid_variants": [
+    "missing-private-reference",
+    "missing-reporting-channel",
+    "public-output-excerpt",
+    "public-reproduction-steps",
+    "private-reference-repeated-publicly"
+  ]
+}

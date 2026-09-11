@@ -1,0 +1,42 @@
+{
+  "/repos/example-org/example-insufficient": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "node_id": "NODE-example-insufficient",
+      "full_name": "example-org/example-insufficient",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "NOASSERTION"}
+    }
+  },
+  "/repos/example-org/example-insufficient/commits/main": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"sha": "0123456789abcdef0123456789abcdef01234567"}
+  },
+  "/repos/example-org/example-insufficient/community/profile": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"files": {}}
+  },
+  "/repos/example-org/example-insufficient/private-vulnerability-reporting": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"enabled": false}
+  },
+  "/search/code?q=repo:example-org/example-insufficient+%22fixture%22": {
+    "status": 403,
+    "headers": {
+      "Content-Type": "application/json",
+      "X-RateLimit-Remaining": "0"
+    },
+    "payload": {"message": "code search unavailable"}
+  }
+}

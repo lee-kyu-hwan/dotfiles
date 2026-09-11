@@ -1,0 +1,138 @@
+{
+  "/repos/example-org/example-repo": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json", "ETag": "fixture-repository"},
+    "payload": {
+      "node_id": "REPO_NODE_001",
+      "full_name": "example-org/example-repo",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {"spdx_id": "NOASSERTION"}
+    }
+  },
+  "/repos/example-org/example-repo/commits/main": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"sha": "0123456789abcdef0123456789abcdef01234567"}
+  },
+  "/repos/example-org/example-repo/community/profile": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {
+      "files": {
+        "code_of_conduct": {"url": "https://docs.github.com/community"},
+        "contributing": {"url": "https://docs.github.com/contributing"},
+        "issue_template": {"url": "https://docs.github.com/issues"},
+        "pull_request_template": {"url": "https://docs.github.com/pulls"},
+        "license": {"url": "https://docs.github.com/license"},
+        "readme": {"url": "https://docs.github.com/readme"}
+      }
+    }
+  },
+  "/repos/example-org/example-repo/private-vulnerability-reporting": {
+    "status": 200,
+    "headers": {"Content-Type": "application/json"},
+    "payload": {"enabled": true}
+  },
+  "/repos/example-org/example-repo/contents/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "Q29udHJpYnV0aW9uIGd1aWRl", "size": 18, "sha": "policy-01", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/example-repo/contents/.github/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "Q29udHJpYnV0aW9uIGd1aWRl", "size": 18, "sha": "policy-02", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/example-repo/contents/docs/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "Q29udHJpYnV0aW9uIGd1aWRl", "size": 18, "sha": "policy-03", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/example-repo/contents/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "U2VjdXJpdHkgcG9saWN5", "size": 15, "sha": "policy-04", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/example-repo/contents/.github/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "U2VjdXJpdHkgcG9saWN5", "size": 15, "sha": "policy-05", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/example-repo/contents/docs/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "U2VjdXJpdHkgcG9saWN5", "size": 15, "sha": "policy-06", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/example-repo/contents/.github/PULL_REQUEST_TEMPLATE.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "UHJvcG9zYWwgdGVtcGxhdGU=", "size": 17, "sha": "policy-07", "html_url": "https://docs.github.com/pulls"}
+  },
+  "/repos/example-org/example-repo/contents/.github/ISSUE_TEMPLATE?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": [{"type": "file", "name": "proposal.md", "path": ".github/ISSUE_TEMPLATE/proposal.md", "sha": "policy-08", "size": 12, "html_url": "https://docs.github.com/issues"}]
+  },
+  "/repos/example-org/example-repo/contents/CODE_OF_CONDUCT.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "Q29uZHVjdCBwb2xpY3k=", "size": 14, "sha": "policy-09", "html_url": "https://docs.github.com/conduct"}
+  },
+  "/repos/example-org/example-repo/contents/.github/CODE_OF_CONDUCT.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "Q29uZHVjdCBwb2xpY3k=", "size": 14, "sha": "policy-10", "html_url": "https://docs.github.com/conduct"}
+  },
+  "/repos/example-org/.github/contents/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIGNvbnRyaWJ1dGlvbiBndWlkZQ==", "size": 22, "sha": "policy-11", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/.github/contents/.github/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIGNvbnRyaWJ1dGlvbiBndWlkZQ==", "size": 22, "sha": "policy-12", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/.github/contents/docs/CONTRIBUTING.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIGNvbnRyaWJ1dGlvbiBndWlkZQ==", "size": 22, "sha": "policy-13", "html_url": "https://docs.github.com/contributing"}
+  },
+  "/repos/example-org/.github/contents/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIHNlY3VyaXR5IHBvbGljeQ==", "size": 19, "sha": "policy-14", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/.github/contents/.github/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIHNlY3VyaXR5IHBvbGljeQ==", "size": 19, "sha": "policy-15", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/.github/contents/docs/SECURITY.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIHNlY3VyaXR5IHBvbGljeQ==", "size": 19, "sha": "policy-16", "html_url": "https://docs.github.com/security"}
+  },
+  "/repos/example-org/.github/contents/.github/PULL_REQUEST_TEMPLATE.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIHByb3Bvc2FsIHRlbXBsYXRl", "size": 21, "sha": "policy-17", "html_url": "https://docs.github.com/pulls"}
+  },
+  "/repos/example-org/.github/contents/.github/ISSUE_TEMPLATE?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": [{"type": "file", "name": "proposal.md", "path": ".github/ISSUE_TEMPLATE/proposal.md", "sha": "policy-18", "size": 12, "html_url": "https://docs.github.com/issues"}]
+  },
+  "/repos/example-org/.github/contents/CODE_OF_CONDUCT.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIGNvbmR1Y3QgcG9saWN5", "size": 18, "sha": "policy-19", "html_url": "https://docs.github.com/conduct"}
+  },
+  "/repos/example-org/.github/contents/.github/CODE_OF_CONDUCT.md?ref=main": {
+    "status": 200, "headers": {"Content-Type": "application/json"},
+    "payload": {"type": "file", "encoding": "base64", "content": "T3JnIGNvbmR1Y3QgcG9saWN5", "size": 18, "sha": "policy-20", "html_url": "https://docs.github.com/conduct"}
+  },
+  "/search/issues?q=repo:example-org/example-repo+%22validation+boundary%22+is:issue+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+boundary%22+is:issue+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+boundary%22+is:pr+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+boundary%22+is:pr+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22invalid+input%22+is:issue+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22invalid+input%22+is:issue+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22invalid+input%22+is:pr+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22invalid+input%22+is:pr+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+error%22+is:issue+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+error%22+is:issue+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+error%22+is:pr+is:open": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/issues?q=repo:example-org/example-repo+%22validation+error%22+is:pr+is:closed": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/code?q=repo:example-org/example-repo+%22validation+boundary%22": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/code?q=repo:example-org/example-repo+%22invalid+input%22": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}},
+  "/search/code?q=repo:example-org/example-repo+%22validation+error%22": {"status": 200, "headers": {"Content-Type": "application/json"}, "payload": {"total_count": 0, "incomplete_results": false, "items": []}}
+}

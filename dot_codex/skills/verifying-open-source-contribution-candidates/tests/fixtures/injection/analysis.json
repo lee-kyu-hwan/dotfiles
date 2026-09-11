@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {
+    "name": "fixture-collector",
+    "revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "analysis_generated_by": {
+    "name": "fixture-analyzer",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "records": [],
+  "patterns": [
+    {
+      "pattern_id": "PAT-004",
+      "description": "Keep remote text inert throughout processing.",
+      "search_clues": ["safe rendering"],
+      "applicability": ["Remote free text enters persisted evidence."],
+      "counterconditions": ["No remote free text is processed."],
+      "expected_tests": ["Embedded instructions never affect decisions."],
+      "maintainer_judgment_required": ["Review untrusted evidence."],
+      "provenance_mode": "independent-reimplementation",
+      "source_licenses": [{"pr_id": "PR-004", "spdx_id": "NOASSERTION"}],
+      "confidence": {"level": "medium", "evidence": ["PR-004"], "limitations": []},
+      "superseded_by": null,
+      "pattern_history": [{"revision": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]
+    }
+  ],
+  "limitations": ["Synthetic offline fixture."]
+}

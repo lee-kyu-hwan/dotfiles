@@ -36,6 +36,29 @@ codex exec \
 
 Check the exit code, then validate the result file against the schema. A rejected or unavailable model is recorded as `BLOCKED_MODEL_UNAVAILABLE`; silent fallback to another model is never allowed.
 
+For every wrapper call, `$BASE_REVISION` is the Git baseline captured by the
+orchestrator for this task before implementation begins. `$EXECUTION_DIR` is a
+fresh, unique execution directory allocated by the orchestrator beneath
+`.claude/quality-state/<task-id>/`; the prompt, event, stderr, and result paths
+for that same invocation are allocated beneath it as applicable. The wrapper
+resolves the supplied baseline before it starts the child, so an invalid
+baseline fails immediately rather than disabling later preservation.
+
+For the implementation or fix wrapper call, `IMPLEMENTATION_CHILD_ARGV` is the
+preassembled argv represented by the preceding runnable child template.
+
+```bash
+python3 "$SKILL_DIR/scripts/execution_watchdog.py" \
+  --project-root "$PROJECT_ROOT" \
+  --base-revision "$BASE_REVISION" \
+  --execution-dir "$EXECUTION_DIR" \
+  --events-path "$EVENTS_PATH" \
+  --stderr-path "$STDERR_PATH" \
+  --result-path "$RESULT_PATH" \
+  --stdin-path "$PROMPT_PATH" \
+  -- "${IMPLEMENTATION_CHILD_ARGV[@]}"
+```
+
 ### author 호출 템플릿
 
 `Spec author (standard)` 또는 `Spec author (strict)` 라우트에서 선택한 `$CODEX_MODEL`과 `$CODEX_EFFORT`를 사용한다. 이 블록이 author 호출 템플릿의 실행 가능한 정본이며, `references/readiness-policy.md`는 이를 인용해 절차 문맥만 정한다.
@@ -51,6 +74,21 @@ codex exec \
   --output-last-message "$RESULT_PATH" \
   --json \
   - < "$PROMPT_PATH" > "$EVENTS_PATH" 2> "$STDERR_PATH"
+```
+
+For the author wrapper call, `AUTHOR_CHILD_ARGV` is the preassembled argv
+represented by the preceding runnable child template.
+
+```bash
+python3 "$SKILL_DIR/scripts/execution_watchdog.py" \
+  --project-root "$PROJECT_ROOT" \
+  --base-revision "$BASE_REVISION" \
+  --execution-dir "$EXECUTION_DIR" \
+  --events-path "$EVENTS_PATH" \
+  --stderr-path "$STDERR_PATH" \
+  --result-path "$RESULT_PATH" \
+  --stdin-path "$PROMPT_PATH" \
+  -- "${AUTHOR_CHILD_ARGV[@]}"
 ```
 
 ### readiness 호출 템플릿
@@ -70,6 +108,21 @@ codex exec \
   - < "$PROMPT_PATH" > "$EVENTS_PATH" 2> "$STDERR_PATH"
 ```
 
+For the readiness wrapper call, `READINESS_CHILD_ARGV` is the preassembled argv
+represented by the preceding runnable child template.
+
+```bash
+python3 "$SKILL_DIR/scripts/execution_watchdog.py" \
+  --project-root "$PROJECT_ROOT" \
+  --base-revision "$BASE_REVISION" \
+  --execution-dir "$EXECUTION_DIR" \
+  --events-path "$EVENTS_PATH" \
+  --stderr-path "$STDERR_PATH" \
+  --result-path "$RESULT_PATH" \
+  --stdin-path "$PROMPT_PATH" \
+  -- "${READINESS_CHILD_ARGV[@]}"
+```
+
 ## Preflight
 
 Before the first implementation invocation, preflight the exact selected model and verify that it responds. Use this separate preflight block with a one-line prompt:
@@ -82,6 +135,19 @@ codex exec \
   --model "$CODEX_MODEL" \
   -c "model_reasoning_effort=\"low\"" \
   "Reply with one non-empty line."
+```
+
+For the preflight wrapper call, `PREFLIGHT_CHILD_ARGV` is the preassembled argv
+represented by the preceding runnable child template and has no result path.
+
+```bash
+python3 "$SKILL_DIR/scripts/execution_watchdog.py" \
+  --project-root "$PROJECT_ROOT" \
+  --base-revision "$BASE_REVISION" \
+  --execution-dir "$EXECUTION_DIR" \
+  --events-path "$EVENTS_PATH" \
+  --stderr-path "$STDERR_PATH" \
+  -- "${PREFLIGHT_CHILD_ARGV[@]}"
 ```
 
 The `-c` setting is `model_reasoning_effort="low"`. Success means exit code 0 with a non-empty model reply. Because preflight establishes only that the selected model responds, it deliberately omits `--output-schema` and `--output-last-message`. A failed preflight follows the same unavailable-model recovery path.

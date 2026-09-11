@@ -95,6 +95,21 @@ evidence and explain that handoff is incomplete. Never fabricate state history
 to satisfy validation. Candidate validation and GitHub writes require their
 own workflow and authorization.
 
+Each repository's `partitions` retains final leaf outcomes. The additive
+`split_observations` list separately retains executed unsafe parent searches:
+exact query and interval, returned/total counts, incomplete flag, observation
+time, split reasons, and the two proposed child intervals. Child intervals do
+not assert that either child request ran. Parent observations are checkpointed
+before any child request and append on an actual repeated search during resume;
+they neither supply hits nor make resolved leaf coverage partial.
+
+`split_observation_history: complete-since-run-start` describes newly recorded
+runs. Retrying an older repository checkpoint without this field records
+`legacy-unavailable`; it does not backfill missing parent facts. Reused complete
+legacy checkpoints remain unchanged, including their absent audit fields.
+Absence is not proof that no splitting occurred. Existing legacy gaps remain
+unknown even after newer observations are appended.
+
 Core evidence that cannot support a valid observation is retained under the
 repository manifest's `partial_records`, outside the analyzer corpus. Failed
 or reclassified candidates are not counted as exclusions caused by the cap.

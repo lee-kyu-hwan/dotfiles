@@ -1,0 +1,8 @@
+{
+  "modes": [
+    "duplicate",
+    "missing"
+  ],
+  "expected_exit": 2,
+  "expected_stderr": "error: discover partition invariant violated"
+}

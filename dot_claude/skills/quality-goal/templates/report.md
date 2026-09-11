@@ -44,6 +44,30 @@ Record EVERY actually executed command with its exit code and concise output evi
 
 {{VERIFICATION_EVIDENCE}}
 
+## Execution watchdog
+
+Render the per-execution record received from the watchdog wrapper.
+
+- Execution ID: {{EXECUTION_ID}}
+- PID / PGID: {{PID}} / {{PGID}}
+- Start / end / elapsed: {{STARTED_AT}} / {{ENDED_AT}} / {{ELAPSED_S}}
+- Child exit code: {{CHILD_EXIT_CODE}}
+- Result exists / schema validation: {{RESULT_EXISTS}} / {{RESULT_SCHEMA_VALIDATION}}
+- Start confirmed / watchdog reason: {{STARTED}} / {{WATCHDOG_REASON}}
+- Signals / preservation bundle: {{SIGNALS}} / {{PRESERVATION_BUNDLE}}
+- Abort: {{ABORT}}
+- Reap: {{REAP}}
+- Residual PIDs: {{RESIDUAL_PIDS}}
+
+## Watchdog restart budget
+
+Render the parent-owned decision for each restart candidate, including a stop
+when the remaining budget is zero.
+
+- Initial / remaining: {{RETRY_BUDGET_INITIAL}} / {{RETRY_BUDGET_REMAINING}}
+- Exactly-once consumption: {{RETRY_CONSUMED}}
+- Restart attempted / stopped: {{RESTART_ATTEMPTED}} / {{RESTART_STOPPED}}
+
 ## Remaining advisory findings
 
 Record remaining Medium or Low advisory findings, their impact, and any follow-up owner or action.

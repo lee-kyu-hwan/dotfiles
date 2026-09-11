@@ -2139,6 +2139,105 @@ class QualityGoalSkillContentTests(unittest.TestCase):
         self.assertIsNone(marker_pattern.search(self.read_skill()), str(self.SKILL_PATH))
 
 
+class ExecutionWatchdogContentTests(unittest.TestCase):
+    SKILL_PATH = Path(__file__).resolve().parents[1] / "SKILL.md"
+    REPORT_PATH = Path(__file__).resolve().parents[1] / "templates" / "report.md"
+
+    def test_execution_watchdog_documented_reap_grace_is_60(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertRegex(text, r"REAP_GRACE_SECONDS\s*=\s*60")
+        self.assertRegex(text, r"REAP_WAIT_CAP_SECONDS\s*=\s*300")
+
+    def test_execution_watchdog_contract_is_outside_preserved_sections(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertLess(text.index("### Execution watchdog"), text.index("### Plan"))
+        self.assertIn("result-first", text)
+
+    def test_execution_watchdog_wrapper_block_omits_codex_exec_literal(self):
+        routing = read_reference("model-routing.md")
+        blocks = re.findall(r"```bash\n(.*?)```", routing, re.DOTALL)
+        wrapper_blocks = [block for block in blocks if "execution_watchdog.py" in block]
+        self.assertEqual(4, len(wrapper_blocks))
+        self.assertTrue(all("codex exec" not in block for block in wrapper_blocks))
+
+    def test_execution_watchdog_wrapper_passes_named_prompt_path(self):
+        routing = read_reference("model-routing.md")
+        sections = {
+            "implementation": routing.split("## Codex invocation", 1)[1].split("### author 호출 템플릿", 1)[0],
+            "author": routing.split("### author 호출 템플릿", 1)[1].split("### readiness 호출 템플릿", 1)[0],
+            "readiness": routing.split("### readiness 호출 템플릿", 1)[1].split("## Preflight", 1)[0],
+            "preflight": routing.split("## Preflight", 1)[1].split("## Recovery and state", 1)[0],
+        }
+        wrapper_blocks = {
+            name: next(
+                block for block in re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+                if "execution_watchdog.py" in block
+            )
+            for name, section in sections.items()
+        }
+        self.assertEqual(4, len(wrapper_blocks))
+        message = "WRAPPER_STDIN_3_TO_1_ASSERTION"
+        for name in ("implementation", "author", "readiness"):
+            with self.subTest(wrapper=name):
+                self.assertEqual(1, wrapper_blocks[name].count('--stdin-path "$PROMPT_PATH"'), message)
+        self.assertNotIn('--stdin-path "$PROMPT_PATH"', wrapper_blocks["preflight"], message)
+
+        skill = self.SKILL_PATH.read_text(encoding="utf-8")
+        watchdog_section = skill.split("### Execution watchdog", 1)[1].split("\n### Plan", 1)[0]
+        self.assertIn("implementation, author, and readiness", watchdog_section, message)
+        self.assertIn("argv prompt", watchdog_section, message)
+        self.assertIn("preflight", watchdog_section, message)
+
+    def test_execution_watchdog_fixture_root_is_repository_state(self):
+        source = (self.SKILL_PATH.parent / "tests" / "test_execution_watchdog.py").read_text(
+            encoding="utf-8"
+        )
+        message = "FIXED_TMP_ROOT_ASSERTION"
+        self.assertIn(
+            'REPOSITORY_STATE_ROOT = REPOSITORY_ROOT / ".claude" / "quality-state"',
+            source,
+            message,
+        )
+        self.assertIn(
+            'SUITE_ROOT = REPOSITORY_STATE_ROOT / f"watchdog-test-{SUITE_UUID}"',
+            source,
+            message,
+        )
+        self.assertNotIn('Path("/private/tmp")', source, message)
+        self.assertNotIn('Path("/tmp")', source, message)
+        self.assertNotIn('"watchdog-test-*"', source, message)
+
+    def test_execution_watchdog_contract_forbids_external_timeout_tools(self):
+        skill = self.SKILL_PATH.read_text(encoding="utf-8").casefold()
+        self.assertIn("subprocess", skill)
+        self.assertIn("monotonic", skill)
+        self.assertRegex(skill, r"(?:never|forbid|prohibit).{0,80}(?:g?timeout)")
+
+    def test_execution_watchdog_documents_equal_abort_and_reap_grace(self):
+        text = self.SKILL_PATH.read_text(encoding="utf-8")
+        self.assertRegex(text, r"ABORT_GRACE_SECONDS\s*=\s*60")
+        self.assertRegex(text, r"REAP_GRACE_SECONDS\s*=\s*60")
+
+    def test_execution_watchdog_routing_preserves_child_argv_start_lines(self):
+        routing = read_reference("model-routing.md")
+        self.assertEqual(4, len(re.findall(r"(?m)^codex exec\b", routing)))
+        for heading in ("### author 호출 템플릿", "### readiness 호출 템플릿", "## Preflight"):
+            section = routing.split(heading, 1)[1]
+            block = re.search(r"```bash\n(.*?)```", section, re.DOTALL).group(1)
+            self.assertRegex(block, r"(?m)^codex exec\b")
+
+    def test_execution_report_renders_watchdog_and_restart_budget_payload(self):
+        text = self.REPORT_PATH.read_text(encoding="utf-8")
+        for token in (
+            "EXECUTION_ID", "CHILD_EXIT_CODE", "RESULT_EXISTS", "RESULT_SCHEMA_VALIDATION",
+            "WATCHDOG_REASON", "PRESERVATION_BUNDLE", "ABORT", "REAP", "RESIDUAL_PIDS",
+            "RETRY_BUDGET_INITIAL", "RETRY_BUDGET_REMAINING", "RETRY_CONSUMED",
+            "RESTART_ATTEMPTED", "RESTART_STOPPED",
+        ):
+            with self.subTest(token=token):
+                self.assertIn("{{" + token + "}}", text)
+
+
 class QualityStateGitignoreContentTests(unittest.TestCase):
     REPO_ROOT = find_repo_root(Path(__file__).resolve())
     GITIGNORE_PATH = REPO_ROOT / ".gitignore"
