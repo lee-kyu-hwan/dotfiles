@@ -19,6 +19,7 @@
 - Plan round 1: Opus 83, REVISE. High PLAN-001~002와 Medium/Low PLAN-003~006을 식별했다.
 - Plan round 2: 최초 실행은 Claude quota로 review가 생성되지 않았다. 첫 재시도는 내용상 PASS 90이었으나 `PASS reviews must not contain unverified evidence` 검증 오류로 정식 등록하지 않았다. 허용된 동일 라운드 형식 재시도는 Opus 96, PASS였고 Low PLAN-007만 남겼다.
 - Code round 1: fingerprint `d7e503b162c0d2bac3eb40c782f86410d363acb26023d7f57b3de05ec4675450`에 대해 Opus 88, PASS. Critical/High blocker는 없고 CODE-101~106 advisory를 남겼다.
+- Code round 2: original CMD-11을 invalid/incomplete로 정정한 verification v2와 이 보고서를 포함한 최종 fingerprint를 fresh Opus가 다시 검토한다. 보고서가 round-2 입력이므로 결과는 immutable `review-code-r2.json`과 workflow state에 기록한다.
 
 ## Blocking-finding resolutions
 
@@ -80,7 +81,7 @@
 - SPEC-014 Low: dead-PID test의 `<1s` wall-clock assertion은 AC-4 범위 밖에 남는다. 이번 concurrent liveness 조정 뒤에도 correctness bound로 유지했다.
 - SPEC-015 Low: 새 parent-class tests가 subclass discovery에서도 실행되어 full module에서 중복 비용이 있다.
 - PLAN-007 Low: CMD-12의 세 test count 동일성은 command가 자동 비교하지 않고 기록된 `Ran 64 tests` 세 줄을 orchestrator가 비교했다.
-- CODE-101 Medium: exact fenced CMD-11의 후속 shell assertions가 child stdin으로 소비된 증거 무결성 한계가 있다. 위 persisted artifact와 supplemental terminal run을 실행 증거로 사용한다.
+- CODE-101 Medium: exact fenced CMD-11의 후속 shell assertions가 child stdin으로 소비된 증거 무결성 한계가 있다. 원문은 invalid/incomplete로 분류했고, parent가 승인한 transport-only 조정으로 outer heredoc만 제거한 byte-identical inner command의 모든 원래 assertions를 실제 실행했다. persisted artifact와 supplemental terminal run을 실행 증거로 사용한다. 보고서 조치는 완료됐으며 round-2 reviewer가 최종 판정한다.
 - CODE-102 Low: `stdin=None`은 부모 stdin을 상속하므로 scripted heredoc/pipe에서 추가 prompt가 될 수 있다. production 변경 제한 때문에 이번 범위에서는 유지하며 DEVNULL 기본화는 별도 후속 goal 후보로 남긴다.
 - CODE-103 Low: artifact test의 prompt/result path는 test가 직접 만들므로 production path regression에 대한 falsifiability가 나머지 네 artifact보다 약하다.
 - CODE-104 Low: content test의 네 wrapper count는 hard-coded dict로 인해 tautological이고, block 부재 시 assertion 대신 StopIteration error가 난다.
@@ -91,3 +92,5 @@
 
 - Status: completed
 - Machine-readable reason: null
+
+종료 상태를 round 1 뒤 한 차례 조기에 기록했으나, final verification v2와 fresh code round 2를 요구한 parent steering을 반영해 runtime state를 CODE_REVIEW로 복구했다. 이 복구는 tracked source를 바꾸지 않으며 이전 completed state snapshot을 보존한다.
