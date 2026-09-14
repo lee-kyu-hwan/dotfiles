@@ -1,0 +1,633 @@
+#!/usr/bin/env python3
+"""비밀을 저장하지 않는 AI account profile 선택기와 process launcher."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+from typing import Any
+
+
+PROVIDERS = {"claude", "codex"}
+AUTH_KINDS = {"consumer", "organization", "api_payg"}
+ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+ACCOUNT_FIELDS = {
+    "provider",
+    "auth_kind",
+    "config_home",
+    "allowed_scopes",
+    "enabled",
+    "max_cost_usd",
+}
+SCOPE_BINDING_FIELDS = {"kind", "value", "provider", "account_profile"}
+BINDING_FIELDS = {"kind", "id", "provider", "account_profile"}
+
+
+class ContractError(Exception):
+    """사용자에게 비밀 없이 보고할 수 있는 계약 위반."""
+
+
+class VerificationError(Exception):
+    """인증/identity/usage 검증의 fail-closed 결과."""
+
+
+@dataclass(frozen=True)
+class Account:
+    name: str
+    provider: str
+    auth_kind: str
+    config_home: Path
+    allowed_scopes: tuple[str, ...]
+    enabled: bool
+    max_cost_usd: float | None
+
+
+@dataclass(frozen=True)
+class Registry:
+    accounts: dict[str, Account]
+    defaults: dict[str, str]
+    scope_bindings: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class SelectionContext:
+    provider: str
+    role_profile: str
+    account_profile: str | None
+    task_id: str | None
+    epic_id: str | None
+    repository: str | None
+    organization: str | None
+    directory: Path | None
+    cost_limit_usd: float | None
+
+
+@dataclass(frozen=True)
+class Binding:
+    provider: str
+    role_profile: str
+    account_profile: str
+    account_scope: str
+    selection_source: str
+    selection_reason: str
+    config_home: Path
+    auth_kind: str
+
+    def public_dict(self) -> dict[str, str | int]:
+        return {
+            "schema_version": 1,
+            "provider": self.provider,
+            "role_profile": self.role_profile,
+            "account_profile": self.account_profile,
+            "account_scope": self.account_scope,
+            "selection_source": self.selection_source,
+            "selection_reason": self.selection_reason,
+        }
+
+
+def require_alias(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not ALIAS_PATTERN.fullmatch(value):
+        raise ContractError(f"{field}은 비밀이 아닌 안전한 별칭이어야 합니다")
+    return value
+
+
+def require_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{field}은 비어 있지 않은 문자열이어야 합니다")
+    return value
+
+
+def reject_unknown_fields(value: dict[str, Any], allowed: set[str], field: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ContractError(f"{field}에 허용되지 않은 필드가 있습니다: {', '.join(unknown)}")
+
+
+def normalize_repository(value: str) -> str:
+    repository = value.strip().lower()
+    if repository.count("/") != 1 or any(not part for part in repository.split("/")):
+        raise ContractError("repository는 owner/name 형식이어야 합니다")
+    return repository
+
+
+def normalize_organization(value: str) -> str:
+    organization = value.strip().lower()
+    if not organization or "/" in organization:
+        raise ContractError("organization 형식이 올바르지 않습니다")
+    return organization
+
+
+def normalized_directory(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ContractError("directory scope와 config_home은 절대경로 또는 ~ 경로여야 합니다")
+    return path.resolve(strict=False)
+
+
+def normalized_config_home(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ContractError("config_home은 절대경로 또는 ~ 경로여야 합니다")
+    if path.is_symlink():
+        raise ContractError("config_home은 symlink일 수 없습니다")
+    return path.resolve(strict=False)
+
+
+def parse_scope(scope: str) -> tuple[str, str]:
+    if ":" not in scope:
+        raise ContractError(f"scope 형식이 올바르지 않습니다: {scope}")
+    kind, raw_value = scope.split(":", 1)
+    if kind == "repository":
+        return kind, normalize_repository(raw_value)
+    if kind == "organization":
+        return kind, normalize_organization(raw_value)
+    if kind == "directory":
+        return kind, str(normalized_directory(raw_value))
+    raise ContractError(f"지원하지 않는 scope 종류입니다: {kind}")
+
+
+def load_registry(path: Path) -> Registry:
+    try:
+        with path.open("rb") as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ContractError(f"account registry를 읽을 수 없습니다: {path}") from error
+
+    if not isinstance(raw, dict):
+        raise ContractError("account registry 최상위 값은 table이어야 합니다")
+    reject_unknown_fields(raw, {"version", "accounts", "defaults", "scope_bindings"}, "registry")
+    if raw.get("version") != 1:
+        raise ContractError("account registry version은 1이어야 합니다")
+
+    raw_accounts = raw.get("accounts")
+    if not isinstance(raw_accounts, dict) or not raw_accounts:
+        raise ContractError("accounts table은 비어 있을 수 없습니다")
+
+    accounts: dict[str, Account] = {}
+    config_homes: dict[Path, str] = {}
+    for raw_name, raw_account in raw_accounts.items():
+        name = require_alias(raw_name, "account profile")
+        if not isinstance(raw_account, dict):
+            raise ContractError(f"account profile {name}은 table이어야 합니다")
+        reject_unknown_fields(raw_account, ACCOUNT_FIELDS, f"account profile {name}")
+        provider = require_string(raw_account.get("provider"), f"{name}.provider")
+        if provider not in PROVIDERS:
+            raise ContractError(f"지원하지 않는 provider입니다: {provider}")
+        auth_kind = require_string(raw_account.get("auth_kind"), f"{name}.auth_kind")
+        if auth_kind not in AUTH_KINDS:
+            raise ContractError(f"지원하지 않는 auth_kind입니다: {auth_kind}")
+        config_home = normalized_config_home(
+            require_string(raw_account.get("config_home"), f"{name}.config_home")
+        )
+        if config_home in config_homes:
+            raise ContractError(
+                f"account profile config_home 충돌: {config_homes[config_home]}, {name}"
+            )
+        config_homes[config_home] = name
+
+        raw_scopes = raw_account.get("allowed_scopes")
+        if not isinstance(raw_scopes, list) or not raw_scopes:
+            raise ContractError(f"{name}.allowed_scopes는 비어 있지 않은 배열이어야 합니다")
+        scopes = tuple(
+            f"{kind}:{value}"
+            for kind, value in (parse_scope(require_string(item, "allowed scope")) for item in raw_scopes)
+        )
+        enabled = raw_account.get("enabled", auth_kind != "api_payg")
+        if not isinstance(enabled, bool):
+            raise ContractError(f"{name}.enabled는 boolean이어야 합니다")
+        raw_max_cost = raw_account.get("max_cost_usd")
+        if raw_max_cost is not None and (
+            isinstance(raw_max_cost, bool) or not isinstance(raw_max_cost, (int, float))
+        ):
+            raise ContractError(f"{name}.max_cost_usd는 숫자여야 합니다")
+        max_cost = float(raw_max_cost) if raw_max_cost is not None else None
+        if auth_kind == "api_payg" and (
+            max_cost is None or not math.isfinite(max_cost) or max_cost <= 0
+        ):
+            raise ContractError(f"PAYG profile {name}에는 양수 max_cost_usd가 필요합니다")
+        if auth_kind != "api_payg" and raw_max_cost is not None:
+            raise ContractError(f"consumer/organization profile에는 max_cost_usd를 둘 수 없습니다: {name}")
+        accounts[name] = Account(
+            name=name,
+            provider=provider,
+            auth_kind=auth_kind,
+            config_home=config_home,
+            allowed_scopes=scopes,
+            enabled=enabled,
+            max_cost_usd=max_cost,
+        )
+
+    raw_defaults = raw.get("defaults", {})
+    if not isinstance(raw_defaults, dict):
+        raise ContractError("defaults는 table이어야 합니다")
+    defaults: dict[str, str] = {}
+    for provider, raw_profile in raw_defaults.items():
+        if provider not in PROVIDERS:
+            raise ContractError(f"지원하지 않는 default provider입니다: {provider}")
+        profile = require_alias(raw_profile, f"{provider} default")
+        account = accounts.get(profile)
+        if account is None or account.provider != provider:
+            raise ContractError(f"{provider} default가 유효한 같은-provider profile을 가리키지 않습니다")
+        if account.auth_kind == "api_payg":
+            raise ContractError("PAYG profile은 provider 기본값일 수 없습니다")
+        defaults[provider] = profile
+
+    raw_scope_bindings = raw.get("scope_bindings", [])
+    if not isinstance(raw_scope_bindings, list):
+        raise ContractError("scope_bindings는 table 배열이어야 합니다")
+    scope_bindings: list[dict[str, str]] = []
+    for index, item in enumerate(raw_scope_bindings):
+        if not isinstance(item, dict):
+            raise ContractError(f"scope_bindings[{index}]는 table이어야 합니다")
+        reject_unknown_fields(item, SCOPE_BINDING_FIELDS, f"scope_bindings[{index}]")
+        kind = require_string(item.get("kind"), "scope binding kind")
+        value = require_string(item.get("value"), "scope binding value")
+        normalized_kind, normalized_value = parse_scope(f"{kind}:{value}")
+        provider = require_string(item.get("provider"), "scope binding provider")
+        profile = require_alias(item.get("account_profile"), "scope binding account_profile")
+        account = accounts.get(profile)
+        if provider not in PROVIDERS or account is None or account.provider != provider:
+            raise ContractError(f"scope binding {index}의 provider/profile 연결이 유효하지 않습니다")
+        if account.auth_kind == "api_payg":
+            raise ContractError("PAYG profile은 scope mapping으로 자동 선택할 수 없습니다")
+        scope_bindings.append(
+            {
+                "kind": normalized_kind,
+                "value": normalized_value,
+                "provider": provider,
+                "account_profile": profile,
+            }
+        )
+    return Registry(accounts, defaults, tuple(scope_bindings))
+
+
+def load_task_bindings(path: Path | None, registry: Registry) -> tuple[dict[str, str], ...]:
+    if path is None:
+        return ()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractError(f"task binding adapter 입력을 읽을 수 없습니다: {path}") from error
+    if not isinstance(raw, dict):
+        raise ContractError("task binding adapter 입력은 object여야 합니다")
+    reject_unknown_fields(raw, {"version", "bindings"}, "task binding adapter")
+    if raw.get("version") != 1 or not isinstance(raw.get("bindings"), list):
+        raise ContractError("task binding adapter version/bindings 계약이 유효하지 않습니다")
+    bindings: list[dict[str, str]] = []
+    for index, item in enumerate(raw["bindings"]):
+        if not isinstance(item, dict):
+            raise ContractError(f"task binding {index}는 object여야 합니다")
+        reject_unknown_fields(item, BINDING_FIELDS, f"task binding {index}")
+        kind = require_string(item.get("kind"), "task binding kind")
+        if kind not in {"task", "epic"}:
+            raise ContractError(f"지원하지 않는 task binding kind입니다: {kind}")
+        binding_id = require_string(item.get("id"), "task binding id")
+        provider = require_string(item.get("provider"), "task binding provider")
+        profile = require_alias(item.get("account_profile"), "task binding account_profile")
+        account = registry.accounts.get(profile)
+        if provider not in PROVIDERS or account is None or account.provider != provider:
+            raise ContractError(f"task binding {index}의 provider/profile 연결이 유효하지 않습니다")
+        bindings.append(
+            {"kind": kind, "id": binding_id, "provider": provider, "account_profile": profile}
+        )
+    return tuple(bindings)
+
+
+def directory_contains(parent: str | Path, child: Path) -> bool:
+    parent_path = normalized_directory(parent)
+    try:
+        child.relative_to(parent_path)
+        return True
+    except ValueError:
+        return False
+
+
+def scope_matches(kind: str, value: str, context: SelectionContext) -> bool:
+    if kind == "repository":
+        return context.repository == value
+    if kind == "organization":
+        return context.organization == value
+    return context.directory is not None and directory_contains(value, context.directory)
+
+
+def scope_specificity(kind: str, value: str) -> int:
+    if kind == "repository":
+        return 300_000
+    if kind == "organization":
+        return 200_000
+    return 100_000 + len(Path(value).parts)
+
+
+def resolve_same_priority(candidates: list[tuple[str, str]], tier: str) -> tuple[str, str] | None:
+    if not candidates:
+        return None
+    profiles = {profile for profile, _reason in candidates}
+    if len(profiles) != 1:
+        raise ContractError(f"{tier}의 같은 우선순위 후보가 충돌하여 자동 선택하지 않습니다")
+    return candidates[0]
+
+
+def matching_allowed_scope(account: Account, context: SelectionContext) -> str:
+    matches: list[tuple[int, str]] = []
+    for raw_scope in account.allowed_scopes:
+        kind, value = parse_scope(raw_scope)
+        if scope_matches(kind, value, context):
+            matches.append((scope_specificity(kind, value), f"{kind}:{value}"))
+    if not matches:
+        raise ContractError(
+            f"account profile {account.name}은 현재 repository/organization/directory scope를 허용하지 않습니다"
+        )
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def select_account(
+    registry: Registry,
+    context: SelectionContext,
+    task_bindings: tuple[dict[str, str], ...],
+) -> Binding:
+    if context.provider not in PROVIDERS:
+        raise ContractError(f"지원하지 않는 provider입니다: {context.provider}")
+    require_alias(context.role_profile, "role_profile")
+
+    selected: tuple[str, str, str] | None = None
+    if context.account_profile:
+        selected = (context.account_profile, "explicit", "명시적 --account-profile")
+
+    if selected is None:
+        ids = {"task": context.task_id, "epic": context.epic_id}
+        candidates = [
+            (
+                item["account_profile"],
+                f"{item['kind']}:{item['id']}",
+            )
+            for item in task_bindings
+            if item["provider"] == context.provider and ids[item["kind"]] == item["id"]
+        ]
+        resolved = resolve_same_priority(candidates, "task/epic binding")
+        if resolved:
+            selected = (resolved[0], "task_binding", resolved[1])
+
+    if selected is None:
+        scope_candidates: list[tuple[int, str, str, str]] = []
+        for item in registry.scope_bindings:
+            if item["provider"] != context.provider:
+                continue
+            if scope_matches(item["kind"], item["value"], context):
+                scope_candidates.append(
+                    (
+                        scope_specificity(item["kind"], item["value"]),
+                        item["account_profile"],
+                        item["kind"],
+                        f"{item['kind']}:{item['value']}",
+                    )
+                )
+        if scope_candidates:
+            highest = max(item[0] for item in scope_candidates)
+            top = [item for item in scope_candidates if item[0] == highest]
+            resolved = resolve_same_priority(
+                [(item[1], item[3]) for item in top], "scope mapping"
+            )
+            assert resolved is not None
+            kind = top[0][2]
+            selected = (resolved[0], f"scope:{kind}", resolved[1])
+
+    if selected is None:
+        default = registry.defaults.get(context.provider)
+        if default:
+            selected = (default, "default", f"provider:{context.provider}")
+    if selected is None:
+        raise ContractError("선택 가능한 account profile이 없습니다")
+
+    profile, source, reason = selected
+    account = registry.accounts.get(profile)
+    if account is None:
+        raise ContractError(f"등록되지 않은 account profile입니다: {profile}")
+    if account.provider != context.provider:
+        raise ContractError(
+            f"account profile provider 불일치: 요청={context.provider}, profile={account.provider}"
+        )
+    account_scope = matching_allowed_scope(account, context)
+
+    if account.auth_kind == "api_payg":
+        if source != "explicit":
+            raise ContractError("PAYG profile은 명시적 --account-profile로만 선택할 수 있습니다")
+        if not account.enabled:
+            raise ContractError("PAYG profile이 registry에서 활성화되지 않았습니다")
+        if (
+            context.cost_limit_usd is None
+            or not math.isfinite(context.cost_limit_usd)
+            or context.cost_limit_usd <= 0
+        ):
+            raise ContractError("PAYG profile에는 양수 --cost-limit-usd가 필요합니다")
+        assert account.max_cost_usd is not None
+        if context.cost_limit_usd > account.max_cost_usd:
+            raise ContractError("PAYG 요청 비용 한도가 profile 최대 비용 한도를 초과합니다")
+
+    return Binding(
+        provider=context.provider,
+        role_profile=context.role_profile,
+        account_profile=account.name,
+        account_scope=account_scope,
+        selection_source=source,
+        selection_reason=reason,
+        config_home=account.config_home,
+        auth_kind=account.auth_kind,
+    )
+
+
+def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--provider", choices=sorted(PROVIDERS), required=True)
+    parser.add_argument("--role-profile", required=True)
+    parser.add_argument("--account-profile")
+    parser.add_argument("--task-id")
+    parser.add_argument("--epic-id")
+    parser.add_argument("--binding-file", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--organization")
+    parser.add_argument("--directory")
+    parser.add_argument("--cost-limit-usd", type=float)
+
+
+def child_environment(binding: Binding, cost_limit_usd: float | None) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("CODEX_HOME", None)
+    environment.pop("CLAUDE_CONFIG_DIR", None)
+    credential_variable = "CODEX_HOME" if binding.provider == "codex" else "CLAUDE_CONFIG_DIR"
+    environment[credential_variable] = str(binding.config_home)
+    environment.update(
+        {
+            "AI_PROVIDER": binding.provider,
+            "AI_ROLE_PROFILE": binding.role_profile,
+            "AI_ACCOUNT_PROFILE": binding.account_profile,
+            "AI_ACCOUNT_SCOPE": binding.account_scope,
+            "AI_SELECTION_SOURCE": binding.selection_source,
+            "AI_BINDING_GENERATION": "1",
+        }
+    )
+    if cost_limit_usd is not None:
+        environment["AI_COST_LIMIT_USD"] = format(cost_limit_usd, "g")
+    else:
+        environment.pop("AI_COST_LIMIT_USD", None)
+    return environment
+
+
+def verify_admission(
+    verifier: Path,
+    binding: Binding,
+    environment: dict[str, str],
+) -> str:
+    if not verifier.is_absolute() or not verifier.is_file() or not os.access(verifier, os.X_OK):
+        raise VerificationError("verifier는 실행 가능한 절대경로 파일이어야 합니다")
+    if not binding.config_home.is_dir() or binding.config_home.is_symlink():
+        raise VerificationError("선택한 account profile의 config_home이 안전한 기존 디렉터리가 아닙니다")
+    try:
+        result = subprocess.run(
+            [str(verifier)],
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise VerificationError("verifier 실행에 실패했습니다") from error
+    if result.returncode != 0:
+        raise VerificationError(f"verifier가 실패했습니다 (exit {result.returncode})")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise VerificationError("verifier가 유효한 JSON을 반환하지 않았습니다") from error
+    if not isinstance(payload, dict):
+        raise VerificationError("verifier 결과는 JSON object여야 합니다")
+    required = {
+        "provider",
+        "account_profile",
+        "login_status",
+        "identity_status",
+        "usage_status",
+        "cost_limit_status",
+    }
+    if set(payload) != required:
+        raise VerificationError("verifier 결과 필드가 strict 계약과 일치하지 않습니다")
+    if payload["provider"] != binding.provider or payload["account_profile"] != binding.account_profile:
+        raise VerificationError("verifier 결과가 선택된 provider/account profile binding과 일치하지 않습니다")
+    login_status = payload["login_status"]
+    if login_status == "not_logged_in":
+        raise VerificationError("선택한 account profile은 미로그인 상태입니다")
+    if login_status != "logged_in":
+        raise VerificationError("verifier login status를 확인할 수 없습니다")
+    identity_status = payload["identity_status"]
+    if identity_status == "identity_drift":
+        raise VerificationError("선택한 account profile에서 identity drift가 감지되었습니다")
+    if identity_status != "matched":
+        raise VerificationError("verifier identity 상태를 확인할 수 없습니다")
+    usage_status = payload["usage_status"]
+    if usage_status == "usage_unknown":
+        raise VerificationError("usage_unknown: 사용량 admission을 확인할 수 없습니다")
+    if usage_status == "blocked_usage":
+        raise VerificationError("blocked_usage: 배정 계정의 사용량이 부족합니다")
+    if usage_status != "sufficient":
+        raise VerificationError("verifier usage status를 확인할 수 없습니다")
+    cost_limit_status = payload["cost_limit_status"]
+    if binding.auth_kind == "api_payg":
+        if cost_limit_status != "enforced":
+            raise VerificationError("PAYG 비용 한도가 실제로 강제되었는지 확인할 수 없습니다")
+    elif cost_limit_status != "not_applicable":
+        raise VerificationError("consumer/organization profile의 비용 한도 상태가 유효하지 않습니다")
+    return usage_status
+
+
+def launch(arguments: argparse.Namespace, binding: Binding) -> int:
+    command = arguments.program
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise ContractError("launch할 명령은 -- 뒤에 지정해야 합니다")
+    environment = child_environment(binding, arguments.cost_limit_usd)
+    usage_status = verify_admission(arguments.verifier, binding, environment)
+    environment["AI_USAGE_ADMISSION_STATUS"] = usage_status
+    print(
+        "ai-session binding: "
+        f"provider={binding.provider} "
+        f"role_profile={binding.role_profile} "
+        f"account_profile={binding.account_profile} "
+        f"config_home={binding.config_home} "
+        f"selection_source={binding.selection_source} "
+        f"usage_admission_status={usage_status}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        os.execvpe(command[0], command, environment)
+    except OSError as error:
+        raise ContractError(f"launcher process를 시작할 수 없습니다: {command[0]}") from error
+    return 0
+
+
+def context_from_arguments(arguments: argparse.Namespace) -> SelectionContext:
+    repository = normalize_repository(arguments.repository) if arguments.repository else None
+    organization = normalize_organization(arguments.organization) if arguments.organization else None
+    if repository:
+        repository_organization = repository.split("/", 1)[0]
+        if organization and organization != repository_organization:
+            raise ContractError("repository와 organization context가 서로 일치하지 않습니다")
+        organization = organization or repository_organization
+    return SelectionContext(
+        provider=arguments.provider,
+        role_profile=arguments.role_profile,
+        account_profile=arguments.account_profile,
+        task_id=arguments.task_id,
+        epic_id=arguments.epic_id,
+        repository=repository,
+        organization=organization,
+        directory=normalized_directory(arguments.directory) if arguments.directory else None,
+        cost_limit_usd=arguments.cost_limit_usd,
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ai-session")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    select_parser = subparsers.add_parser("select", help="인증 조회 없이 account binding 선택")
+    add_selection_arguments(select_parser)
+    launch_parser = subparsers.add_parser("launch", help="검증 뒤 고정 account 환경으로 process 시작")
+    add_selection_arguments(launch_parser)
+    launch_parser.add_argument("--verifier", type=Path, required=True)
+    launch_parser.add_argument("program", nargs=argparse.REMAINDER)
+    return parser
+
+
+def run(arguments: argparse.Namespace) -> int:
+    registry = load_registry(arguments.registry)
+    context = context_from_arguments(arguments)
+    task_bindings = load_task_bindings(arguments.binding_file, registry)
+    binding = select_account(registry, context, task_bindings)
+    if arguments.command == "select":
+        print(json.dumps(binding.public_dict(), ensure_ascii=False, sort_keys=True))
+        return 0
+    return launch(arguments, binding)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    try:
+        return run(parser.parse_args(argv))
+    except ContractError as error:
+        print(f"ai-session: {error}", file=sys.stderr)
+        return 2
+    except VerificationError as error:
+        print(f"ai-session: {error}", file=sys.stderr)
+        return 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
