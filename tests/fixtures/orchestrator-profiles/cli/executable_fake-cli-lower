@@ -1,0 +1,11 @@
+#!/opt/homebrew/bin/python3
+import os
+import sys
+
+provider = os.environ["AI_TEST_FAKE_CLI_PROVIDER"]
+if sys.argv[1:] == ["--version"]:
+    print("codex-cli 0.153.99" if provider == "codex" else "2.1.268 (Claude Code)")
+elif sys.argv[1:] == ["--help"]:
+    print("--model --sandbox --ask-for-approval --append-system-prompt --settings --plugin-dir")
+else:
+    raise SystemExit(97)

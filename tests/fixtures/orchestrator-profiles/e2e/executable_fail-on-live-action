@@ -1,0 +1,19 @@
+#!/opt/homebrew/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+
+
+log_path = os.environ.get("AI_TEST_LIVE_ACTION_LOG")
+if log_path:
+    with Path(log_path).open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                {"argv0": Path(sys.argv[0]).name, "arguments": sys.argv[1:]},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            + "\n"
+        )
+raise SystemExit(97)

@@ -1,0 +1,43 @@
+#!/opt/homebrew/bin/python3
+import json
+import os
+from pathlib import Path
+import sys
+
+
+arguments = sys.argv[1:]
+calls_path = Path(os.environ["AI_TEST_WORKMUX_CALLS"])
+state_path = Path(os.environ["AI_TEST_WORKMUX_STATE"])
+with calls_path.open("a", encoding="utf-8") as stream:
+    stream.write(
+        json.dumps(
+            {"argv": arguments, "pid": os.getpid()},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+if len(arguments) == 2 and arguments[0] == "set-window-status":
+    if arguments[1] not in {"done", "waiting", "working"}:
+        raise SystemExit(2)
+    state_path.write_text(arguments[1] + "\n", encoding="utf-8")
+elif len(arguments) == 1 and arguments[0] in {
+    "status",
+    "dashboard",
+    "sidebar",
+    "wait",
+}:
+    print(
+        json.dumps(
+            {
+                "issue_complete": False,
+                "surface": arguments[0],
+                "turn_state": state_path.read_text(encoding="utf-8").strip(),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+else:
+    raise SystemExit(2)

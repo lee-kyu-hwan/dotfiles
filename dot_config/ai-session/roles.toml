@@ -1,0 +1,179 @@
+schema_version = 1
+
+[roles.general]
+registry_contract = "orchestrator-permission-profiles-v1"
+default_leader_mode = "none"
+leader_modes = ["none"]
+skill_policy_id = "general-v1"
+capabilities = ["observability"]
+
+[roles.general.codex]
+cli_version_range = ">=0.154.0,<0.155.0"
+cli_required_options = ["--model", "--sandbox", "--ask-for-approval"]
+cli_forbidden_options = ["--dangerously-bypass-approvals-and-sandbox", "--full-auto"]
+model = "gpt-5.6-sol"
+effort = "medium"
+approval = "on-request"
+sandbox = "workspace-write"
+write_root = "resolved_worktree"
+instruction_path = ".config/ai-session/instructions/codex-general.md"
+instruction_version = 1
+instruction_sha256 = "efbe369f0b569eb198bb023ab16c9b0a0244b850ffe627fd803474556aa0f6e6"
+permission_generation = "legacy"
+benign_project_config_keys = [
+  "notice.fast_default_opt_out",
+  "tui.status_line",
+  "tui.status_line_use_colors",
+]
+
+[roles.general.claude]
+cli_version_range = ">=2.1.269,<2.2.0"
+cli_required_options = ["--append-system-prompt", "--settings", "--plugin-dir"]
+cli_forbidden_options = ["--append-system-prompt-file", "--plugin-url"]
+model = "opus[1m]"
+effort = "high"
+instruction_path = ".config/ai-session/instructions/claude-general.md"
+instruction_version = 1
+instruction_sha256 = "f7c51031e90b700510ea935b3380517feba5d25cac41cad3179cd00ceabf27f5"
+settings_version = 1
+common_settings_sha256 = "b0925f63d684fd3d594a53d8fcf84437e34743ca1fa38d13f0f8d0c938db17e5"
+settings_path = ".config/ai-session/claude/general.settings.json"
+settings_sha256 = "7ae234ff387d20ea6269d838ddef297890028dc87108356848ff9c4de84e34c7"
+plugin_dirs = [".claude"]
+denied_permissions = ["Agent", "Task"]
+benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
+
+[roles.orchestrator]
+registry_contract = "orchestrator-permission-profiles-v1"
+default_leader_mode = "none"
+leader_modes = ["none"]
+skill_policy_id = "orchestrator-v1"
+capabilities = ["dispatch", "multi-agent", "observability"]
+
+[roles.orchestrator.codex]
+cli_version_range = ">=0.154.0,<0.155.0"
+cli_required_options = ["--model", "--sandbox", "--ask-for-approval"]
+cli_forbidden_options = ["--dangerously-bypass-approvals-and-sandbox", "--full-auto"]
+model = "gpt-5.6-sol"
+effort = "medium"
+approval = "never"
+sandbox = "workspace-write"
+write_root = "resolved_worktree"
+instruction_path = ".config/ai-session/instructions/codex-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "16f02fbe9c300a25aecb3f095faf0fe7f6dcad3893796bd2947b203962d8f54a"
+permission_generation = "legacy"
+benign_project_config_keys = [
+  "notice.fast_default_opt_out",
+  "tui.status_line",
+  "tui.status_line_use_colors",
+]
+
+[roles.orchestrator.claude]
+cli_version_range = ">=2.1.269,<2.2.0"
+cli_required_options = ["--append-system-prompt", "--settings", "--plugin-dir"]
+cli_forbidden_options = ["--append-system-prompt-file", "--plugin-url"]
+model = "opus[1m]"
+effort = "high"
+instruction_path = ".config/ai-session/instructions/claude-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "c63d41091a84057380c20bbc82958bddc1e2faa9dfeaa1be3cef232bae2c5f91"
+settings_version = 1
+common_settings_sha256 = "b0925f63d684fd3d594a53d8fcf84437e34743ca1fa38d13f0f8d0c938db17e5"
+settings_path = ".config/ai-session/claude/orchestrator.settings.json"
+settings_sha256 = "bec9b18b1ebbeec5a5fcb6a4da783288efe52cb40a9901de06d8e9df42938f23"
+plugin_dirs = [".claude"]
+denied_permissions = ["Bash(git push:*)"]
+benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
+
+[roles.feature-orchestrator]
+registry_contract = "orchestrator-permission-profiles-v1"
+default_leader_mode = "none"
+leader_modes = ["none"]
+skill_policy_id = "feature-orchestrator-v1"
+capabilities = ["dispatch", "multi-agent", "observability"]
+
+[roles.feature-orchestrator.codex]
+cli_version_range = ">=0.154.0,<0.155.0"
+cli_required_options = ["--model", "--sandbox", "--ask-for-approval"]
+cli_forbidden_options = ["--dangerously-bypass-approvals-and-sandbox", "--full-auto"]
+model = "gpt-5.6-sol"
+effort = "medium"
+approval = "never"
+sandbox = "workspace-write"
+write_root = "resolved_worktree"
+instruction_path = ".config/ai-session/instructions/codex-feature-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "19a06097cfeb403b4581545327e10dc861a05c9722b45c22274d5c55023e0e9c"
+permission_generation = "legacy"
+benign_project_config_keys = [
+  "notice.fast_default_opt_out",
+  "tui.status_line",
+  "tui.status_line_use_colors",
+]
+
+[roles.feature-orchestrator.claude]
+cli_version_range = ">=2.1.269,<2.2.0"
+cli_required_options = ["--append-system-prompt", "--settings", "--plugin-dir"]
+cli_forbidden_options = ["--append-system-prompt-file", "--plugin-url"]
+model = "opus[1m]"
+effort = "high"
+instruction_path = ".config/ai-session/instructions/claude-feature-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "01c905b61b71cb4dcb92b6a4f7889b238d97a3cb8072f61b777abaefe970434a"
+settings_version = 1
+common_settings_sha256 = "b0925f63d684fd3d594a53d8fcf84437e34743ca1fa38d13f0f8d0c938db17e5"
+settings_path = ".config/ai-session/claude/feature-orchestrator.settings.json"
+settings_sha256 = "bec9b18b1ebbeec5a5fcb6a4da783288efe52cb40a9901de06d8e9df42938f23"
+plugin_dirs = [".claude"]
+denied_permissions = ["Bash(git push:*)"]
+benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
+
+[roles.global-orchestrator]
+registry_contract = "orchestrator-permission-profiles-v1"
+default_leader_mode = "standby"
+leader_modes = ["active", "reviewer", "standby"]
+active_skill_policy_id = "global-active-v1"
+reviewer_skill_policy_id = "global-reviewer-v1"
+standby_skill_policy_id = "global-standby-v1"
+active_capabilities = ["dispatch", "multi-agent", "observability"]
+reviewer_capabilities = ["observability"]
+standby_capabilities = ["observability"]
+
+[roles.global-orchestrator.codex]
+cli_version_range = ">=0.154.0,<0.155.0"
+cli_required_options = ["--model", "--sandbox", "--ask-for-approval"]
+cli_forbidden_options = ["--dangerously-bypass-approvals-and-sandbox", "--full-auto"]
+model = "gpt-6-astra"
+effort = "high"
+approval = "never"
+sandbox = "workspace-write"
+write_root = "verified_control_or_worktree"
+instruction_path = ".config/ai-session/instructions/codex-global-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "c0034ff0a32785a76fac453d72ed318d4b88ab1b2fcf0b9aa24cc77e714df0e1"
+permission_generation = "legacy"
+benign_project_config_keys = [
+  "notice.fast_default_opt_out",
+  "tui.status_line",
+  "tui.status_line_use_colors",
+]
+
+[roles.global-orchestrator.claude]
+cli_version_range = ">=2.1.269,<2.2.0"
+cli_required_options = ["--append-system-prompt", "--settings", "--plugin-dir"]
+cli_forbidden_options = ["--append-system-prompt-file", "--plugin-url"]
+model = "claude-fable-5-1"
+effort = "medium"
+elevated_effort = "high"
+elevation_reason = "global orchestration requires sustained cross-workgroup reasoning"
+instruction_path = ".config/ai-session/instructions/claude-global-orchestrator.md"
+instruction_version = 1
+instruction_sha256 = "15addab7e9bbb1db6fee7606db417cae1ab96531311d6769abd5fc57adc30512"
+settings_version = 1
+common_settings_sha256 = "b0925f63d684fd3d594a53d8fcf84437e34743ca1fa38d13f0f8d0c938db17e5"
+settings_path = ".config/ai-session/claude/global-orchestrator.settings.json"
+settings_sha256 = "2212fbcf8d6b30df8156773742bbf1b7274945f701f03936a4639af8a8cc5a8c"
+plugin_dirs = [".claude"]
+denied_permissions = ["Bash(git push:*)"]
+benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]

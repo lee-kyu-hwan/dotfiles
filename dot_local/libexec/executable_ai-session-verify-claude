@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Redacted adapter for Claude's reviewed auth-status JSON surface."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+
+from ai_session_identity import compare_enrolled_identity
+
+
+FIELDS = {
+    "provider",
+    "account_profile",
+    "login_status",
+    "identity_status",
+    "usage_status",
+    "cost_limit_status",
+}
+
+
+def _base_result() -> dict[str, str]:
+    return {
+        "provider": "claude",
+        "account_profile": os.environ.get("AI_ACCOUNT_PROFILE", ""),
+        "login_status": "unknown",
+        "identity_status": "unknown",
+        "usage_status": "usage_unknown",
+        "cost_limit_status": "unknown",
+    }
+
+
+def _official_status() -> object:
+    completed = subprocess.run(
+        ["claude", "auth", "status", "--json"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        close_fds=True,
+        pass_fds=(),
+    )
+    if completed.returncode != 0:
+        raise ValueError("official status failed")
+    return json.loads(completed.stdout)
+
+
+def verify() -> dict[str, str]:
+    result = _base_result()
+    try:
+        raw = _official_status()
+        if not isinstance(raw, dict):
+            return result
+        logged_in = raw.get("logged_in")
+        if logged_in is False:
+            result["login_status"] = "not_logged_in"
+            result["cost_limit_status"] = "not_applicable"
+            return result
+        if logged_in is not True:
+            return result
+        result["login_status"] = "logged_in"
+        auth_kind = os.environ.get("AI_AUTH_KIND", "")
+        if raw.get("auth_kind") != auth_kind:
+            return result
+        identity = {
+            "provider": "claude",
+            "auth_kind": auth_kind,
+            "subject_id": raw.get("subject_id"),
+            "tenant_id": raw.get("tenant_id"),
+        }
+        digest_path = os.environ.get("AI_IDENTITY_DIGEST_FILE")
+        if digest_path:
+            result["identity_status"] = compare_enrolled_identity(identity, Path(digest_path))
+        # This reviewed Claude surface has no official usage/quota contract.
+        result["usage_status"] = "usage_unknown"
+        result["cost_limit_status"] = "not_applicable" if auth_kind != "api_payg" else "unknown"
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        pass
+    return result
+
+
+def main() -> int:
+    payload = verify()
+    if set(payload) != FIELDS:
+        payload = _base_result()
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
