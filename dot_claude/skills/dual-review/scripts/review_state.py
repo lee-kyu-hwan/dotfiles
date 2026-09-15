@@ -12,6 +12,10 @@ TERMINATION_REASONS = ("no_changes", "reviewer_failure", "pipeline_failure", "si
 CLAUDE_PRODUCERS = ("pr-review-toolkit:code-reviewer", "pr-test-analyzer", "comment-analyzer", "silent-failure-hunter", "type-design-analyzer")
 MASKED_PRODUCERS = tuple(sorted({name for item in CLAUDE_PRODUCERS for name in (item, item.split(":", 1)[-1])}))
 PUBLIC_FINDING_FIELDS = ("finding_id", "group", "severity", "title", "body", "file", "line_start", "line_end", "finding_confidence", "recommendation")
+# Measured round zero completed all six producers within 300 seconds.
+REVIEWER_TIMEOUT_SECONDS = 300
+# A 58,764-byte, 20-finding Codex critique timed out at 300 seconds; allow 30 minutes.
+CRITIQUE_TIMEOUT_SECONDS = 1800
 
 
 def parse_arguments(arguments, parent_base):
@@ -62,8 +66,8 @@ def _capped_diff(diff):
 def build_round_zero_prompts(snapshot):
     target = "base=%s\nhead=%s\nfiles:\n%s\ndiff:\n%s" % (snapshot.get("base_sha", ""), snapshot.get("head_sha", ""), "\n".join(snapshot.get("files", [])), _capped_diff(snapshot.get("diff", ""))[0])
     return {
-        "claude": "Independently review this target. Return labeled findings only: one finding per block, with Title: first, one bare Label: value per line, and Body: and Recommendation: last. Every block must label Title, Severity, Confidence, File, Line, Body, and Recommendation. Severity must be one of: "
-                  + ", ".join(SEVERITY_BY_WORD) + ".\n" + target,
+        "claude": "Independently review this target. Return labeled findings only: one finding per block, with Title: first, each line in the form <LabelName>: <value>, and Body: and Recommendation: last. The ambiguous phrase `one bare Label: value per line` is not the required format. Do not prefix lines with the literal text `Label:`. Every block must label Title, Severity, Confidence, File, Line, Body, and Recommendation. Severity must be one of: "
+                  + ", ".join(SEVERITY_BY_WORD) + ". Confidence must be one of: " + ", ".join(CONFIDENCE_BY_WORD) + "; numeric confidence from 0 to 1 or 0 to 100 is also allowed. If there are no findings, stdout must be exactly the single line NO_FINDINGS. Do not mix or combine NO_FINDINGS with a finding block or any other text.\n" + target,
         "codex": "Independently review this target. Return one JSON object conforming exactly to the supplied reviewer schema.\n" + target,
     }
 
@@ -73,6 +77,7 @@ def build_codex_command(repository_root, schema_name="reviewer.schema.json", out
     command = ["codex", "exec", "-C", str(Path(repository_root)), "--sandbox", "read-only", "--output-schema", str(schema), "--json"]
     if output_path is not None:
         command.extend(("--output-last-message", str(output_path)))
+    command.extend(("--model", "gpt-5.6-sol", "-"))
     return tuple(command)
 
 
@@ -130,6 +135,8 @@ def _markdown_records(markdown):
 # The one vocabulary: normalization admits exactly these words and the round-zero prompt
 # advertises exactly these words, so a producer can never guess one that would be dropped.
 SEVERITY_BY_WORD = {"critical": "critical", "important": "high", "high": "high", "medium": "medium", "low": "low", "minor": "low", "trivial": "low"}
+# Evenly spaced 0.3/0.6/0.9 values preserve clear low/medium/high ordering without endpoint certainty.
+CONFIDENCE_BY_WORD = {"high": 0.9, "medium": 0.6, "low": 0.3}
 
 
 def _severity(value):
@@ -158,7 +165,8 @@ def normalize_reviewer_findings(producer, raw_findings, group_label, source=None
         if strict_raw_types and (not isinstance(raw_file, str) or not raw_file.strip() or not numeric_confidence or not integer_lines):
             rejected.append({"original_id": original_id, "reason": "invalid finding field types", "raw": raw}); continue
         try:
-            confidence = float(raw_confidence)
+            confidence = CONFIDENCE_BY_WORD.get(raw_confidence.strip().lower()) if isinstance(raw_confidence, str) else None
+            if confidence is None: confidence = float(raw_confidence)
             if confidence > 1: confidence /= 100
             start, end = (raw_start, raw_end) if strict_raw_types else (int(raw_start), int(raw_end))
         except (TypeError, ValueError):
@@ -324,20 +332,33 @@ def scan_source_texts(root):
     """Read only textual source files; binary cache files never enter contracts."""
     allowed = {".md", ".py", ".json"}
     root = Path(root)
-    return {str(path.relative_to(root)): path.read_text(encoding="utf-8") for path in sorted(root.rglob("*")) if path.is_file() and (path.suffix in allowed or path.name == ".gitkeep")}
+    return {str(path.relative_to(root)): path.read_text(encoding="utf-8") for path in sorted(root.rglob("*")) if path.is_file() and path.suffix in allowed}
 
 
 def tree_fingerprint(repo_root):
     root = Path(repo_root)
     digest = hashlib.sha256()
     ignored = {".git", ".claude/dual-review-state", "__pycache__"}
-    for path in sorted(root.rglob("*")):
-        relative = str(path.relative_to(root))
-        if not path.is_file() or any(relative == item or relative.startswith(item + "/") for item in ignored):
+    tracked = None
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(root), "ls-files", "-z"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+        if result.returncode == 0:
+            tracked = sorted(item.decode("utf-8") for item in result.stdout.split(b"\0") if item)
+    except (OSError, UnicodeDecodeError):
+        pass
+    entries = ((relative, root / relative) for relative in tracked) if tracked else (
+        (str(path.relative_to(root)), path) for path in sorted(root.rglob("*")) if path.is_file()
+    )
+    missing_digest = hashlib.sha256(b"dual-review:missing-tracked-file").digest()
+    for relative, path in entries:
+        if any(relative == item or relative.startswith(item + "/") for item in ignored):
             continue
         encoded = relative.encode("utf-8")
         digest.update(str(len(encoded)).encode("ascii") + b":" + encoded + b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        digest.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else missing_digest)
     return digest.hexdigest()
 
 
@@ -394,6 +415,48 @@ def _call(adapter, source, prompt):
 def _raw(response): return response.get("raw", json.dumps(response, sort_keys=True, ensure_ascii=False))
 
 
+def _producer_response_validity(producer, response):
+    """Validate one producer without assigning a group or consulting diff line ranges."""
+    raw = response.get("raw", "")
+    raw = raw if isinstance(raw, str) else str(raw)
+    claude_output = producer == "claude" or producer in CLAUDE_PRODUCERS
+    explicit = claude_output and raw.strip() == "NO_FINDINGS"
+    marker_line = claude_output and re.search(r"(?m)^\s*NO_FINDINGS\s*$", raw) is not None
+    if response.get("status") == "timeout":
+        return False, "timeout", False
+    if response.get("status") == "error" and response.get("exit_code") != 0:
+        return False, "error", False
+    if marker_line and not explicit:
+        return False, "nonexclusive_no_findings_marker", False
+    payload = response.get("payload")
+    if explicit:
+        return response.get("status") == "ok", "" if response.get("status") == "ok" else response.get("status", "error"), True
+    if not _envelope(payload):
+        if claude_output:
+            return False, "missing_no_findings_marker", False
+        return False, "schema violation" if response.get("status") == "ok" else response.get("status", "error"), False
+    if producer in CLAUDE_PRODUCERS and not payload["findings"]:
+        return False, "missing_no_findings_marker", False
+    if payload["findings"]:
+        accepted, _ = normalize_reviewer_findings(producer, payload["findings"], "validation")
+        if not accepted:
+            return False, "all_findings_rejected", False
+    if response.get("status") != "ok":
+        return False, response.get("status", "error"), False
+    return True, "", False
+
+
+def _prepare_producer_response(producer, response):
+    response = dict(response)
+    raw = response.get("raw", "")
+    if (producer == "claude" or producer in CLAUDE_PRODUCERS) and isinstance(raw, str) and raw.strip() == "NO_FINDINGS" and (response.get("status") == "ok" or response.get("exit_code") == 0):
+        response.update({
+            "status": "ok",
+            "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": [], "explicit_no_findings": True},
+        })
+    return response
+
+
 def _round_zero(run_dir, snapshot, reviewers):
     prompts, events, handles, responses = build_round_zero_prompts(snapshot), [], {}, {}
     for source in ("claude", "codex"): (run_dir / f"round0-{source}.prompt").write_text(prompts[source], encoding="utf-8")
@@ -411,13 +474,22 @@ def _round_zero(run_dir, snapshot, reviewers):
         source_tasks = [task for task, task_source, _ in tasks if task_source == source]
         records, valid_payloads = [], []
         for task in source_tasks:
-            response = responses.get(task, _error(RuntimeError("reviewer did not start"))); raws, attempts = [_raw(response)], 0
-            if response.get("status") == "timeout" or (response.get("status") == "ok" and not _envelope(response.get("payload"))):
-                attempts = 1; response = _call(reviewers.get(task), task, prompts[source]); raws.append(_raw(response))
-            valid = response.get("status") == "ok" and _envelope(response.get("payload"))
-            records.append({"producer": task, "valid": valid, "reason": "" if valid else ("schema violation" if response.get("status") == "ok" else response.get("status", "error")), "attempts": attempts, "stderr": response.get("stderr", ""), "exit_code": response.get("exit_code"), "raw": raws, "payload": response.get("payload") if valid else None})
+            response = _prepare_producer_response(task, responses.get(task, _error(RuntimeError("reviewer did not start"))))
+            raws, attempts = [_raw(response)], 0
+            valid, reason, explicit = _producer_response_validity(task, response)
+            retryable = (
+                response.get("status") == "timeout"
+                or reason in {"schema violation", "nonexclusive_no_findings_marker", "missing_no_findings_marker", "all_findings_rejected"}
+                or (reason == "error" and response.get("exit_code") is not None and "target tree changed" not in response.get("stderr", ""))
+            )
+            if not valid and retryable:
+                attempts = 1
+                response = _prepare_producer_response(task, _call(reviewers.get(task), task, prompts[source]))
+                raws.append(_raw(response))
+                valid, reason, explicit = _producer_response_validity(task, response)
+            records.append({"producer": task, "valid": valid, "explicit_no_findings": explicit, "reason": reason, "attempts": attempts, "stderr": response.get("stderr", ""), "exit_code": response.get("exit_code"), "raw": raws, "payload": response.get("payload") if valid else None})
             if valid: valid_payloads.append((task, response["payload"]))
-        valid = bool(valid_payloads)
+        valid = all(record["valid"] for record in records) if producer_mode else bool(valid_payloads)
         statuses[source] = {"status": "valid" if valid else "excluded", "reason": "" if valid else next((record["reason"] for record in records if record["reason"]), "all producers failed"), "attempts": sum(record["attempts"] for record in records), "stderr": "\n".join(record["stderr"] for record in records if record["stderr"]), "exit_code": next((record["exit_code"] for record in records if record["exit_code"] is not None), None), "raw": records}
         if valid: payloads[source] = valid_payloads
         (run_dir / f"raw-{source}.json").write_text(json.dumps(statuses[source], ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
@@ -425,6 +497,8 @@ def _round_zero(run_dir, snapshot, reviewers):
             for record in records:
                 name = record["producer"].replace(":", "-")
                 (run_dir / f"raw-{name}.json").write_text(json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
+    if producer_mode and not all(record["valid"] for status in statuses.values() for record in status["raw"]):
+        payloads.clear()
     (run_dir / "events.json").write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
     return events, statuses, payloads
 
@@ -535,6 +609,7 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
         for producer, payload in produced_payloads:
             accepted, refused = normalize_reviewer_findings(producer, payload["findings"], groups[source], source); findings.extend(accepted); rejected.extend(refused)
     provenance = {"reviewers": statuses, "findings": {}, "rejected_findings": rejected, "critique_statuses": [], "synthesis_status": None}; critiques, all_findings, critique_calls = [], list(findings), 0
+    raw_critiques = []
     completed_rounds, round_high_counts = [], []
     drift_detected = False
     pipeline_failed = False
@@ -555,6 +630,7 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
                     pipeline_failed = True
                     items = []
                 provenance["critique_statuses"].append(status)
+                raw_critiques.append({**status, "round": round_number, "raw": [_raw(response)]})
                 for payload in items:
                     critique, new_items = validate_and_record_critique(payload, set(snapshot["files"]), round_number, reviewer, groups[reviewer], provenance, snapshot.get("line_ranges"))
                     critiques.append(critique)
@@ -573,7 +649,7 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
             index += 1
     view, anonymous = build_anonymous_view(run_id, allocated_execution_number, all_findings, critiques, source_groups=groups); provenance.update(anonymous)
     manifest = {group: {key for key, item in anonymous["findings"].items() if item["group"] == group} for group in ("A", "B")}
-    synthesis, synthesis_calls = [], 0
+    synthesis, synthesis_calls, raw_synthesis = [], 0, None
     if synthesis_adapter and not pipeline_failed:
         (run_dir / "synthesis-input.json").write_text(json.dumps(view, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
         prompt = json.dumps({"contract": "Candidate issues are source-neutral assistance only: decide same-defect boundaries yourself and may merge or split them. Classification rules: same issue with both claims maintained or unverified is 합의; conflicting claims or valid refutation is 불일치; an issue from only one group is 단일 출처. Return decisions that cover every finding_id exactly once. Each decision must include classification, decision_confidence, rationale, group_a_finding_ids, group_b_finding_ids, and claims with A and B strings.", "anonymous_view": view}, ensure_ascii=False)
@@ -588,9 +664,13 @@ def run_dual_review(repo_root, snapshot, reviewers, critique_adapter=None, synth
         else:
             pipeline_failed = True
         provenance["synthesis_status"] = status
+        raw_synthesis = {**status, "raw": [_raw(response)]}
     elif synthesis_adapter:
         provenance["synthesis_status"] = {"source": "fresh-claude", "status": "skipped", "reason": "upstream failure skipped synthesis", "attempts": 0, "stderr": "", "exit_code": None}
-    for name, value in (("normalized.json", all_findings), ("critiques.json", critiques), ("synthesis.json", synthesis)):
+        raw_synthesis = {"phase": "synthesis", **provenance["synthesis_status"], "raw": []}
+    artifacts = [("normalized.json", all_findings), ("critiques.json", critiques), ("synthesis.json", synthesis), ("raw-critiques.json", raw_critiques)]
+    if raw_synthesis is not None: artifacts.append(("raw-synthesis.json", raw_synthesis))
+    for name, value in artifacts:
         (run_dir / name).write_text(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2), encoding="utf-8")
     original_high = sum(item["severity"] in {"high", "critical"} for item in findings)
     candidates = set()
@@ -662,14 +742,23 @@ def _claude_payload(stdout):
 
 class SubprocessAdapter:
     """A process adapter that physically separates process start from result read."""
-    def __init__(self, command_builder, repository_root=None, timeout_seconds=300):
+    def __init__(self, command_builder, repository_root=None, timeout_seconds=REVIEWER_TIMEOUT_SECONDS):
         self.command_builder = command_builder
         self.repository_root = Path(repository_root) if repository_root else None
         self.timeout_seconds = timeout_seconds
     def start(self, source, prompt):
         assert_nonwriting_actions(("reviewer-call", "local-artifact"))
+        prompt_file = None
+        prompt_path = None
         output_path = None
         try:
+            prompt_file = tempfile.NamedTemporaryFile(
+                prefix="dual-review-", suffix=".prompt", mode="w+b", delete=False
+            )
+            prompt_path = Path(prompt_file.name)
+            prompt_file.write(prompt.encode("utf-8"))
+            prompt_file.flush()
+            prompt_file.seek(0)
             try:
                 with tempfile.NamedTemporaryFile(prefix="dual-review-", suffix=".json", delete=False) as output:
                     output_path = Path(output.name)
@@ -680,18 +769,24 @@ class SubprocessAdapter:
                 output_path = None
                 command = self.command_builder(source)
             before = tree_fingerprint(self.repository_root) if self.repository_root else None
-            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return process, prompt, source, output_path, before
+            process = subprocess.Popen(command, stdin=prompt_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            prompt_file.close()
+            prompt_path.unlink(missing_ok=True)
+            return process, source, prompt_path, output_path, before
         except Exception:
+            if prompt_file is not None and not prompt_file.closed:
+                prompt_file.close()
+            if prompt_path:
+                prompt_path.unlink(missing_ok=True)
             if output_path:
                 output_path.unlink(missing_ok=True)
             raise
     def read(self, handle):
-        process, prompt, source, output_path, before = handle
+        process, source, prompt_path, output_path, before = handle
         stdout, stderr, timed_out = "", "", False
         try:
             try:
-                stdout, stderr = process.communicate(prompt, timeout=self.timeout_seconds)
+                stdout, stderr = process.communicate(timeout=self.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 process.kill()
@@ -709,13 +804,17 @@ class SubprocessAdapter:
             if payload is None and source not in CLAUDE_PRODUCERS:
                 payload = _claude_payload(stdout)
             if payload is None and source in CLAUDE_PRODUCERS:
-                # A producer whose output parses to zero blocks is an ingestion failure, not an
-                # empty review: leaving payload None makes the envelope check exclude the source
-                # instead of reporting a successful review with no findings (Spec R8.1).
-                records = _markdown_records(stdout)
-                payload = {"verdict": "ok", "summary": "", "findings": records, "next_steps": []} if records else None
+                if stdout.strip() == "NO_FINDINGS":
+                    payload = {"verdict": "ok", "summary": "", "findings": [], "next_steps": [], "explicit_no_findings": True}
+                else:
+                    # A producer whose output parses to zero blocks is an ingestion failure, not
+                    # an empty review. Mixed marker output remains nonexclusive at the round gate.
+                    records = _markdown_records(stdout)
+                    payload = {"verdict": "ok", "summary": "", "findings": records, "next_steps": []} if records else None
             return {"status": "ok" if process.returncode == 0 and payload is not None else "error", "stderr": stderr, "exit_code": process.returncode, "payload": payload, "raw": stdout}
         finally:
+            if prompt_path:
+                prompt_path.unlink(missing_ok=True)
             if output_path:
                 output_path.unlink(missing_ok=True)
 
@@ -736,17 +835,19 @@ def snapshot_from_repository(repo_root, arguments):
 
 
 def live_adapters(repository_root):
-    process = SubprocessAdapter(lambda source, output: build_codex_command(repository_root, "reviewer.schema.json", output) if source == "codex" else build_claude_command(source), repository_root)
+    process = SubprocessAdapter(lambda source, output: build_codex_command(repository_root, "reviewer.schema.json", output) if source == "codex" else build_claude_command(source), repository_root, timeout_seconds=REVIEWER_TIMEOUT_SECONDS)
     reviewers = {producer: process for producer in CLAUDE_PRODUCERS}; reviewers["codex"] = process
-    critique = SubprocessAdapter(lambda source, output: build_codex_command(repository_root, "critique.schema.json", output) if source == "codex" else build_claude_command(schema_name="critique.schema.json"), repository_root)
-    synthesis = SubprocessAdapter(lambda source, output: build_claude_command(schema_name="synthesis.schema.json"), repository_root)
+    critique = SubprocessAdapter(lambda source, output: build_codex_command(repository_root, "critique.schema.json", output) if source == "codex" else build_claude_command(schema_name="critique.schema.json"), repository_root, timeout_seconds=CRITIQUE_TIMEOUT_SECONDS)
+    synthesis = SubprocessAdapter(lambda source, output: build_claude_command(schema_name="synthesis.schema.json"), repository_root, timeout_seconds=CRITIQUE_TIMEOUT_SECONDS)
     return reviewers, critique, synthesis
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(); parser.add_argument("--execution-number", type=int); options, arguments = parser.parse_known_args(argv)
     snapshot, parsed = snapshot_from_repository(Path.cwd(), arguments); reviewers, critique, synthesis = live_adapters(Path.cwd())
-    print(json.dumps(run_dual_review(Path.cwd(), snapshot, reviewers, critique, synthesis, options.execution_number, parsed["rounds"]), ensure_ascii=False, sort_keys=True))
+    result = run_dual_review(Path.cwd(), snapshot, reviewers, critique, synthesis, options.execution_number, parsed["rounds"])
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 1 if result["termination_reason"] in {"reviewer_failure", "single_reviewer", "pipeline_failure"} else 0
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": raise SystemExit(main())

@@ -1,6 +1,6 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "required": ["verdict", "summary", "findings", "next_steps"],
   "properties": {
     "verdict": {"type": "string"},
@@ -9,11 +9,12 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["source", "original_id", "severity", "title", "body", "file", "line_start", "line_end", "finding_confidence", "recommendation"],
         "properties": {
           "source": {"type": "string"},
           "original_id": {"type": "string"},
-          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
           "title": {"type": "string"}, "body": {"type": "string"},
           "file": {"type": "string"}, "line_start": {"type": "integer", "minimum": 1},
           "line_end": {"type": "integer", "minimum": 1},
