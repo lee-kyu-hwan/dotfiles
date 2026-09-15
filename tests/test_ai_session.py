@@ -621,12 +621,17 @@ class AiSessionCliTests(unittest.TestCase):
 
     def test_deployed_registry_selects_provider_specific_dotfiles_profiles(self):
         deployed_registry = ROOT / "dot_config/ai-session/accounts.toml"
+        deployed_source = deployed_registry.read_text(encoding="utf-8")
 
-        for provider, expected_profile in (
+        for provider, legacy_profile in (
             ("codex", "codex-dotfiles"),
             ("claude", "claude-dotfiles"),
         ):
             with self.subTest(provider=provider):
+                self.assertIn(
+                    f"{legacy_profile} = '''[accounts.{legacy_profile}]",
+                    deployed_source,
+                )
                 result = self.run_cli(
                     "select",
                     "--registry",
@@ -635,13 +640,12 @@ class AiSessionCliTests(unittest.TestCase):
                     provider,
                     "--role-profile",
                     "general",
-                    "--repository",
-                    "lee-kyu-hwan/dotfiles",
+                    "--account-profile",
+                    legacy_profile,
                 )
-                self.assertEqual(0, result.returncode, result.stderr)
-                selected = json.loads(result.stdout)
-                self.assertEqual(expected_profile, selected["account_profile"])
-                self.assertEqual("scope:repository", selected["selection_source"])
+                self.assertEqual(4, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertIn("blocked_binding", result.stderr)
 
     def test_registry_rejects_sensitive_or_unrecognized_profile_fields_without_echoing_values(self):
         with self.registry.open("a", encoding="utf-8") as stream:

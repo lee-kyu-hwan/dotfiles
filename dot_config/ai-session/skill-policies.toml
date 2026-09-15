@@ -1,0 +1,69 @@
+schema_version = 1
+
+[policies]
+
+[policies.general-v1]
+version = 1
+policy_id = "general-v1"
+discovered_catalog = ["hook:workmux-status", "skill:superpowers", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:superpowers"]
+task_overlay = ["hook:workmux-status", "skill:superpowers"]
+deny = ["plugin:network-marketplace"]
+capabilities = ["observability"]
+capability_deny = ["dispatch", "multi-agent", "lease-write"]
+status_hook_capabilities = ["observability"]
+
+[policies.orchestrator-v1]
+version = 1
+policy_id = "orchestrator-v1"
+discovered_catalog = ["hook:workmux-status", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+task_overlay = ["hook:workmux-status", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+deny = ["plugin:network-marketplace"]
+capabilities = ["dispatch", "multi-agent", "observability"]
+capability_deny = ["lease-write"]
+status_hook_capabilities = ["observability"]
+
+[policies.feature-orchestrator-v1]
+version = 1
+policy_id = "feature-orchestrator-v1"
+discovered_catalog = ["hook:workmux-status", "skill:quality-goal", "skill:subagent-driven-development", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:quality-goal", "skill:subagent-driven-development"]
+task_overlay = ["hook:workmux-status", "skill:quality-goal", "skill:subagent-driven-development"]
+deny = ["plugin:network-marketplace"]
+capabilities = ["dispatch", "multi-agent", "observability"]
+capability_deny = ["lease-write"]
+status_hook_capabilities = ["observability"]
+
+[policies.global-active-v1]
+version = 1
+policy_id = "global-active-v1"
+discovered_catalog = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "skill:lease-writer", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+task_overlay = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents"]
+deny = ["skill:lease-writer", "plugin:network-marketplace"]
+capabilities = ["dispatch", "multi-agent", "observability"]
+capability_deny = ["lease-write"]
+status_hook_capabilities = ["observability"]
+
+[policies.global-reviewer-v1]
+version = 1
+policy_id = "global-reviewer-v1"
+discovered_catalog = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+task_overlay = ["hook:workmux-status", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+deny = ["skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "plugin:network-marketplace"]
+capabilities = ["observability"]
+capability_deny = ["dispatch", "multi-agent", "lease-write"]
+status_hook_capabilities = ["observability"]
+
+[policies.global-standby-v1]
+version = 1
+policy_id = "global-standby-v1"
+discovered_catalog = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "plugin:network-marketplace"]
+allow = ["hook:workmux-status", "skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+task_overlay = ["hook:workmux-status", "skill:dispatching-parallel-agents", "skill:subagent-driven-development"]
+deny = ["skill:quality-goal", "skill:dispatching-parallel-agents", "skill:subagent-driven-development", "plugin:network-marketplace"]
+capabilities = ["observability"]
+capability_deny = ["dispatch", "multi-agent", "lease-write"]
+status_hook_capabilities = ["observability"]

@@ -1,0 +1,321 @@
+# Orchestrator permission profiles: operator guide
+
+This document is the operating and migration contract for the role launchers,
+account selection, admission checks, and turn-status reporting introduced by
+issue #103. It describes the checked-in source contract. Deployment, provider
+authentication, identity enrollment, and live process changes remain explicit
+operator actions outside this repository workflow.
+
+## Role and file map
+
+Role policy and account policy are orthogonal. Changing a role must not change
+the selected account, and changing an account must not change the role's model,
+effort, permissions, instructions, settings, Skill policy, or leader capability.
+
+| Role | Operating purpose | Capability boundary |
+| --- | --- | --- |
+| `general` | A normal provider session | Observability only; Codex uses workspace-write with on-request approval |
+| `orchestrator` | A workgroup coordinator | Dispatch and multi-agent capability; no lease writes |
+| `feature-orchestrator` | A quality-goal feature coordinator | Quality-goal and bounded delegation capability; no lease writes |
+| `global-orchestrator` | Global active, reviewer, or standby operation | Active requires an external lease proof; reviewer and standby are read-only, observability-only, and cannot dispatch or write leases |
+
+| Source | Single responsibility |
+| --- | --- |
+| `dot_config/ai-session/accounts.toml` | Active account aliases, directory-only scopes and mappings, home modes, binding generation, and opaque legacy evidence |
+| `dot_config/ai-session/roles.toml` | Role schema, CLI ranges, model/effort, permissions, capabilities, and trusted artifact digests |
+| `dot_config/ai-session/skill-policies.toml` | Versioned allow/deny intersection and deny-first capability policy |
+| `dot_claude/settings.json` | Secret-free common composition input; `.chezmoiignore` keeps it out of every Claude account home |
+| `dot_config/ai-session/claude/*.settings.json` | Reviewed common-plus-role composed settings passed as one settings document |
+| `dot_config/ai-session/instructions/*` | Versioned additive instructions selected by provider and role |
+| `dot_local/bin/executable_ai-role-session` | Role validation, trusted artifact checks, final provider arguments, and one-exec dispatch |
+| `dot_local/bin/executable_ai-session` | Account selection, stored binding checks, admission, permission paths, public records, and provider exec |
+| `dot_local/libexec/executable_ai-session-verify-*` | Provider-specific official status adapters with strict redacted output |
+| `dot_local/libexec/ai_session_identity.py` | Shared canonical identity projection and digest comparison |
+| `dot_local/libexec/executable_ai-session-enroll-identity` | Explicit host-local enrollment helper; never an automatic launch step |
+| `dot_local/bin/symlink_ai-{codex,claude}*` | The eight provider-by-role public entrypoints |
+
+## Normalized real-path selection and alias/home mode
+
+At launch, selection uses filesystem-resolved `os.getcwd()` exactly once. It
+does not select from inherited `PWD`, a symlink surface, Git remote,
+owner/repository, organization, or Git common-dir. The strict priority is
+`explicit option -> stored task/session binding -> longest directory mapping -> Codex-only provider default`.
+Equal-priority ambiguity, a stale stored generation, a stored/mapped mismatch,
+or a real-path contradiction fails closed without ranking, rotation, or
+fallback.
+
+The active aliases are:
+
+- `codex-default`: the only selectable Codex account for real paths below
+  `~/code`; it uses the already-existing provider-default home.
+- `claude-profile1`: selected below `~/code/profile1`; its home mode is
+  `provider_default`, so `CLAUDE_CONFIG_DIR` remains unset.
+- `claude-profile2`: selected below `~/code/profile2`; its home mode is
+  `explicit`, so only the reviewed private child environment receives its
+  configured neutral home.
+
+Claude paths outside both reviewed roots return `blocked_contract`. Adding a
+root or account requires a separately reviewed registry-source change before
+launch. Provider-default selection outside the reviewed roots is not a Claude
+fallback. An explicit or stored choice still has to match the current real
+directory's directory-only allowed scope.
+
+Profile separation is account-selection policy; it is not repository security isolation.
+Account roots select an account but do not grant access to repositories.
+
+## Model pins and availability
+
+The role manifest pins the final provider arguments. General, workgroup, and
+feature Codex roles use `gpt-5.6-sol` at medium effort; global Codex uses
+`gpt-6-astra` at high effort. General, workgroup, and feature Claude roles use
+`opus[1m]` at high effort; global Claude uses `claude-fable-5-1`, with the
+manifest-recorded elevated effort for sustained global coordination.
+
+A pin and a compatible help surface prove configuration compatibility, not
+model availability, quota, or admission. Offline `--version`/`--help` checks
+must never become a network or model probe. If the provider rejects a pinned
+model, its exit is preserved; the wrapper does not substitute a model,
+provider, or account.
+
+## Claude usage_unknown operator response
+
+The reviewed Claude adapter has an official authentication-status contract but
+no reviewed machine-readable usage/quota contract. A logged-in fixture therefore
+produces `usage_unknown`, which blocks admission. The operator must not infer
+usage from login, scrape a TUI, call a private endpoint, relay raw output, or
+try another consumer account. Relogin is not presumed to fix this status. Keep
+the launch blocked until a separately reviewed official usage adapter is added,
+then retry in a new process.
+
+## Permission and common-dir boundary
+
+The account root is only a selection boundary. A write-capable launch may grant
+exactly the `resolved worktree and the exact absolute Git common-dir` verified
+by Git. It must not grant the opposite profile root, an account root, a wildcard,
+an untrusted add-dir, unrestricted access, `danger-full-access`, or
+`bypassPermissions`. An external common-dir is either admitted as that exact
+path after integrity checks or rejected in favor of a destination-root separate
+clone and handoff.
+
+Before admission, Git must confirm the worktree top level, the absolute
+common-dir, the git-dir relationship, and that the current real directory is
+inside the resolved worktree. The launcher rejects stale `PWD` rather than
+using it for selection, authorization, or registry updates.
+
+## Exact environment scrub
+
+The verifier and provider environments begin by removing this exact parent
+environment set:
+
+- `CODEX_HOME`
+- `CLAUDE_CONFIG_DIR`
+- `CODEX_API_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_AUTH_TOKEN`
+- `CLAUDE_CODE_OAUTH_TOKEN`
+- `CLAUDE_CODE_USE_BEDROCK`
+- `CLAUDE_CODE_USE_VERTEX`
+- `CLAUDE_CODE_USE_FOUNDRY`
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+- `AWS_SESSION_TOKEN`
+- `GOOGLE_APPLICATION_CREDENTIALS`
+- `CLOUD_ML_REGION`
+- `ANTHROPIC_VERTEX_PROJECT_ID`
+- `ANTHROPIC_FOUNDRY_RESOURCE`
+- `ANTHROPIC_FOUNDRY_API_KEY`
+- `AI_COST_LIMIT_USD`
+
+After scrubbing, only the selected Codex home or the selected explicit Claude
+home may be reintroduced in the private child environment. Provider-default
+Claude mode leaves its home variable absent. Common settings cannot recreate a
+scrubbed key or introduce the other provider/profile home.
+
+## Stdio and TTY ownership
+
+The dispatcher performs account-independent preflight, creates one-shot
+capability state where required, and execs `ai-session launch` exactly once.
+It does not close, duplicate, pipe, or relay the terminal streams: `stdin, stdout, and stderr remain attached to the provider`.
+The binding and startup records are written to inherited stderr before the
+provider exec; after exec, stderr belongs to the provider. Only the verifier
+uses captured, redacted I/O with closed file descriptors and no passed FDs.
+
+## Leader lease and roles
+
+Global active admission requires a valid external lease proof and a host-local
+exclusive lock for the normalized scope. The lock FD remains in the single exec
+chain for the provider lifetime. A second active owner in the same scope, or an
+expired/mismatched proof, returns `blocked_leader_conflict`; different scopes
+remain independent. The launcher neither issues nor renews lease generations.
+
+Global reviewer and standby modes are read-only and cannot acquire the active
+lock, dispatch children, increase a generation, or write a lease. A takeover
+requires matching previous-owner, process, generation, and fresh external proof
+facts; invalid evidence leaves the existing owner and proof unchanged.
+
+## Verifier and identity
+
+The selected provider verifier runs before the provider with the selected
+home-mode environment, a ten-second timeout, closed FDs, and an exact six-field
+redacted result. Codex consumes only reviewed official fields. Claude consumes
+official authentication status and does not invent usage evidence. No verifier
+may launch the provider or try a fallback account.
+
+Identity is a stable canonical projection: normalized provider/auth kind,
+case-preserved stable subject ID, and stable organization tenant ID when
+applicable. It excludes email, display name, token, path, and usage. The shared
+canonicalizer rejects unstable, empty, control-bearing, or malformed identity.
+Enrollment is explicit and host-local; launch-time verification never creates
+or refreshes enrollment state. Public records and diagnostics contain neither
+raw identity nor its digest.
+
+## Trusted settings, effective sources, and workmux
+
+Claude receives `trusted composed settings`: a reviewed, versioned,
+digest-verified merge of the secret-free common layer and the role layer,
+passed through one `--settings` argument. Role denies win. Only reviewed local
+plugin directories are admitted. Project, local, or account-home settings with
+policy-bearing keys are untrusted `effective sources` and are blocked before
+provider execution; only the manifest's exact benign keys are tolerated.
+
+Before deploying this change, the operator must migrate any `env`,
+`permissions`, `sandbox`, or `hooks` content out of the real
+`~/.claude/settings.json` and into the reviewed common composition layer, then
+leave the account-home file absent, empty, or limited to the exact benign
+allowlist (`$schema`, `spinnerTipsEnabled`, and `theme`). In particular, this
+machine's current account-home file contains `env`, `permissions`, and `hooks`;
+under R4.5 a provider-default `claude-profile1` launch must fail closed until
+that operator migration is completed. The launcher does not digest-exempt,
+rewrite, delete, or otherwise modify the account-home file.
+
+The common hooks restore workmux observability without copying account-home
+settings:
+
+| Event | Window status |
+| --- | --- |
+| `PermissionRequest` | `waiting` |
+| `Notification` with `permission_prompt` or `elicitation_dialog` | `waiting` |
+| `PostToolUse` | `working` |
+| `UserPromptSubmit` | `working` |
+| `Stop` | `done` |
+
+Dashboard, sidebar, status, and wait views expose the same turn state. The
+workmux hook is observability-only; it cannot add dispatch or lease-write
+capability, including in reviewer or standby mode.
+
+## Mixed deployment
+
+The role launcher and strict registry share the contract token
+`orchestrator-permission-profiles-v1`. An old binary with a new registry and a
+new role launcher with an old registry both fail as `blocked_contract` before
+verifier or provider execution. The reviewed launcher, registry, settings,
+instructions, and policies are deployed as one compatible set and apply only to
+new processes. Existing processes are not rebound during a partial deployment.
+The deprecated full-auto config remains byte-preserved and is not a role-policy
+source or launcher dependency.
+
+## Cross-profile move
+
+A cross-profile move is an explicit rebind and new execution generation, never
+a live rename or account switch:
+
+1. Stop the provider, launcher, workers, watchers, and every writer.
+2. Preserve dirty tracked/untracked Git state and quality-goal state in an
+   in-repository handoff.
+3. For a linked worktree only, run `git worktree move OLD NEW`.
+4. Verify `git worktree list --porcelain`, the top level, the absolute
+   common-dir, and `git status --short`; preserve the old registry bytes if any
+   check disagrees.
+5. Atomically update real worktree path, account profile, and a monotonically
+   newer positive binding generation.
+6. Recompute the new process's write root, exact common-dir permission, sandbox,
+   workmux/tmux cwd, and watcher targets, then start only from the verified
+   destination handoff.
+
+Main worktrees and linked worktrees containing submodules use a destination-root
+separate clone plus handoff unless a separate repair procedure is reviewed.
+There is no transparent cross-profile `/resume`: verified Git state and the
+in-repository handoff are the resume unit. Any old cwd, `PWD`, generation, or
+watch target blocks the new process.
+
+## Legacy migration generation
+
+The shipped legacy records are opaque, byte-preserved migration evidence. They
+are not active aliases, mappings, defaults, explicit/stored candidates,
+admission inputs, or verifier candidates. An old-alias stored binding is
+`blocked_binding` and requires explicit rebind; it is never silently translated.
+
+Migration occurs only after implementation verification in a separate
+generation: stop every referencing process, create the handoff, perform any
+required official login and identity admission as a separately authorized
+operator action, and atomically switch to the new binding generation. A legacy
+record, alias, or home can be removed only by a separately approved operation
+after both process and binding reference counts are verified as zero.
+
+## No authentication copy and no hot swap
+
+Do not copy, sync, snapshot, rename, symlink, or delete authentication files,
+credential directories, account homes, transcripts, settings, or plugin state
+between profiles. Restore common behavior through reviewed secret-free settings
+composition and reviewed local plugins. Never change a running process's home
+environment, account, cwd, or binding generation. Migration and rebind always
+hand off to a new process.
+
+## Workspace layout owned by #95
+
+The launcher relies on, but does not create, this workspace layout:
+
+- canonical repository at `~/code/<repo>`;
+- work paths at `~/code/<workspace-profile>/<repo>/<task>`;
+- `no sessions/ or epic directories in the path`; and
+- `only the final task directory is a worktree`.
+
+The canonical repository is not cloned once per profile, and display/session
+names are not path identifiers. Creating this layout belongs to #95 and is a non-goal here.
+Issue #103 only consumes the normalized real path produced by that layout.
+
+## #94/#95 registration follow-up
+
+The shipped registry currently carries linkage fields, but
+`task_bindings and session_bindings are account-binding metadata consumed from the #94/#95 common registration contracts`.
+They carry account-selection and generation facts; they do not establish a
+second authoritative task/session registry. If #94 or #95 later defines a single authoritative store, these fields move into it rather than being duplicated.
+Until then, this issue consumes the common registration contract and does not
+implement or modify either issue's registry ownership.
+
+## Operator recovery
+
+Every recovery starts by preserving the failure record and correcting reviewed
+input or external state. Retry only in a new process. Never auto-retry by
+changing model, provider, account, root, role, or policy.
+
+| Status | Operator response |
+| --- | --- |
+| `blocked_contract` | Repair the reviewed registry/launcher contract or deploy the compatible source set together; do not start the verifier/provider first. |
+| `blocked_role_schema` | Correct the role manifest's required fields, role-parent facts, or leader-mode contract and re-run preflight. |
+| `blocked_policy` | Remove an untrusted override or correct the reviewed instruction/settings/Skill/plugin digest and policy source. |
+| `blocked_permission` | Re-establish Git integrity and the exact resolved-worktree/common-dir grant; never widen to a root or wildcard. |
+| `blocked_cli_contract` | Install or select a separately reviewed compatible CLI whose version and advertised options satisfy the manifest; help does not prove model availability. |
+| `blocked_binding` | Reconcile the current real path, directory mapping, stored account, and positive generation atomically, then explicitly rebind in a new process. |
+| `blocked_leader_conflict` | Keep the existing owner/proof unchanged; retry only with valid fresh external proof after the conflicting owner is resolved. |
+| `not_logged_in` | Use the provider's official operator login path outside this automated workflow, then run fresh admission without account fallback. |
+| `identity_drift` | Verify the intended official stable identity and perform separately authorized explicit enrollment only when appropriate; do not overwrite evidence automatically. |
+| `blocked_verifier` | Repair the reviewed adapter, strict result, enrollment-file type/mode/owner, or stable identity contract without exposing raw output. |
+| `usage_unknown` | Keep Claude blocked until a separately reviewed official machine-readable usage adapter exists; do not infer, scrape, relogin as a presumed fix, or fall back. |
+| `blocked_usage` | Resolve capacity for the already bound account or wait, then start a new session; do not rotate or fall back to another consumer account. |
+| Provider model rejection | Preserve the provider exit, establish the pinned model's availability through an approved operator path, and retry without silent substitution. |
+
+Move failure preserves old registry bytes plus Git and handoff state and never
+publishes a partial generation. A nonzero legacy process/binding reference or
+an old-path reference stops migration. Public records remain strict one-line
+`account_binding`, `role_startup`, or `launch_failure` JSON without credentials,
+raw verifier output, identity values, digests, or private home paths.
+
+## Status semantics
+
+`waiting`, `working`, and `done` report agent-turn observability across workmux
+status, dashboard, sidebar, and wait surfaces. The exact meaning is
+`done = agent-turn-ended, not issue-complete`. These status surfaces are not authority or issue-completion signals.
+They do not approve a change, prove verification, transfer ownership, end a
+quality-goal, or authorize deployment, migration, merge, or issue closure.

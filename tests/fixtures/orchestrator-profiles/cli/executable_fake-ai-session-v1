@@ -1,0 +1,20 @@
+#!/opt/homebrew/bin/python3
+"""Minimal old-selector fixture that only understands the v1 registry shape."""
+
+from pathlib import Path
+import sys
+import tomllib
+
+
+arguments = sys.argv[1:]
+try:
+    registry_path = Path(arguments[arguments.index("--registry") + 1])
+    with registry_path.open("rb") as stream:
+        registry = tomllib.load(stream)
+except (OSError, ValueError, tomllib.TOMLDecodeError):
+    print("ai-session: blocked_contract: old selector registry is invalid", file=sys.stderr)
+    raise SystemExit(2)
+if "schema_version" in registry or "contract_id" in registry:
+    print("ai-session: blocked_contract: old selector cannot consume strict registry", file=sys.stderr)
+    raise SystemExit(2)
+raise SystemExit(97)

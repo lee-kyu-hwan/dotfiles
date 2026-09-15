@@ -1,31 +1,67 @@
-version = 1
+schema_version = 1
+contract_id = "orchestrator-permission-profiles-v1"
+task_bindings = []
+session_bindings = []
 
-# 이 파일에는 비밀이 아닌 별칭·범위·경로만 둔다. 각 config_home의 인증은
-# host마다 공식 login 흐름으로 별도 설정하며 디렉터리나 token을 복제하지 않는다.
-[accounts.codex-dotfiles]
+# Active records contain only non-secret aliases, modes, and reviewed paths.
+# Authentication remains in each provider's official home and is never copied.
+[[accounts]]
+alias = "codex-default"
+provider = "codex"
+auth_kind = "consumer"
+config_home = "~/.codex"
+allowed_scopes = [{ kind = "directory", value = "~/code" }]
+identity_enrollment_policy = "explicit_only"
+
+[[accounts]]
+alias = "claude-profile1"
+provider = "claude"
+auth_kind = "consumer"
+config_home_mode = "provider_default"
+allowed_scopes = [{ kind = "directory", value = "~/code/profile1" }]
+identity_enrollment_policy = "explicit_only"
+
+[[accounts]]
+alias = "claude-profile2"
+provider = "claude"
+auth_kind = "consumer"
+config_home_mode = "explicit"
+config_home = "~/.local/share/ai-account-profiles/claude/profile2"
+allowed_scopes = [{ kind = "directory", value = "~/code/profile2" }]
+identity_enrollment_policy = "explicit_only"
+
+[[workspace_directory_mappings]]
+root = "~/code"
+provider = "codex"
+account_profile = "codex-default"
+priority = 100
+
+[[workspace_directory_mappings]]
+root = "~/code/profile1"
+provider = "claude"
+account_profile = "claude-profile1"
+priority = 100
+
+[[workspace_directory_mappings]]
+root = "~/code/profile2"
+provider = "claude"
+account_profile = "claude-profile2"
+priority = 100
+
+# Opaque migration evidence. The strings below preserve the two deployed v1
+# record byte spans and are deliberately outside the active account parser.
+[legacy_records]
+codex-dotfiles = '''[accounts.codex-dotfiles]
 provider = "codex"
 auth_kind = "consumer"
 config_home = "~/.local/share/ai-account-profiles/codex/dotfiles"
 allowed_scopes = ["repository:lee-kyu-hwan/dotfiles"]
 
-[accounts.claude-dotfiles]
+'''
+claude-dotfiles = '''[accounts.claude-dotfiles]
 provider = "claude"
 auth_kind = "consumer"
 config_home = "~/.local/share/ai-account-profiles/claude/dotfiles"
 allowed_scopes = ["repository:lee-kyu-hwan/dotfiles"]
 
-[defaults]
-codex = "codex-dotfiles"
-claude = "claude-dotfiles"
-
-[[scope_bindings]]
-kind = "repository"
-value = "lee-kyu-hwan/dotfiles"
-provider = "codex"
-account_profile = "codex-dotfiles"
-
-[[scope_bindings]]
-kind = "repository"
-value = "lee-kyu-hwan/dotfiles"
-provider = "claude"
-account_profile = "claude-dotfiles"
+'''
