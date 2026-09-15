@@ -10,6 +10,7 @@ tests/**
 .aws/cli/cache
 
 .claude/skills/quality-goal/**/__pycache__
+.claude/skills/dual-review/**/__pycache__
 
 # Codex가 런타임에 계속 다시 쓰는 파일. 값이 같아도 표현을 자기 포맷으로
 # 정규화하고(`20` → `20.0`, 여러 줄 배열 → 한 줄), trust_level·hooks.state·
