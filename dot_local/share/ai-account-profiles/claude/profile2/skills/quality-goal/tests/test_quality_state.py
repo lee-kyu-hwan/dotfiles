@@ -1,0 +1,4902 @@
+import ast
+from contextlib import redirect_stderr, redirect_stdout
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+import hashlib
+import inspect
+import io
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+
+SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR))
+
+import quality_state
+from quality_state import StateError
+from validate_review import REQUIRED_CHECKS
+
+
+def run_git(root, *args):
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def make_git_repo(testcase):
+    root = Path(testcase.enterContext(tempfile.TemporaryDirectory()))
+    run_git(root, "init")
+    run_git(root, "config", "user.name", "quality-goal-test")
+    run_git(root, "config", "user.email", "quality-goal-test@example.invalid")
+    (root / "app.txt").write_text("base\n", encoding="utf-8")
+    run_git(root, "add", "app.txt")
+    run_git(root, "commit", "-m", "fixture")
+    return root
+
+
+FIXED_NOW = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
+VALID_DIGEST = "a" * 64
+VALID_FINGERPRINT = hashlib.sha256(b"valid workspace").hexdigest()
+OLD_FINGERPRINT = hashlib.sha256(b"old workspace").hexdigest()
+NEW_FINGERPRINT = hashlib.sha256(b"new workspace").hexdigest()
+
+
+def write_json(directory, name, value):
+    path = Path(directory) / name
+    path.write_text(json.dumps(value), encoding="utf-8")
+    return path
+
+
+def high_finding(finding_id, new_blocker_evidence=None):
+    return {
+        "id": finding_id,
+        "severity": "High",
+        "description": "A required quality condition is not satisfied.",
+        "evidence_location": "artifact.md#Quality",
+        "rubric_item": "Quality condition completeness",
+        "required_resolution": "Resolve the quality condition and document evidence.",
+        "new_blocker_evidence": new_blocker_evidence,
+    }
+
+
+def valid_review(artifact="plan", round_number=1, verdict="PASS", blockers=None):
+    blockers = list(blockers or [])
+    evidence = None if round_number == 1 else "The current round provides fresh evidence."
+    return {
+        "artifact": artifact,
+        "round": round_number,
+        "score": 92,
+        "verdict": verdict,
+        "blockers": blockers,
+        "findings": [high_finding(blocker, evidence) for blocker in blockers],
+        "evidence": [
+            {
+                "claim": "The reviewed artifact is traceable to its acceptance criteria.",
+                "location": "artifact.md#Traceability",
+                "verified": True,
+            }
+        ],
+        "required_next_action": None,
+    }
+
+
+def valid_revision_check(artifact, round_number, current_digest=VALID_DIGEST):
+    return {
+        "artifact": artifact,
+        "round": round_number,
+        "base_digest": None,
+        "current_digest": current_digest,
+        "spec_digest": None,
+        "cells": [],
+        "empty_cells": 0,
+        "touched_requirements": [],
+        "removed_ids": [],
+        "ripple": [],
+        "notes": {
+            "required": False,
+            "path": None,
+            "section_found": False,
+            "missing_rows": [],
+            "blank_cells": [],
+        },
+        "passed": True,
+    }
+
+
+def write_revision_check(directory, artifact, round_number, current_digest=VALID_DIGEST):
+    return write_json(
+        directory,
+        f"{artifact}-revision-check-{round_number}.json",
+        valid_revision_check(artifact, round_number, current_digest),
+    )
+
+
+def unverified_review(artifact="plan", round_number=1, claim=None):
+    review = valid_review(artifact, round_number, "REVISE")
+    review["evidence"][0]["verified"] = False
+    if claim is not None:
+        review["evidence"][0]["claim"] = claim
+    review["required_next_action"] = "Supply the missing evidence."
+    return review
+
+
+def state_at(stage, mode="standard", project_root=None, goal="Build the quality workflow"):
+    state = quality_state.new_state(
+        goal,
+        "auto",
+        project_root or Path.cwd(),
+        "artifact-output",
+        task_id="test-task",
+        now=FIXED_NOW,
+    )
+    state["stage"] = stage
+    state["mode"] = mode
+    return state
+
+
+class ConstantTests(unittest.TestCase):
+    def test_transition_terminal_and_round_constants_match_the_contract(self):
+        self.assertEqual(
+            {
+                "INTAKE": {"CLASSIFIED", "BLOCKED", "CANCELLED"},
+                "CLASSIFIED": {
+                    "SPEC_REVIEW",
+                    "AWAITING_PLAN_APPROVAL",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+                "SPEC_REVIEW": {
+                    "SPEC_PASSED",
+                    "NEEDS_REDESIGN",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+                "SPEC_PASSED": {"PLAN_REVIEW", "BLOCKED", "CANCELLED"},
+                "PLAN_REVIEW": {
+                    "PLAN_PASSED",
+                    "NEEDS_REDESIGN",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+                "PLAN_PASSED": {"AWAITING_PLAN_APPROVAL", "BLOCKED", "CANCELLED"},
+                "AWAITING_PLAN_APPROVAL": {
+                    "IMPLEMENTING",
+                    "SPEC_REVIEW",
+                    "PLAN_REVIEW",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+                "IMPLEMENTING": {
+                    "CODE_REVIEW",
+                    "SPEC_REVIEW",
+                    "PLAN_REVIEW",
+                    "NEEDS_REDESIGN",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+                "CODE_REVIEW": {
+                    "IMPLEMENTING",
+                    "COMPLETED",
+                    "SPEC_REVIEW",
+                    "PLAN_REVIEW",
+                    "NEEDS_REDESIGN",
+                    "BLOCKED",
+                    "CANCELLED",
+                },
+            },
+            quality_state.ALLOWED_TRANSITIONS,
+        )
+        self.assertEqual(
+            {"COMPLETED", "BLOCKED", "NEEDS_REDESIGN", "CANCELLED"},
+            quality_state.TERMINAL_STATES,
+        )
+        self.assertEqual(
+            {"spec": 3, "plan": 2, "code": 3},
+            quality_state.ROUND_LIMITS,
+        )
+
+
+class NormalizeGoalTests(unittest.TestCase):
+    def test_normalize_goal_applies_nfkc_whitespace_collapse_and_casefold(self):
+        goal = "  Ｐａｒｔｎｅｒ\tSWITCH  Straße\n"
+
+        self.assertEqual("partner switch strasse", quality_state.normalize_goal(goal))
+
+    def test_goal_key_matches_equivalent_spellings_but_not_different_goals(self):
+        first = "  Ｐａｒｔｎｅｒ\tSWITCH  Straße\n"
+        equivalent = "partner   switch   STRASSE"
+        different = "partner switch status"
+
+        self.assertEqual(quality_state.goal_key(first), quality_state.goal_key(equivalent))
+        self.assertNotEqual(quality_state.goal_key(first), quality_state.goal_key(different))
+        self.assertEqual(
+            hashlib.sha256(quality_state.normalize_goal(first).encode("utf-8")).hexdigest(),
+            quality_state.goal_key(first),
+        )
+
+
+class JudgementScriptTests(unittest.TestCase):
+    def test_judgement_scripts_exist_and_are_not_collected(self):
+        tests_dir = Path(__file__).parent
+        scripts = (
+            "assert_python_version.py",
+            "assert_preserved_sections.py",
+            "assert_tests_preserved.py",
+        )
+
+        for name in scripts:
+            self.assertTrue((tests_dir / name).is_file())
+            self.assertFalse(name.startswith("test_"))
+
+        discovery = unittest.TestLoader().discover(
+            str(tests_dir), pattern="test_*.py"
+        )
+        discovered_ids = []
+        for suite in discovery:
+            for nested_suite in suite:
+                for test in nested_suite:
+                    discovered_ids.append(test.id())
+        for name in scripts:
+            self.assertFalse(
+                any(name.removesuffix(".py") in test_id for test_id in discovered_ids)
+            )
+
+    def test_python_version_guard_boundary_and_main_delegates(self):
+        source_path = Path(__file__).parent / "assert_python_version.py"
+        source = source_path.read_text(encoding="utf-8")
+        namespace = {}
+        exec(compile(source, str(source_path), "exec"), namespace)
+
+        self.assertFalse(namespace["is_supported"]((3, 11, 9)))
+        self.assertTrue(namespace["is_supported"]((3, 12, 0)))
+        self.assertTrue(namespace["is_supported"]((3, 14, 7)))
+
+        tree = ast.parse(source)
+        version_compares_outside_helper = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Compare)
+            and any(
+                isinstance(item, ast.Attribute)
+                and isinstance(item.value, ast.Name)
+                and item.value.id == "sys"
+                and item.attr == "version_info"
+                for item in ast.walk(node)
+            )
+        ]
+        self.assertEqual([], version_compares_outside_helper)
+        self.assertIn('is_supported(sys.version_info)', source)
+
+
+class NewStateTests(unittest.TestCase):
+    def test_new_state_has_the_complete_schema_version_one_shape(self):
+        project_root = Path("relative-project")
+        state = quality_state.new_state(
+            "  Ship Ｆｕｌｌ-Width Goal  ",
+            "auto",
+            project_root,
+            "artifact-output",
+            now=FIXED_NOW,
+        )
+
+        self.assertEqual(
+            {
+                "schema_version",
+                "task_id",
+                "goal",
+                "goal_key",
+                "requested_mode",
+                "mode",
+                "classification_reasons",
+                "stage",
+                "project_root",
+                "artifact_dir",
+                "base_revision",
+                "initial_dirty_paths",
+                "artifacts",
+                "artifact_digests",
+                "rounds",
+                "reviews",
+                "revision_checks",
+                "open_finding_ids",
+                "review_validation_retry",
+                "review_unverified_retry",
+                "plan_approval",
+                "verification",
+                "status_reason",
+                "created_at",
+                "updated_at",
+                "readiness",
+                "draft_attempts",
+            },
+            set(state),
+        )
+        self.assertEqual(1, state["schema_version"])
+        self.assertEqual("  Ship Ｆｕｌｌ-Width Goal  ", state["goal"])
+        self.assertEqual(quality_state.goal_key(state["goal"]), state["goal_key"])
+        self.assertEqual("auto", state["requested_mode"])
+        self.assertIsNone(state["mode"])
+        self.assertEqual([], state["classification_reasons"])
+        self.assertEqual("INTAKE", state["stage"])
+        self.assertEqual(str(project_root.resolve()), state["project_root"])
+        self.assertEqual("artifact-output", state["artifact_dir"])
+        self.assertIsNone(state["base_revision"])
+        self.assertEqual([], state["initial_dirty_paths"])
+        self.assertEqual(
+            {"spec": None, "plan": None, "compact_plan": None, "report": None},
+            state["artifacts"],
+        )
+        self.assertEqual(
+            {"spec": None, "plan": None, "compact_plan": None, "report": None},
+            state["artifact_digests"],
+        )
+        self.assertEqual({"spec": 0, "plan": 0, "code": 0}, state["rounds"])
+        self.assertEqual({"spec": [], "plan": []}, state["readiness"])
+        self.assertEqual({"spec": 0, "plan": 0}, state["draft_attempts"])
+        self.assertEqual({"spec": [], "plan": [], "code": []}, state["reviews"])
+        self.assertEqual({"spec": [], "plan": []}, state["revision_checks"])
+        self.assertEqual(
+            {"spec": [], "plan": [], "code": []},
+            state["open_finding_ids"],
+        )
+        self.assertIsNone(state["review_validation_retry"])
+        self.assertIsNone(state["review_unverified_retry"])
+        self.assertIsNone(state["plan_approval"])
+        self.assertEqual(
+            {"path": None, "workspace_fingerprint": None, "valid": False},
+            state["verification"],
+        )
+        self.assertIsNone(state["status_reason"])
+        self.assertEqual("2026-08-25T12:34:56Z", state["created_at"])
+        self.assertEqual("2026-08-25T12:34:56Z", state["updated_at"])
+        self.assertIn("ship-full-width-goal", state["task_id"])
+        self.assertRegex(
+            state["task_id"],
+            r"^\d{8}T\d{6}Z-[\w-]+-[0-9a-f]{8}$",
+        )
+
+    def test_new_state_accepts_pathlike_artifact_dir_and_rejects_empty_or_invalid_values(self):
+        state = quality_state.new_state(
+            "A valid goal",
+            "standard",
+            Path.cwd(),
+            Path("artifact-output"),
+        )
+
+        self.assertEqual("artifact-output", state["artifact_dir"])
+        for artifact_dir in ("", 3, None):
+            with self.subTest(artifact_dir=artifact_dir):
+                with self.assertRaises(StateError):
+                    quality_state.new_state(
+                        "A valid goal",
+                        "standard",
+                        Path.cwd(),
+                        artifact_dir,
+                    )
+
+    def test_new_state_task_id_keeps_unicode_slug_and_goal_key_suffix(self):
+        state = quality_state.new_state(
+            "한국어 품질 목표",
+            "standard",
+            Path.cwd(),
+            "artifacts",
+            now=FIXED_NOW,
+        )
+
+        self.assertIn("한국어-품질-목표", state["task_id"])
+        self.assertTrue(state["task_id"].endswith(f"-{quality_state.goal_key(state['goal'])[:8]}"))
+
+    def test_new_state_rejects_invalid_requested_modes(self):
+        for requested_mode in ("", "unsafe", None):
+            with self.subTest(requested_mode=requested_mode):
+                with self.assertRaises(StateError):
+                    quality_state.new_state(
+                        "A valid goal",
+                        requested_mode,
+                        Path.cwd(),
+                        "artifacts",
+                    )
+
+    def test_new_state_rejects_empty_or_whitespace_only_goals(self):
+        for goal in ("", " \t\n"):
+            with self.subTest(goal=repr(goal)):
+                with self.assertRaises(StateError):
+                    quality_state.new_state(
+                        goal,
+                        "standard",
+                        Path.cwd(),
+                        "artifacts",
+                    )
+
+    def test_new_state_respects_a_supplied_task_id(self):
+        state = quality_state.new_state(
+            "A valid goal",
+            "strict",
+            Path.cwd(),
+            "artifacts",
+            task_id="provided-task-id",
+            now=FIXED_NOW,
+        )
+
+        self.assertEqual("provided-task-id", state["task_id"])
+
+
+class PersistenceTests(unittest.TestCase):
+    def test_save_and_load_state_round_trip_without_tmp_siblings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("CLASSIFIED")
+            path = directory / "state.json"
+
+            quality_state.save_state(path, state)
+
+            self.assertEqual(state, quality_state.load_state(path))
+            self.assertEqual([], list(directory.glob("*.tmp")))
+
+    def test_load_state_missing_file_raises_state_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(StateError):
+                quality_state.load_state(Path(directory) / "missing.json")
+
+    def test_load_state_corrupt_json_raises_state_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.json"
+            path.write_text("{not valid json", encoding="utf-8")
+
+            with self.assertRaises(StateError):
+                quality_state.load_state(path)
+
+    def test_load_state_requires_schema_version_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("CLASSIFIED")
+            missing = write_json(directory, "missing.json", {"stage": "CLASSIFIED"})
+            wrong = dict(state)
+            wrong["schema_version"] = 2
+            wrong_path = write_json(directory, "wrong.json", wrong)
+
+            for path in (missing, wrong_path):
+                with self.subTest(path=path):
+                    with self.assertRaises(StateError):
+                        quality_state.load_state(path)
+
+
+class ClassifyTests(unittest.TestCase):
+    def test_classify_sets_mode_reasons_and_classified_stage(self):
+        state = state_at("INTAKE", mode=None)
+        reasons = ["existing snapshot can be reused", "scope is limited"]
+
+        result = quality_state.classify(state, "light", reasons)
+
+        self.assertEqual("light", result["mode"])
+        self.assertEqual(reasons, result["classification_reasons"])
+        self.assertEqual("CLASSIFIED", result["stage"])
+        self.assertIsNotNone(result["updated_at"])
+
+    def test_classify_rejects_invalid_modes_and_reasons(self):
+        for mode in ("auto", "", "unknown"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(StateError):
+                    quality_state.classify(state_at("INTAKE", mode=None), mode, ["reason"])
+
+        for reasons in ([], ["   "], ["valid", 3]):
+            with self.subTest(reasons=reasons):
+                with self.assertRaises(StateError):
+                    quality_state.classify(state_at("INTAKE", mode=None), "standard", reasons)
+
+    def test_classify_is_rejected_outside_intake(self):
+        with self.assertRaises(StateError):
+            quality_state.classify(state_at("CLASSIFIED"), "standard", ["reason"])
+
+    def test_direct_intake_to_classified_transition_is_rejected(self):
+        state = state_at("INTAKE", mode=None)
+
+        with self.assertRaises(StateError):
+            quality_state.transition(state, "CLASSIFIED")
+
+
+class TransitionTests(unittest.TestCase):
+    def test_every_allowed_edge_is_accepted_or_uses_classify_for_classified(self):
+        for source, targets in quality_state.ALLOWED_TRANSITIONS.items():
+            for target in targets:
+                with self.subTest(source=source, target=target):
+                    state = state_at(source)
+                    reason = "synthetic transition" if target in quality_state.TERMINAL_STATES else None
+
+                    if source == "INTAKE" and target == "CLASSIFIED":
+                        result = quality_state.classify(state, "standard", ["synthetic classification"])
+                    elif source == "CLASSIFIED" and target == "AWAITING_PLAN_APPROVAL":
+                        state = state_at(source, mode="light")
+                        result = quality_state.transition(state, target, reason)
+                    elif source == "CLASSIFIED" and target == "SPEC_REVIEW":
+                        state = state_at(source, mode="standard")
+                        result = quality_state.transition(state, target, reason)
+                    elif source == "CODE_REVIEW" and target == "COMPLETED":
+                        state["rounds"]["code"] = 1
+                        state["reviews"]["code"] = [
+                            {
+                                "verdict": "PASS",
+                                "blockers": [],
+                                "artifact_digest": VALID_DIGEST,
+                            }
+                        ]
+                        state["open_finding_ids"]["code"] = []
+                        state["verification"]["valid"] = True
+                        state["verification"]["workspace_fingerprint"] = VALID_DIGEST
+                        result = quality_state.transition(state, target, reason)
+                    elif (source, target) in {
+                        ("SPEC_REVIEW", "SPEC_PASSED"),
+                        ("PLAN_REVIEW", "PLAN_PASSED"),
+                    }:
+                        artifact = "spec" if source == "SPEC_REVIEW" else "plan"
+                        state["rounds"][artifact] = 1
+                        state["reviews"][artifact] = [{"verdict": "PASS", "blockers": []}]
+                        state["open_finding_ids"][artifact] = []
+                        result = quality_state.transition(state, target, reason)
+                    elif source in {"AWAITING_PLAN_APPROVAL", "CODE_REVIEW"} and target == "IMPLEMENTING":
+                        with tempfile.TemporaryDirectory() as directory:
+                            plan_path = Path(directory) / "plan.md"
+                            plan_path.write_text("approved plan\n", encoding="utf-8")
+                            state["artifacts"]["plan"] = str(plan_path)
+                            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+                            if source == "CODE_REVIEW":
+                                state["stage"] = "AWAITING_PLAN_APPROVAL"
+                            quality_state.approve_plan(
+                                state,
+                                plan_path,
+                                "2026-08-25T12:00:00Z",
+                            )
+                            state["stage"] = source
+                            result = quality_state.transition(state, target, reason)
+                    else:
+                        result = quality_state.transition(state, target, reason)
+
+                    self.assertEqual(target, result["stage"])
+
+    def test_invalid_transition_raises_without_mutating_the_input(self):
+        state = state_at("INTAKE")
+        before = deepcopy(state)
+
+        with self.assertRaises(StateError):
+            quality_state.transition(state, "IMPLEMENTING")
+
+        self.assertEqual(before, state)
+
+    def test_terminal_states_reject_every_possible_outgoing_target(self):
+        all_states = set(quality_state.ALLOWED_TRANSITIONS) | set(quality_state.TERMINAL_STATES)
+
+        for terminal in quality_state.TERMINAL_STATES:
+            for target in all_states:
+                with self.subTest(terminal=terminal, target=target):
+                    state = state_at(terminal)
+                    before = deepcopy(state)
+                    with self.assertRaises(StateError):
+                        quality_state.transition(state, target, "terminal transition")
+                    self.assertEqual(before, state)
+
+    def test_blocked_redesign_and_cancelled_require_and_store_a_reason(self):
+        cases = (
+            ("INTAKE", "BLOCKED"),
+            ("SPEC_REVIEW", "NEEDS_REDESIGN"),
+            ("INTAKE", "CANCELLED"),
+        )
+
+        for source, target in cases:
+            with self.subTest(source=source, target=target):
+                for reason in (None, "   "):
+                    with self.assertRaises(StateError):
+                        quality_state.transition(state_at(source), target, reason)
+
+                result = quality_state.transition(
+                    state_at(source),
+                    target,
+                    "operator supplied reason",
+                )
+                self.assertEqual(target, result["stage"])
+                self.assertEqual("operator supplied reason", result["status_reason"])
+
+    def test_completed_requires_verification_tied_to_the_reviewed_code_digest(self):
+        """The verified workspace fingerprint must match the digest of the
+        code that was actually reviewed, not merely be present and valid."""
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": "a" * 64,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": "b" * 64,
+            "valid": True,
+        }
+        before = deepcopy(state)
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "COMPLETED")
+
+        self.assertEqual(before, state)
+
+    def test_completed_accepts_verification_matching_the_reviewed_code_digest(self):
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": "c" * 64,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": "c" * 64,
+            "valid": True,
+        }
+
+        result = quality_state.transition(state, "COMPLETED")
+
+        self.assertEqual("COMPLETED", result["stage"])
+
+    def test_classified_transition_targets_require_the_matching_mode(self):
+        for mode, target in (("strict", "AWAITING_PLAN_APPROVAL"), ("light", "SPEC_REVIEW")):
+            with self.subTest(mode=mode, target=target):
+                state = state_at("CLASSIFIED", mode=mode)
+                before = deepcopy(state)
+
+                with self.assertRaises(quality_state.TransitionError):
+                    quality_state.transition(state, target)
+
+                self.assertEqual(before, state)
+
+    def test_code_review_completion_requires_all_quality_gates(self):
+        cases = (
+            {"rounds": {"code": 0}},
+            {
+                "rounds": {"code": 1},
+                "reviews": {"code": [{"verdict": "REVISE", "blockers": []}]},
+                "open_finding_ids": {"code": []},
+                "verification": {"valid": True},
+            },
+            {
+                "rounds": {"code": 1},
+                "reviews": {"code": [{"verdict": "PASS", "blockers": []}]},
+                "open_finding_ids": {"code": ["CODE-1"]},
+                "verification": {"valid": True},
+            },
+            {
+                "rounds": {"code": 1},
+                "reviews": {"code": [{"verdict": "PASS", "blockers": []}]},
+                "open_finding_ids": {"code": []},
+                "verification": {"valid": False},
+            },
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                state = state_at("CODE_REVIEW")
+                for key, value in overrides.items():
+                    state[key].update(value)
+                before = deepcopy(state)
+
+                with self.assertRaises(quality_state.TransitionError):
+                    quality_state.transition(state, "COMPLETED")
+
+                self.assertEqual(before, state)
+
+
+class ArtifactTests(unittest.TestCase):
+    def test_set_artifact_records_each_supported_existing_regular_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("INTAKE", mode=None)
+
+            for kind in ("spec", "plan", "compact_plan", "report"):
+                path = directory / f"{kind}.md"
+                path.write_text(f"{kind}\n", encoding="utf-8")
+
+                result = quality_state.set_artifact(state, kind, path)
+
+                self.assertIs(result, state)
+                self.assertEqual(str(path), result["artifacts"][kind])
+
+    def test_set_artifact_rejects_unknown_or_nonregular_paths_without_mutating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            existing = directory / "existing.md"
+            existing.write_text("artifact\n", encoding="utf-8")
+            directory_path = directory / "artifact-directory"
+            directory_path.mkdir()
+
+            for kind, path in (
+                ("unknown", existing),
+                ("spec", directory / "missing.md"),
+                ("spec", directory_path),
+            ):
+                state = state_at("CLASSIFIED")
+                before = deepcopy(state)
+
+                with self.assertRaises(StateError):
+                    quality_state.set_artifact(state, kind, path)
+
+                self.assertEqual(before, state)
+
+
+class TerminalReportRegistrationTests(unittest.TestCase):
+    def test_report_registers_after_review_limit_exhausted_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            cases = (
+                ("spec", "SPEC_REVIEW", 3),
+                ("plan", "PLAN_REVIEW", 2),
+                ("code", "CODE_REVIEW", 3),
+            )
+            for artifact, stage, limit in cases:
+                with self.subTest(artifact=artifact):
+                    state = state_at(stage)
+                    digest = VALID_DIGEST
+                    if artifact in {"spec", "plan"}:
+                        artifact_path = directory / f"{artifact}.md"
+                        artifact_path.write_text(f"{artifact}\n", encoding="utf-8")
+                        quality_state.set_artifact(state, artifact, artifact_path)
+                        digest = quality_state._file_digest(artifact_path)
+
+                    for round_number in range(1, limit + 1):
+                        review_path = write_json(
+                            directory,
+                            f"{artifact}-{round_number}.json",
+                            valid_review(
+                                artifact=artifact,
+                                round_number=round_number,
+                                verdict="REVISE",
+                                blockers=[f"{artifact.upper()}-LIMIT-{round_number}"],
+                            ),
+                        )
+                        revision_check_path = None
+                        if artifact in {"spec", "plan"} and round_number >= 2:
+                            revision_check_path = write_revision_check(
+                                directory, artifact, round_number, digest
+                            )
+                        quality_state.record_review(
+                            state,
+                            review_path,
+                            digest,
+                            revision_check_path=revision_check_path,
+                        )
+
+                    report_path = directory / f"{artifact}-report.md"
+                    report_path.write_text("report\n", encoding="utf-8")
+                    quality_state.set_artifact(state, "report", report_path)
+
+                    self.assertEqual("NEEDS_REDESIGN", state["stage"])
+                    self.assertEqual(
+                        f"REVIEW_LIMIT_EXHAUSTED:{artifact}", state["status_reason"]
+                    )
+                    self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_report_registers_after_recurring_blocking_finding_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("SPEC_REVIEW")
+            blocker = "SPEC-RECURRING"
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[blocker],
+                    ),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+
+            report_path = directory / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            quality_state.set_artifact(state, "report", report_path)
+
+            self.assertEqual("NEEDS_REDESIGN", state["stage"])
+            self.assertEqual(
+                f"RECURRING_BLOCKING_FINDING:{blocker}", state["status_reason"]
+            )
+            self.assertEqual(2, state["rounds"]["spec"])
+            self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_report_registration_succeeds_in_every_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report_path = Path(directory) / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                with self.subTest(terminal=terminal):
+                    state = state_at(terminal)
+                    quality_state.set_artifact(state, "report", report_path)
+                    self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+    def test_non_report_kinds_stay_immutable_in_every_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "artifact.md"
+            artifact_path.write_text("artifact\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                for kind in ("spec", "plan", "compact_plan"):
+                    with self.subTest(terminal=terminal, kind=kind):
+                        state = state_at(terminal)
+                        before = deepcopy(state)
+                        with self.assertRaises(quality_state.TransitionError) as context:
+                            quality_state.set_artifact(state, kind, artifact_path)
+                        self.assertIs(type(context.exception), quality_state.TransitionError)
+                        self.assertEqual(before, state)
+
+    def test_terminal_report_registration_still_validates_the_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            invalid_paths = (directory / "missing.md", directory, "")
+            for terminal in quality_state.TERMINAL_STATES:
+                for path in invalid_paths:
+                    with self.subTest(terminal=terminal, path=path):
+                        state = state_at(terminal)
+                        before = deepcopy(state)
+                        with self.assertRaises(StateError) as context:
+                            quality_state.set_artifact(state, "report", path)
+                        self.assertIs(type(context.exception), StateError)
+                        self.assertEqual(before, state)
+            for path in invalid_paths:
+                with self.subTest(stage="CLASSIFIED", path=path):
+                    state = state_at("CLASSIFIED")
+                    before = deepcopy(state)
+                    with self.assertRaises(StateError) as context:
+                        quality_state.set_artifact(state, "report", path)
+                    self.assertIs(type(context.exception), StateError)
+                    self.assertEqual(before, state)
+
+    def test_terminal_unknown_kind_is_rejected_as_transition_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_path = Path(directory) / "artifact.md"
+            artifact_path.write_text("artifact\n", encoding="utf-8")
+            for terminal in quality_state.TERMINAL_STATES:
+                with self.subTest(terminal=terminal):
+                    with self.assertRaises(quality_state.TransitionError) as context:
+                        quality_state.set_artifact(
+                            state_at(terminal), "unknown", artifact_path
+                        )
+                    self.assertIs(type(context.exception), quality_state.TransitionError)
+
+    def test_record_review_is_rejected_after_each_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            limit_state = state_at("PLAN_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"plan-{round_number}.json",
+                    valid_review(
+                        artifact="plan",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[f"PLAN-LIMIT-{round_number}"],
+                    ),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "plan", round_number
+                    )
+                quality_state.record_review(
+                    limit_state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+            limit_retry = write_json(
+                directory, "plan-3.json", valid_review(artifact="plan", round_number=3)
+            )
+
+            recurring_state = state_at("SPEC_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=["SPEC-RECURRING"],
+                    ),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    recurring_state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+            recurring_retry = write_json(
+                directory, "spec-3.json", valid_review(artifact="spec", round_number=3)
+            )
+
+            for state, review_path in (
+                (limit_state, limit_retry),
+                (recurring_state, recurring_retry),
+            ):
+                with self.subTest(stage=state["stage"]):
+                    with self.assertRaises(StateError) as context:
+                        quality_state.record_review(state, review_path, VALID_DIGEST)
+                    self.assertIn("requires stage", str(context.exception))
+
+    def test_report_registers_after_review_output_invalid_auto_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_validation_failure(
+                state, "plan", 1, ["error"]
+            )
+            quality_state.record_review_validation_failure(
+                state, "plan", 1, ["error"]
+            )
+            report_path = directory / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+
+            quality_state.set_artifact(state, "report", report_path)
+
+            self.assertEqual("BLOCKED", state["stage"])
+            self.assertEqual("REVIEW_OUTPUT_INVALID", state["status_reason"])
+            self.assertEqual(str(report_path), state["artifacts"]["report"])
+
+
+class PlanApprovalGuardTests(unittest.TestCase):
+    def test_approve_plan_rejects_content_changed_since_the_passing_review(self):
+        """A Plan edited after PLAN_PASSED but before approval, at the same
+        path, must not be silently approved with its new content."""
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("reviewed plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            plan_path.write_text("tampered after review, never reviewed\n", encoding="utf-8")
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertIsNone(state["plan_approval"])
+
+    def test_approve_plan_rejects_when_no_review_digest_was_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            self.assertIsNone(state["artifact_digests"]["plan"])
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertIsNone(state["plan_approval"])
+
+    def test_approve_plan_accepts_content_matching_the_passing_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("reviewed plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+
+            result = quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+            self.assertEqual(
+                quality_state._file_digest(plan_path),
+                result["plan_approval"]["digest"],
+            )
+
+    def test_light_compact_plan_approval_needs_no_review_digest(self):
+        """Light never reviews its compact Plan, so approval has no reviewed
+        digest to compare against."""
+        with tempfile.TemporaryDirectory() as directory:
+            compact_plan = Path(directory) / "compact-plan.md"
+            compact_plan.write_text("compact plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="light")
+            state["artifacts"]["compact_plan"] = str(compact_plan)
+            self.assertIsNone(state["artifact_digests"]["compact_plan"])
+
+            result = quality_state.approve_plan(state, compact_plan, "2026-08-25T12:00:00Z")
+
+            self.assertIsNotNone(result["plan_approval"])
+
+    def test_approval_must_target_the_current_mode_appropriate_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            plan_path = directory / "plan.md"
+            readme_path = directory / "README.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            readme_path.write_text("readme\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(
+                    state,
+                    readme_path,
+                    "2026-08-25T12:00:00Z",
+                )
+
+            self.assertIsNone(state["plan_approval"])
+
+    def test_repointing_the_current_plan_artifact_is_a_path_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            original = directory / "plan.md"
+            replacement = directory / "replacement-plan.md"
+            original.write_text("plan\n", encoding="utf-8")
+            replacement.write_text("replacement\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(original)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(original)
+            quality_state.approve_plan(state, original, "2026-08-25T12:00:00Z")
+            state["stage"] = "CODE_REVIEW"
+            state["artifacts"]["plan"] = str(replacement)
+            state["verification"]["valid"] = True
+
+            with self.assertRaises(quality_state.ApprovalMismatchError) as context:
+                quality_state.transition(state, "IMPLEMENTING")
+
+            self.assertIsInstance(context.exception, quality_state.TransitionError)
+            self.assertIsInstance(context.exception, StateError)
+            self.assertIn("mismatch", str(context.exception).lower())
+            self.assertIsNone(state["plan_approval"])
+            self.assertFalse(state["verification"]["valid"])
+            self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_missing_approved_plan_is_a_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+            state["verification"]["valid"] = True
+            plan_path.unlink()
+
+            with self.assertRaises(quality_state.ApprovalMismatchError) as context:
+                quality_state.transition(state, "IMPLEMENTING")
+
+            self.assertIsInstance(context.exception, quality_state.TransitionError)
+            self.assertIsInstance(context.exception, StateError)
+            message = str(context.exception).lower()
+            self.assertIn("digest", message)
+            self.assertTrue("mismatch" in message or "missing" in message)
+            self.assertIsNone(state["plan_approval"])
+            self.assertFalse(state["verification"]["valid"])
+            self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_approve_plan_rejects_invalid_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+
+            for approved_at in ("2026-08-25", "2026-8-25T12:00:00Z", None):
+                with self.subTest(approved_at=approved_at):
+                    with self.assertRaises(StateError):
+                        quality_state.approve_plan(state, plan_path, approved_at)
+
+    def test_standard_and_strict_modes_require_a_plan_approval(self):
+        for mode in ("standard", "strict"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                plan_path = Path(directory) / "plan.md"
+                plan_path.write_text("plan\n", encoding="utf-8")
+                state = state_at("AWAITING_PLAN_APPROVAL", mode=mode)
+                state["artifacts"]["plan"] = str(plan_path)
+
+                with self.assertRaises(StateError):
+                    quality_state.transition(state, "IMPLEMENTING")
+
+    def test_recorded_current_plan_approval_allows_implementing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("approved plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+
+            result = quality_state.approve_plan(
+                state,
+                plan_path,
+                "2026-08-25T12:00:00Z",
+            )
+            transitioned = quality_state.transition(result, "IMPLEMENTING")
+
+            self.assertEqual("IMPLEMENTING", transitioned["stage"])
+            self.assertEqual(
+                hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                transitioned["plan_approval"]["digest"],
+            )
+
+    def test_code_review_reentry_to_implementing_requires_current_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+
+            with self.assertRaises(StateError):
+                quality_state.transition(state, "IMPLEMENTING")
+
+    def test_approve_plan_is_rejected_at_code_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+
+            with self.assertRaises(StateError):
+                quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+
+    def test_stale_plan_digest_blocks_the_fix_loop_reentry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("approved plan\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            state["stage"] = "AWAITING_PLAN_APPROVAL"
+            quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+            state["stage"] = "CODE_REVIEW"
+            state["verification"]["valid"] = True
+            plan_path.write_text("modified after approval\n", encoding="utf-8")
+
+            with self.assertRaises(StateError):
+                quality_state.transition(state, "IMPLEMENTING")
+
+            self.assertIsNone(state["plan_approval"])
+            self.assertFalse(state["verification"]["valid"])
+            self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_changed_plan_digest_clears_approval_invalidates_verification_and_returns_to_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan_path = Path(directory) / "plan.md"
+            plan_path.write_text("approved plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            quality_state.approve_plan(state, plan_path, "2026-08-25T12:00:00Z")
+            state["verification"]["valid"] = True
+            state["verification"]["workspace_fingerprint"] = OLD_FINGERPRINT
+            plan_path.write_text("modified after approval\n", encoding="utf-8")
+
+            with self.assertRaises(quality_state.ApprovalMismatchError) as context:
+                quality_state.transition(state, "IMPLEMENTING")
+
+            self.assertIsInstance(context.exception, quality_state.TransitionError)
+            self.assertIsInstance(context.exception, StateError)
+            self.assertIn("digest", str(context.exception).lower())
+            self.assertIn("mismatch", str(context.exception).lower())
+            self.assertIsNone(state["plan_approval"])
+            self.assertFalse(state["verification"]["valid"])
+            self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_light_mode_requires_and_accepts_compact_plan_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compact_plan = Path(directory) / "compact-plan.md"
+            compact_plan.write_text("compact plan\n", encoding="utf-8")
+
+            missing = state_at("AWAITING_PLAN_APPROVAL", mode="light")
+            missing["artifacts"]["compact_plan"] = str(compact_plan)
+            with self.assertRaises(StateError):
+                quality_state.transition(missing, "IMPLEMENTING")
+
+            approved = state_at("AWAITING_PLAN_APPROVAL", mode="light")
+            approved["artifacts"]["compact_plan"] = str(compact_plan)
+            quality_state.approve_plan(approved, compact_plan, "2026-08-25T12:00:00Z")
+
+            self.assertEqual("IMPLEMENTING", quality_state.transition(approved, "IMPLEMENTING")["stage"])
+
+    def test_changed_compact_plan_digest_returns_light_mode_to_classified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            compact_plan = Path(directory) / "compact-plan.md"
+            compact_plan.write_text("approved compact plan\n", encoding="utf-8")
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="light")
+            state["artifacts"]["compact_plan"] = str(compact_plan)
+            quality_state.approve_plan(state, compact_plan, "2026-08-25T12:00:00Z")
+            state["verification"]["valid"] = True
+            compact_plan.write_text("changed compact plan\n", encoding="utf-8")
+
+            with self.assertRaises(quality_state.ApprovalMismatchError) as context:
+                quality_state.transition(state, "IMPLEMENTING")
+
+            self.assertIsInstance(context.exception, quality_state.TransitionError)
+            self.assertIsInstance(context.exception, StateError)
+            self.assertIn("digest", str(context.exception).lower())
+            self.assertIn("mismatch", str(context.exception).lower())
+            self.assertIsNone(state["plan_approval"])
+            self.assertFalse(state["verification"]["valid"])
+            self.assertEqual("CLASSIFIED", state["stage"])
+
+
+class RecordReviewTests(unittest.TestCase):
+    def test_artifact_digest_must_be_a_lowercase_sha256_hex_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review_path = write_json(directory, "plan-review.json", valid_review())
+
+            for digest in ("digest", "A" * 64, "a" * 63, None):
+                with self.subTest(digest=digest):
+                    with self.assertRaises(StateError):
+                        quality_state.record_review(
+                            state_at("PLAN_REVIEW"),
+                            review_path,
+                            digest,
+                        )
+
+    def test_artifact_digest_must_match_the_current_plan_file_when_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            plan_path = directory / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            review_path = write_json(directory, "plan-review.json", valid_review())
+            state = state_at("PLAN_REVIEW")
+            state["artifacts"]["plan"] = str(plan_path)
+
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            self.assertEqual(0, state["rounds"]["plan"])
+
+    def test_record_review_after_stale_verification_invalidation_is_allowed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            review_path = write_json(directory, "plan-review.json", valid_review())
+            verification_path = directory / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW")
+            quality_state.record_verification(
+                state,
+                verification_path,
+                OLD_FINGERPRINT,
+            )
+            quality_state.invalidate_stale_verification(state, NEW_FINGERPRINT)
+            state["stage"] = "PLAN_REVIEW"
+
+            result = quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            self.assertEqual(1, result["rounds"]["plan"])
+
+    def test_valid_plan_review_increments_only_plan_and_records_blockers_and_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            review_path = write_json(directory, "plan-review.json", valid_review())
+            digest = hashlib.sha256(b"plan-artifact").hexdigest()
+
+            result = quality_state.record_review(state, review_path, digest)
+
+            self.assertEqual(0, result["rounds"]["spec"])
+            self.assertEqual(1, result["rounds"]["plan"])
+            self.assertEqual(0, result["rounds"]["code"])
+            self.assertEqual(
+                {
+                    "round": 1,
+                    "path": str(review_path),
+                    "artifact_digest": digest,
+                    "verdict": "PASS",
+                    "blockers": [],
+                },
+                result["reviews"]["plan"][0],
+            )
+            self.assertEqual([], result["open_finding_ids"]["plan"])
+            self.assertEqual(digest, result["artifact_digests"]["plan"])
+            self.assertIsNone(result["review_validation_retry"])
+
+    def test_review_artifact_or_stage_mismatch_raises_state_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrong_artifact = write_json(
+                directory,
+                "wrong-artifact.json",
+                valid_review(artifact="spec"),
+            )
+            state = state_at("PLAN_REVIEW")
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, wrong_artifact, VALID_DIGEST)
+
+            wrong_stage = write_json(
+                directory,
+                "wrong-stage.json",
+                valid_review(artifact="plan"),
+            )
+            state = state_at("SPEC_REVIEW")
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, wrong_stage, VALID_DIGEST)
+
+    def test_review_round_must_be_next_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review_path = write_json(
+                directory,
+                "round-two.json",
+                valid_review(round_number=2),
+            )
+            state = state_at("PLAN_REVIEW")
+
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            self.assertEqual(0, state["rounds"]["plan"])
+
+    def test_schema_invalid_review_json_raises_state_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review_path = write_json(directory, "invalid.json", {"artifact": "plan"})
+
+            with self.assertRaises(StateError):
+                quality_state.record_review(state_at("PLAN_REVIEW"), review_path, VALID_DIGEST)
+
+
+class RecordReviewUnverifiedTests(unittest.TestCase):
+    def test_unverified_revise_is_accounted_without_consuming_a_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review = valid_review(verdict="REVISE")
+            review["evidence"][0]["verified"] = False
+            review["required_next_action"] = "Supply the missing evidence."
+            review_path = write_json(directory, "review.json", review)
+            state = state_at("PLAN_REVIEW")
+
+            result = quality_state.record_review_unverified(state, review_path, VALID_DIGEST)
+
+            self.assertEqual(0, result["rounds"]["plan"])
+            self.assertEqual({
+                "artifact": "plan", "round": 1, "attempts": 1, "exhausted": False,
+                "artifact_digest": VALID_DIGEST,
+                "unverified_claims": [review["evidence"][0]["claim"]],
+                "discarded_reviews": [str(review_path)],
+            }, result["review_unverified_retry"])
+
+    def test_unverified_retry_is_digest_bound_and_record_review_clears_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unverified = valid_review(verdict="REVISE")
+            unverified["evidence"][0]["verified"] = False
+            unverified["required_next_action"] = "Supply evidence."
+            unverified_path = write_json(directory, "unverified.json", unverified)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, unverified_path, VALID_DIGEST)
+            normal_path = write_json(directory, "normal.json", valid_review())
+
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, normal_path, "b" * 64)
+            result = quality_state.record_review(state, normal_path, VALID_DIGEST)
+            self.assertIsNone(result["review_unverified_retry"])
+
+    def test_rejects_blockers_or_fully_verified_evidence(self):
+        cases = []
+        blocked = unverified_review()
+        blocked["blockers"] = ["PLAN-001"]
+        blocked["findings"] = [high_finding("PLAN-001")]
+        cases.append(("blockers", blocked))
+        verified = unverified_review()
+        verified["evidence"][0]["verified"] = True
+        cases.append(("all verified", verified))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for label, review in cases:
+                with self.subTest(condition=label):
+                    path = write_json(directory, f"{label}.json", review)
+                    with self.assertRaisesRegex(
+                        StateError, "review is not an unverified REVISE",
+                    ):
+                        quality_state.record_review_unverified(
+                            state_at("PLAN_REVIEW"), path, VALID_DIGEST,
+                        )
+
+    def test_rejects_pass_and_blocked_verdicts(self):
+        cases = []
+        passed = unverified_review()
+        passed["verdict"] = "PASS"
+        passed["evidence"][0]["verified"] = True
+        passed["required_next_action"] = None
+        cases.append(("PASS", passed))
+        blocked = unverified_review()
+        blocked["verdict"] = "BLOCKED"
+        cases.append(("BLOCKED", blocked))
+
+        with tempfile.TemporaryDirectory() as directory:
+            for verdict, review in cases:
+                with self.subTest(verdict=verdict):
+                    path = write_json(directory, f"{verdict}.json", review)
+                    with self.assertRaisesRegex(
+                        StateError, "review is not an unverified REVISE",
+                    ):
+                        quality_state.record_review_unverified(
+                            state_at("PLAN_REVIEW"), path, VALID_DIGEST,
+                        )
+
+    def test_rejects_wrong_review_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_json(directory, "review.json", unverified_review())
+
+            with self.assertRaisesRegex(StateError, "requires stage PLAN_REVIEW"):
+                quality_state.record_review_unverified(
+                    state_at("IMPLEMENTING"), path, VALID_DIGEST,
+                )
+
+    def test_rejects_non_next_round_before_round_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wrong_round = unverified_review(round_number=2)
+            wrong_path = write_json(directory, "wrong-round.json", wrong_round)
+            with self.assertRaisesRegex(StateError, "review round must be 1"):
+                quality_state.record_review_unverified(
+                    state_at("PLAN_REVIEW"), wrong_path, VALID_DIGEST,
+                )
+
+            beyond_limit = unverified_review("spec", round_number=9)
+            beyond_path = write_json(directory, "beyond-limit.json", beyond_limit)
+            with self.assertRaisesRegex(StateError, "review round must be 1"):
+                quality_state.record_review_unverified(
+                    state_at("SPEC_REVIEW"), beyond_path, VALID_DIGEST,
+                )
+
+    def test_schema_invalid_review_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review = unverified_review()
+            del review["evidence"][0]["claim"]
+            path = write_json(directory, "invalid.json", review)
+            state = state_at("PLAN_REVIEW")
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(StateError, "missing required field: claim"):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_registered_spec_digest_mismatch_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            path = write_json(directory, "review.json", unverified_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(StateError, "spec artifact digest mismatch"):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_round_limit_after_matching_round_raises_transition_error_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = quality_state.ROUND_LIMITS["plan"]
+            path = write_json(
+                directory,
+                "limit.json",
+                unverified_review("plan", quality_state.ROUND_LIMITS["plan"] + 1),
+            )
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "review round limit exhausted",
+            ):
+                quality_state.record_review_unverified(state, path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_second_unverified_retry_is_exhausted_without_consuming_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = unverified_review(claim="First condition was not verified.")
+            second = unverified_review(claim="Second condition was not verified.")
+            first_path = write_json(directory, "first.json", first)
+            second_path = write_json(directory, "second.json", second)
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+
+            result = quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+
+            retry = result["review_unverified_retry"]
+            self.assertEqual(2, retry["attempts"])
+            self.assertTrue(retry["exhausted"])
+            self.assertEqual([str(first_path), str(second_path)], retry["discarded_reviews"])
+            self.assertEqual(
+                [first["evidence"][0]["claim"], second["evidence"][0]["claim"]],
+                retry["unverified_claims"],
+            )
+            self.assertEqual(0, result["rounds"]["plan"])
+
+    def test_third_unverified_retry_raises_persists_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first_path = write_json(directory, "first.json", unverified_review())
+            second_path = write_json(directory, "second.json", unverified_review())
+            third_path = write_json(directory, "third.json", unverified_review())
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+            quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+            before = deepcopy(state)
+
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "REVIEWER_UNVERIFIED_PERSISTS",
+            ):
+                quality_state.record_review_unverified(state, third_path, VALID_DIGEST)
+
+            self.assertEqual(before, state)
+
+    def test_exhausted_unverified_retry_can_register_report_then_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            first_path = write_json(directory, "first.json", unverified_review("spec"))
+            second_path = write_json(directory, "second.json", unverified_review("spec"))
+            third_path = write_json(directory, "third.json", unverified_review("spec"))
+            report_path = directory / "report.md"
+            report_path.write_text("blocked review report\n", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            quality_state.record_review_unverified(state, first_path, VALID_DIGEST)
+            quality_state.record_review_unverified(state, second_path, VALID_DIGEST)
+            with self.assertRaisesRegex(
+                quality_state.TransitionError, "REVIEWER_UNVERIFIED_PERSISTS",
+            ):
+                quality_state.record_review_unverified(state, third_path, VALID_DIGEST)
+
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+            self.assertNotIn(state["stage"], quality_state.TERMINAL_STATES)
+            quality_state.set_artifact(state, "report", report_path)
+            quality_state.transition(
+                state, "BLOCKED", "REVIEWER_UNVERIFIED_PERSISTS:spec",
+            )
+            self.assertEqual("BLOCKED", state["stage"])
+
+    def test_retry_digest_binding_precedes_registered_spec_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            digest = quality_state._file_digest(spec)
+            unverified_path = write_json(
+                directory, "unverified.json", unverified_review("spec"),
+            )
+            normal_path = write_json(directory, "normal.json", valid_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            quality_state.record_review_unverified(state, unverified_path, digest)
+
+            with self.assertRaisesRegex(
+                StateError, "unverified review retry artifact digest mismatch",
+            ):
+                quality_state.record_review(state, normal_path, "b" * 64)
+            self.assertEqual(0, state["rounds"]["spec"])
+
+            second_path = write_json(
+                directory, "second-unverified.json", unverified_review("spec"),
+            )
+            with self.assertRaisesRegex(StateError, "spec artifact digest mismatch"):
+                quality_state.record_review_unverified(state, second_path, "b" * 64)
+
+    def test_retry_digest_binding_rejects_recomputed_revised_spec_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            spec = directory / "spec.md"
+            spec.write_text("original spec\n", encoding="utf-8")
+            initial_digest = quality_state._file_digest(spec)
+            unverified_path = write_json(
+                directory, "unverified.json", unverified_review("spec"),
+            )
+            normal_path = write_json(directory, "normal.json", valid_review("spec"))
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(spec)
+            quality_state.record_review_unverified(state, unverified_path, initial_digest)
+            spec.write_text("revised spec\n", encoding="utf-8")
+            revised_digest = quality_state._file_digest(spec)
+
+            with self.assertRaisesRegex(
+                StateError, "unverified review retry artifact digest mismatch",
+            ):
+                quality_state.record_review(state, normal_path, revised_digest)
+
+    def test_pass_with_unverified_evidence_does_not_record_a_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_json(directory, "pass.json", valid_review())
+            review = json.loads(path.read_text(encoding="utf-8"))
+            review["evidence"][0]["verified"] = False
+            write_json(directory, "pass.json", review)
+            state = state_at("PLAN_REVIEW")
+
+            with self.assertRaisesRegex(
+                StateError, "PASS reviews must not contain unverified evidence",
+            ):
+                quality_state.record_review(state, path, VALID_DIGEST)
+
+            self.assertEqual(0, state["rounds"]["plan"])
+
+    def test_round_two_unverified_review_assembles_prior_from_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            round_one = valid_review("spec", 1, "REVISE", ["SPEC-A"])
+            round_one["required_next_action"] = "Resolve SPEC-A."
+            first_path = write_json(directory, "round-one.json", round_one)
+            unverified_path = write_json(
+                directory, "round-two.json", unverified_review("spec", 2),
+            )
+            state = state_at("SPEC_REVIEW")
+            quality_state.record_review(state, first_path, VALID_DIGEST)
+
+            result = quality_state.record_review_unverified(
+                state, unverified_path, VALID_DIGEST,
+            )
+
+            self.assertEqual(1, result["rounds"]["spec"])
+            self.assertEqual(["SPEC-A"], result["open_finding_ids"]["spec"])
+
+    def test_parser_rejects_prior_for_record_review_unverified(self):
+        parser = quality_state._build_parser()
+
+        with self.assertRaisesRegex(StateError, "unrecognized arguments: --prior"):
+            parser.parse_args([
+                "record-review-unverified", "--state", "state.json",
+                "--review", "review.json", "--artifact-digest", VALID_DIGEST,
+                "--prior", "prior.json",
+            ])
+
+    def test_stale_unverified_retry_is_replaced_by_the_next_unverified_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            state["rounds"]["spec"] = 1
+            state["review_unverified_retry"] = {
+                "artifact": "spec", "round": 1, "attempts": 2, "exhausted": True,
+                "artifact_digest": "a" * 64, "unverified_claims": ["stale"],
+                "discarded_reviews": ["stale.json"],
+            }
+            path = write_json(
+                directory, "round-two.json", unverified_review("spec", 2),
+            )
+
+            result = quality_state.record_review_unverified(state, path, "b" * 64)
+
+            self.assertEqual(1, result["review_unverified_retry"]["attempts"])
+            self.assertFalse(result["review_unverified_retry"]["exhausted"])
+            self.assertEqual("b" * 64, result["review_unverified_retry"]["artifact_digest"])
+            self.assertEqual(
+                ["The reviewed artifact is traceable to its acceptance criteria."],
+                result["review_unverified_retry"]["unverified_claims"],
+            )
+            self.assertEqual(
+                [str(path)], result["review_unverified_retry"]["discarded_reviews"],
+            )
+
+    def test_stale_unverified_retry_does_not_bind_normal_next_round_and_is_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            state["rounds"]["spec"] = 1
+            state["review_unverified_retry"] = {
+                "artifact": "spec", "round": 1, "attempts": 2, "exhausted": True,
+                "artifact_digest": "a" * 64, "unverified_claims": ["stale"],
+                "discarded_reviews": ["stale.json"],
+            }
+            path = write_json(directory, "round-two.json", valid_review("spec", 2))
+
+            revision_check = write_revision_check(directory, "spec", 2, "b" * 64)
+            result = quality_state.record_review(
+                state, path, "b" * 64, revision_check_path=revision_check
+            )
+
+            self.assertEqual(2, result["rounds"]["spec"])
+            self.assertIsNone(result["review_unverified_retry"])
+
+
+class RoundLimitTests(unittest.TestCase):
+    def test_plan_round_three_is_rejected_after_two_recorded_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"plan-{round_number}.json",
+                    valid_review(artifact="plan", round_number=round_number),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "plan", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+
+            round_three = write_json(
+                directory,
+                "plan-3.json",
+                valid_review(artifact="plan", round_number=3),
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, round_three, VALID_DIGEST)
+            self.assertEqual(2, state["rounds"]["plan"])
+
+    def test_spec_round_four_is_rejected_after_three_recorded_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            for round_number in (1, 2, 3):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(artifact="spec", round_number=round_number),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+
+            round_four = write_json(
+                directory,
+                "spec-4.json",
+                valid_review(artifact="spec", round_number=4),
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, round_four, VALID_DIGEST)
+            self.assertEqual(3, state["rounds"]["spec"])
+
+    def test_code_round_four_is_rejected_after_three_recorded_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+            for round_number in (1, 2, 3):
+                review_path = write_json(
+                    directory,
+                    f"code-{round_number}.json",
+                    valid_review(artifact="code", round_number=round_number),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            round_four = write_json(
+                directory,
+                "code-4.json",
+                valid_review(artifact="code", round_number=4),
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, round_four, VALID_DIGEST)
+            self.assertEqual(3, state["rounds"]["code"])
+
+    def test_nonpassing_final_spec_round_enters_needs_redesign(self):
+        """Rounds 1-2 are REVISE with no blockers so neither the recurring-
+        blocker branch nor a premature limit fires before round 3, the
+        actual final spec round under the 3-round limit."""
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                    ),
+                )
+                revision_check_path = None
+                if round_number >= 2:
+                    revision_check_path = write_revision_check(
+                        directory, "spec", round_number
+                    )
+                quality_state.record_review(
+                    state,
+                    review_path,
+                    VALID_DIGEST,
+                    revision_check_path=revision_check_path,
+                )
+            final = write_json(
+                directory,
+                "spec-3.json",
+                valid_review(
+                    artifact="spec",
+                    round_number=3,
+                    verdict="REVISE",
+                    blockers=["SPEC-LIMIT-001"],
+                ),
+            )
+
+            final_revision_check = write_revision_check(directory, "spec", 3)
+            result = quality_state.record_review(
+                state,
+                final,
+                VALID_DIGEST,
+                revision_check_path=final_revision_check,
+            )
+
+            self.assertEqual("NEEDS_REDESIGN", result["stage"])
+            self.assertTrue(result["status_reason"].startswith("REVIEW_LIMIT_EXHAUSTED"))
+
+    def test_nonpassing_code_round_three_enters_needs_redesign_without_round_four(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"code-{round_number}.json",
+                    valid_review(artifact="code", round_number=round_number),
+                )
+                quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            third = write_json(
+                directory,
+                "code-3.json",
+                valid_review(
+                    artifact="code",
+                    round_number=3,
+                    verdict="REVISE",
+                    blockers=["CODE-LIMIT-001"],
+                ),
+            )
+
+            result = quality_state.record_review(state, third, VALID_DIGEST)
+
+            self.assertEqual("NEEDS_REDESIGN", result["stage"])
+            self.assertTrue(result["status_reason"].startswith("REVIEW_LIMIT_EXHAUSTED"))
+            self.assertEqual(3, result["rounds"]["code"])
+
+            fourth = write_json(
+                directory,
+                "code-4.json",
+                valid_review(artifact="code", round_number=4),
+            )
+            with self.assertRaises(StateError) as context:
+                quality_state.record_review(state, fourth, VALID_DIGEST)
+            self.assertIn("requires stage CODE_REVIEW", str(context.exception))
+            self.assertEqual(3, state["rounds"]["code"])
+
+
+class RecurringBlockerTests(unittest.TestCase):
+    def test_repeated_stable_blocker_enters_needs_redesign_with_the_finding_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            first = write_json(
+                directory,
+                "plan-1.json",
+                valid_review(
+                    artifact="plan",
+                    verdict="REVISE",
+                    blockers=["PLAN-X"],
+                ),
+            )
+            quality_state.record_review(state, first, VALID_DIGEST)
+            second = write_json(
+                directory,
+                "plan-2.json",
+                valid_review(
+                    artifact="plan",
+                    round_number=2,
+                    verdict="REVISE",
+                    blockers=["PLAN-X"],
+                ),
+            )
+
+            revision_check = write_revision_check(directory, "plan", 2)
+            result = quality_state.record_review(
+                state, second, VALID_DIGEST, revision_check_path=revision_check
+            )
+
+            self.assertEqual("NEEDS_REDESIGN", result["stage"])
+            self.assertIn("PLAN-X", result["status_reason"])
+
+
+class ReviewValidationRetryTests(unittest.TestCase):
+    def test_review_validation_failure_requires_valid_artifact_stage_round_and_errors(self):
+        invalid_cases = (
+            ("unknown", 1, ["error"]),
+            ("plan", True, ["error"]),
+            ("plan", 0, ["error"]),
+            ("plan", 3, ["error"]),
+            ("plan", 1, []),
+            ("plan", 1, [""]),
+            ("plan", 1, ["error", 3]),
+        )
+        for artifact, round_number, errors in invalid_cases:
+            with self.subTest(artifact=artifact, round_number=round_number, errors=errors):
+                with self.assertRaises(StateError):
+                    quality_state.record_review_validation_failure(
+                        state_at("PLAN_REVIEW"),
+                        artifact,
+                        round_number,
+                        errors,
+                    )
+
+        with self.assertRaises(StateError):
+            quality_state.record_review_validation_failure(
+                state_at("SPEC_REVIEW"),
+                "plan",
+                1,
+                ["error"],
+            )
+
+    def test_terminal_states_are_immutable_for_active_only_mutators(self):
+        for terminal in quality_state.TERMINAL_STATES:
+            with self.subTest(terminal=terminal):
+                operations = (
+                    lambda state: quality_state.record_review_validation_failure(
+                        state, "plan", 1, ["error"]
+                    ),
+                    lambda state: quality_state.record_verification(
+                        state, "verification.json", VALID_FINGERPRINT
+                    ),
+                    lambda state: quality_state.invalidate_stale_verification(
+                        state, VALID_FINGERPRINT
+                    ),
+                    lambda state: quality_state.set_artifact(
+                        state, "spec", "missing-artifact.md"
+                    ),
+                )
+                for operation in operations:
+                    state = state_at(terminal)
+                    before = deepcopy(state)
+                    with self.assertRaises(quality_state.TransitionError):
+                        operation(state)
+                    self.assertEqual(before, state)
+
+    def test_record_verification_is_only_allowed_during_implementation_or_code_review(self):
+        state = state_at("INTAKE")
+        before = deepcopy(state)
+
+        with self.assertRaises(StateError):
+            quality_state.record_verification(
+                state, "verification.json", VALID_FINGERPRINT
+            )
+
+        self.assertEqual(before, state)
+
+    def test_first_review_validation_failure_is_recorded_and_leaves_stage_unchanged(self):
+        state = state_at("PLAN_REVIEW")
+
+        result = quality_state.record_review_validation_failure(
+            state,
+            "plan",
+            1,
+            ["missing required field: evidence"],
+        )
+
+        self.assertEqual("PLAN_REVIEW", result["stage"])
+        self.assertEqual(
+            {
+                "artifact": "plan",
+                "round": 1,
+                "attempts": 1,
+                "errors": ["missing required field: evidence"],
+            },
+            result["review_validation_retry"],
+        )
+
+    def test_second_failure_for_the_same_review_blocks_the_state(self):
+        state = state_at("PLAN_REVIEW")
+        quality_state.record_review_validation_failure(state, "plan", 1, ["first"])
+
+        result = quality_state.record_review_validation_failure(
+            state,
+            "plan",
+            1,
+            ["second"],
+        )
+
+        self.assertEqual(2, result["review_validation_retry"]["attempts"])
+        self.assertEqual("BLOCKED", result["stage"])
+        self.assertEqual("REVIEW_OUTPUT_INVALID", result["status_reason"])
+
+    def test_malformed_review_json_is_rejected_and_retry_blocks_at_exactly_two_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            review_path = directory / "malformed-review.json"
+            review_path.write_text("{", encoding="utf-8")
+            state = state_at("PLAN_REVIEW")
+
+            for expected_attempts in (1, 2):
+                with self.assertRaises(StateError) as context:
+                    quality_state.record_review(state, review_path, VALID_DIGEST)
+                self.assertIn("unable to load review", str(context.exception))
+
+                quality_state.record_review_validation_failure(
+                    state,
+                    "plan",
+                    1,
+                    ["review JSON is malformed"],
+                )
+                self.assertEqual(
+                    expected_attempts,
+                    state["review_validation_retry"]["attempts"],
+                )
+
+            self.assertEqual("BLOCKED", state["stage"])
+            self.assertEqual(2, state["review_validation_retry"]["attempts"])
+
+    def test_valid_review_after_one_failure_clears_the_retry_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            quality_state.record_review_validation_failure(state, "plan", 1, ["retry once"])
+            review_path = write_json(directory, "valid-plan.json", valid_review())
+
+            result = quality_state.record_review(state, review_path, VALID_DIGEST)
+
+            self.assertIsNone(result["review_validation_retry"])
+            self.assertEqual(1, result["rounds"]["plan"])
+
+
+class FingerprintMetadataTests(unittest.TestCase):
+    @staticmethod
+    def capture_frames(operation):
+        frames = []
+        real_frame = quality_state._frame
+
+        def record_frame(digest, label, payload):
+            frames.append((label, payload))
+            real_frame(digest, label, payload)
+
+        with patch.object(quality_state, "_frame", side_effect=record_frame):
+            result = operation()
+        return frames, result
+
+    @staticmethod
+    def expected_entry(path, relative_path):
+        mode = os.lstat(path).st_mode
+        frames = [
+            ("path", os.fsencode(relative_path)),
+            ("lstat-type", f"{stat.S_IFMT(mode):06o}".encode("ascii")),
+            ("lstat-permissions", f"{stat.S_IMODE(mode):04o}".encode("ascii")),
+        ]
+        if stat.S_ISREG(mode):
+            frames.append(("file", path.read_bytes()))
+        elif stat.S_ISDIR(mode):
+            frames.append(("dir", b""))
+        elif stat.S_ISLNK(mode):
+            frames.append(("symlink", os.fsencode(os.readlink(path))))
+        else:
+            frames.append(("special", b""))
+        return frames
+
+    def make_embedded_repository(self, root, name="d"):
+        embedded = root / name
+        embedded.mkdir()
+        run_git(embedded, "init")
+        return embedded
+
+    def untracked_frames(self, root):
+        frames, fingerprint = self.capture_frames(
+            lambda: quality_state.compute_workspace_fingerprint(root)
+        )
+        first_path = next(index for index, frame in enumerate(frames) if frame[0] == "path")
+        return frames[first_path:], fingerprint
+
+    def test_untracked_entry_frames_path_type_permissions_before_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            regular = root / "regular.txt"
+            regular.write_bytes(b"regular payload")
+            top_directory = root / "top-directory"
+            top_directory.mkdir()
+            nested_directory = top_directory / "nested-directory"
+            nested_directory.mkdir()
+            symlink_directory = root / "symlink-directory"
+            symlink_directory.symlink_to(top_directory.name, target_is_directory=True)
+            ordinary_symlink = root / "ordinary-symlink"
+            ordinary_symlink.symlink_to("missing-target")
+            special = root / "special"
+            os.mkfifo(special)
+
+            entries = (
+                (regular, "regular.txt"),
+                (top_directory, "top-directory"),
+                (nested_directory, "top-directory/nested-directory"),
+                (symlink_directory, "symlink-directory"),
+                (ordinary_symlink, "ordinary-symlink"),
+                (special, "special"),
+            )
+            for path, relative_path in entries:
+                with self.subTest(relative_path=relative_path):
+                    frames, _ = self.capture_frames(
+                        lambda path=path, relative_path=relative_path: quality_state._read_untracked_value(
+                            hashlib.sha256(), path, relative_path
+                        )
+                    )
+                    self.assertEqual(self.expected_entry(path, relative_path), frames)
+
+    def test_untracked_reader_has_no_path_framing_bypass(self):
+        self.assertEqual(
+            ["digest", "path", "relative_path"],
+            list(inspect.signature(quality_state._read_untracked_value).parameters),
+        )
+
+    def test_deep_untracked_walk_does_not_consume_python_call_stack(self):
+        depth = sys.getrecursionlimit() + 50
+        relative_paths = []
+
+        class Entry:
+            name = "d"
+
+        class Entries:
+            def __enter__(self):
+                return iter((Entry(),))
+
+            def __exit__(self, *_args):
+                return False
+
+        def read_entry(_digest, _path, relative_path):
+            relative_paths.append(relative_path)
+            return len(relative_paths) < depth
+
+        with (
+            patch.object(os, "scandir", side_effect=lambda _path: Entries()),
+            patch.object(
+                quality_state,
+                "_read_untracked_value",
+                side_effect=read_entry,
+            ),
+        ):
+            try:
+                quality_state._walk_untracked_directory(
+                    hashlib.sha256(), Path("/mock-root"), "start"
+                )
+            except RecursionError:
+                self.fail("untracked walking consumed Python call-stack depth")
+
+        self.assertEqual(depth, len(relative_paths))
+        self.assertEqual("start/d", relative_paths[0])
+        self.assertEqual(
+            "start/" + "/".join("d" for _ in range(depth)),
+            relative_paths[-1],
+        )
+
+    def test_regular_file_permissions_change_and_restore_fingerprint(self):
+        root = make_git_repo(self)
+        path = root / "executable-candidate"
+        path.write_bytes(b"same payload")
+        path.chmod(0o644)
+        original = quality_state.compute_workspace_fingerprint(root)
+
+        path.chmod(0o755)
+        changed = quality_state.compute_workspace_fingerprint(root)
+        path.chmod(0o644)
+        restored = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(original, changed)
+        self.assertEqual(original, restored)
+
+    def test_top_level_and_nested_directory_permissions_change_and_restore_fingerprint(self):
+        root = make_git_repo(self)
+        top = self.make_embedded_repository(root, "container")
+        nested = top / "nested"
+        nested.mkdir()
+        child = nested / "child.txt"
+        child.write_bytes(b"child")
+        top.chmod(0o755)
+        nested.chmod(0o755)
+        self.assertIn(
+            "container/",
+            run_git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"),
+        )
+        original = quality_state.compute_workspace_fingerprint(root)
+
+        top.chmod(0o700)
+        top_changed = quality_state.compute_workspace_fingerprint(root)
+        top.chmod(0o755)
+        self.assertEqual(original, quality_state.compute_workspace_fingerprint(root))
+
+        nested.chmod(0o700)
+        nested_changed = quality_state.compute_workspace_fingerprint(root)
+        nested.chmod(0o755)
+        frames, restored = self.untracked_frames(root)
+
+        self.assertNotEqual(original, top_changed)
+        self.assertNotEqual(original, nested_changed)
+        self.assertEqual(original, restored)
+        nested_frames = self.expected_entry(nested, "container/nested")
+        nested_index = frames.index(nested_frames[0])
+        self.assertEqual(nested_frames, frames[nested_index:nested_index + 4])
+        self.assertEqual(("path", b"container/nested/child.txt"), frames[nested_index + 4])
+
+    def test_root_and_nested_mixed_kinds_use_normalized_byte_path_depth_first_order(self):
+        root = make_git_repo(self)
+        embedded = self.make_embedded_repository(root, "d")
+        root_file = root / "d.txt"
+        root_file.write_bytes(b"root file")
+        special = embedded / "a-special"
+        os.mkfifo(special)
+        nested = embedded / "b-directory"
+        nested.mkdir()
+        child = nested / "child.txt"
+        child.write_bytes(b"nested child")
+        symlink_directory = embedded / "c-symlink-directory"
+        symlink_directory.symlink_to("b-directory", target_is_directory=True)
+        regular = embedded / "d-file"
+        regular.write_bytes(b"nested file")
+
+        discovery = run_git(
+            root, "ls-files", "--others", "--exclude-standard", "-z"
+        ).stdout.split("\0")
+        self.assertIn("d/", discovery)
+        self.assertIn("d.txt", discovery)
+        self.assertNotIn("d/a-special", discovery)
+
+        frames, _ = self.untracked_frames(root)
+        self.assertEqual(0, len(frames) % 4)
+        groups = [frames[index:index + 4] for index in range(0, len(frames), 4)]
+        paths = [group[0][1] for group in groups]
+        self.assertNotIn(b"d/", paths)
+        self.assertIn(b"d", paths)
+        self.assertIn(b"d.txt", paths)
+        self.assertLess(paths.index(b"d"), paths.index(b"d.txt"))
+        expected = [
+            self.expected_entry(embedded, "d"),
+            self.expected_entry(special, "d/a-special"),
+            self.expected_entry(nested, "d/b-directory"),
+            self.expected_entry(child, "d/b-directory/child.txt"),
+            self.expected_entry(symlink_directory, "d/c-symlink-directory"),
+            self.expected_entry(regular, "d/d-file"),
+            self.expected_entry(root_file, "d.txt"),
+        ]
+        fixture_paths = {group[0][1] for group in expected}
+        self.assertEqual(expected, [group for group in groups if group[0][1] in fixture_paths])
+
+    def test_symlinks_are_not_dereferenced_and_symlink_directories_are_pruned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target-directory"
+            target.mkdir()
+            secret = target / "must-not-be-read.txt"
+            secret.write_bytes(b"secret")
+            alternate_target = root / "alternate-target-directory"
+            alternate_target.mkdir()
+            alternate_secret = alternate_target / "must-not-be-read.txt"
+            alternate_secret.write_bytes(b"secret")
+            links = (
+                root / "existing-link",
+                root / "broken-link",
+                root / "directory-link",
+            )
+            links[0].symlink_to(secret)
+            links[1].symlink_to(root / "missing")
+            links[2].symlink_to(target, target_is_directory=True)
+
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("target read")):
+                for link in links:
+                    quality_state._read_untracked_value(
+                        hashlib.sha256(), link, link.name
+                    )
+
+            walk_root = root / "walk-root"
+            walk_root.mkdir()
+            pruned = walk_root / "pruned-link"
+            pruned.symlink_to(target, target_is_directory=True)
+            frames, _ = self.capture_frames(
+                lambda: quality_state._walk_untracked_directory(
+                    hashlib.sha256(), root, "walk-root"
+                )
+            )
+            self.assertIn(("symlink", os.fsencode(os.readlink(pruned))), frames)
+            self.assertNotIn(("path", b"target-directory/must-not-be-read.txt"), frames)
+
+            def entry_fingerprint(link):
+                digest = hashlib.sha256()
+                with patch.object(
+                    Path, "read_bytes", side_effect=AssertionError("target read")
+                ):
+                    quality_state._read_untracked_value(digest, link, link.name)
+                return digest.hexdigest()
+
+            replacements = (
+                (links[0], alternate_secret),
+                (links[1], root / "different-missing"),
+                (links[2], alternate_target),
+            )
+            for link, replacement in replacements:
+                with self.subTest(link=link.name):
+                    before = entry_fingerprint(link)
+                    link.unlink()
+                    link.symlink_to(
+                        replacement,
+                        target_is_directory=link.name == "directory-link",
+                    )
+                    self.assertNotEqual(before, entry_fingerprint(link))
+
+    def test_special_files_are_never_opened_or_readlinked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            special = Path(directory) / "never-read"
+            os.mkfifo(special)
+            with (
+                patch.object(Path, "read_bytes", side_effect=AssertionError("payload read")) as read_bytes,
+                patch.object(Path, "open", side_effect=AssertionError("payload opened")) as path_open,
+                patch.object(os, "readlink", side_effect=AssertionError("readlink called")) as readlink,
+            ):
+                frames, _ = self.capture_frames(
+                    lambda: quality_state._read_untracked_value(
+                        hashlib.sha256(), special, "never-read"
+                    )
+                )
+            self.assertEqual(self.expected_entry(special, "never-read"), frames)
+            read_bytes.assert_not_called()
+            path_open.assert_not_called()
+            readlink.assert_not_called()
+
+    def test_metadata_fingerprint_is_repeatable_and_preserves_existing_inputs(self):
+        first = make_git_repo(self)
+        second_parent = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        second = second_parent / "cloned"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(first), str(second)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        def materialize(root, order):
+            embedded = self.make_embedded_repository(root, "bundle")
+            operations = {
+                "file": lambda: (embedded / "a-file").write_bytes(b"same"),
+                "directory": lambda: (embedded / "b-directory").mkdir(),
+                "child": lambda: (embedded / "b-directory" / "child").write_bytes(b"child"),
+                "symlink": lambda: (embedded / "c-symlink").symlink_to(
+                    "b-directory", target_is_directory=True
+                ),
+                "special": lambda: os.mkfifo(embedded / "d-special"),
+            }
+            for operation in order:
+                operations[operation]()
+
+        materialize(first, ("file", "directory", "child", "symlink", "special"))
+        materialize(second, ("directory", "child", "special", "file", "symlink"))
+        self.assertEqual(
+            ["bundle/", ""],
+            run_git(first, "ls-files", "--others", "--exclude-standard", "-z").stdout.split("\0"),
+        )
+        first_frames, first_fingerprint = self.untracked_frames(first)
+        second_frames, second_fingerprint = self.untracked_frames(second)
+
+        self.assertEqual(first_frames, second_frames)
+        self.assertEqual(first_fingerprint, second_fingerprint)
+        self.assertEqual(
+            first_fingerprint,
+            quality_state.compute_workspace_fingerprint(first),
+        )
+
+        state_path = first / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text("state evidence\n", encoding="utf-8")
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").write_text("tracked change\n", encoding="utf-8")
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").write_text("base\n", encoding="utf-8")
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").chmod(0o755)
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        (first / "app.txt").chmod(0o644)
+        self.assertEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+        run_git(first, "commit", "--allow-empty", "-m", "different head")
+        self.assertNotEqual(first_fingerprint, quality_state.compute_workspace_fingerprint(first))
+
+
+class FingerprintTests(unittest.TestCase):
+    def test_unignored_state_files_do_not_change_fingerprint_but_normal_untracked_files_do(self):
+        root = make_git_repo(self)
+        baseline = quality_state.compute_workspace_fingerprint(root)
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        after_state_write = quality_state.compute_workspace_fingerprint(root)
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        after_state_modification = quality_state.compute_workspace_fingerprint(root)
+
+        normal_path = root / "normal-untracked.txt"
+        normal_path.write_text("one\n", encoding="utf-8")
+        after_normal_write = quality_state.compute_workspace_fingerprint(root)
+        normal_path.write_text("two\n", encoding="utf-8")
+        after_normal_modification = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, after_state_write)
+        self.assertEqual(baseline, after_state_modification)
+        self.assertNotEqual(baseline, after_normal_write)
+        self.assertNotEqual(after_normal_write, after_normal_modification)
+
+    def test_state_files_are_excluded_when_git_reports_the_untracked_claude_directory(self):
+        root = make_git_repo(self)
+        claude_root = root / ".claude"
+        claude_root.mkdir()
+        run_git(claude_root, "init")
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+
+        self.assertEqual(
+            ".claude/\0",
+            run_git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout,
+        )
+        baseline = quality_state.compute_workspace_fingerprint(root)
+
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        after_state_write = quality_state.compute_workspace_fingerprint(root)
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        after_state_modification = quality_state.compute_workspace_fingerprint(root)
+
+        normal_path = root / ".claude" / "normal-untracked.txt"
+        normal_path.write_text("one\n", encoding="utf-8")
+        after_normal_write = quality_state.compute_workspace_fingerprint(root)
+        normal_path.write_text("two\n", encoding="utf-8")
+        after_normal_modification = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, after_state_write)
+        self.assertEqual(baseline, after_state_modification)
+        self.assertNotEqual(baseline, after_normal_write)
+        self.assertNotEqual(after_normal_write, after_normal_modification)
+
+    def test_tracked_state_files_are_excluded_from_unstaged_and_staged_diffs(self):
+        root = make_git_repo(self)
+        state_path = root / ".claude" / "quality-state" / "state.json"
+        state_path.parent.mkdir(parents=True)
+        state_path.write_text('{"version": 1}\n', encoding="utf-8")
+        tracked_non_state_path = root / ".claude" / "tracked-non-state.txt"
+        tracked_non_state_path.write_text("base\n", encoding="utf-8")
+        run_git(
+            root,
+            "add",
+            ".claude/quality-state/state.json",
+            ".claude/tracked-non-state.txt",
+        )
+        run_git(root, "commit", "-m", "track workflow state")
+        baseline = quality_state.compute_workspace_fingerprint(root)
+
+        state_path.write_text('{"version": 2}\n', encoding="utf-8")
+        unstaged_state = quality_state.compute_workspace_fingerprint(root)
+        run_git(root, "add", ".claude/quality-state/state.json")
+        staged_state = quality_state.compute_workspace_fingerprint(root)
+
+        tracked_non_state_path.write_text("changed\n", encoding="utf-8")
+        unstaged_non_state = quality_state.compute_workspace_fingerprint(root)
+        run_git(root, "add", ".claude/tracked-non-state.txt")
+        staged_non_state = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(baseline, unstaged_state)
+        self.assertEqual(baseline, staged_state)
+        self.assertNotEqual(baseline, unstaged_non_state)
+        self.assertNotEqual(baseline, staged_non_state)
+
+    def test_nested_git_repository_contents_are_hashed_without_following_outside_links(self):
+        root = make_git_repo(self)
+        inner = root / "nested-repository"
+        inner.mkdir()
+        run_git(inner, "init")
+        run_git(inner, "config", "user.name", "quality-goal-test")
+        run_git(inner, "config", "user.email", "quality-goal-test@example.invalid")
+        nested_file = inner / "nested.txt"
+        nested_file.write_text("one\n", encoding="utf-8")
+        run_git(inner, "add", "nested.txt")
+        run_git(inner, "commit", "-m", "nested fixture")
+
+        before = quality_state.compute_workspace_fingerprint(root)
+        nested_file.write_text("two\n", encoding="utf-8")
+        after = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(before, after)
+
+    def test_untracked_existing_and_broken_symlinks_are_hashed_without_reading_targets(self):
+        root = make_git_repo(self)
+        first_target = root / "first.txt"
+        second_target = root / "second.txt"
+        first_target.write_text("first\n", encoding="utf-8")
+        second_target.write_text("second\n", encoding="utf-8")
+        link = root / "link.txt"
+        broken = root / "broken.txt"
+        link.symlink_to(first_target.name)
+        broken.symlink_to("missing-target.txt")
+
+        before = quality_state.compute_workspace_fingerprint(root)
+        link.unlink()
+        link.symlink_to(second_target.name)
+        after = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(before, after)
+
+    def test_untracked_path_framing_distinguishes_foo_bar_from_foob_ar(self):
+        root = make_git_repo(self)
+        first = root / "foo"
+        first.write_text("bar", encoding="utf-8")
+        before = quality_state.compute_workspace_fingerprint(root)
+        first.rename(root / "foob")
+        (root / "foob").write_text("ar", encoding="utf-8")
+        after = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(before, after)
+
+    def test_unchanged_git_repository_has_a_deterministic_fingerprint(self):
+        root = make_git_repo(self)
+
+        self.assertEqual(
+            quality_state.compute_workspace_fingerprint(root),
+            quality_state.compute_workspace_fingerprint(root),
+        )
+
+    def test_tracked_edits_and_staging_change_the_fingerprint(self):
+        root = make_git_repo(self)
+        baseline = quality_state.compute_workspace_fingerprint(root)
+
+        (root / "app.txt").write_text("edited\n", encoding="utf-8")
+        unstaged = quality_state.compute_workspace_fingerprint(root)
+        run_git(root, "add", "app.txt")
+        staged = quality_state.compute_workspace_fingerprint(root)
+
+        self.assertNotEqual(baseline, unstaged)
+        self.assertNotEqual(unstaged, staged)
+        self.assertNotEqual(baseline, staged)
+
+    def test_untracked_addition_and_modification_change_and_reverting_restores_fingerprint(self):
+        root = make_git_repo(self)
+        baseline = quality_state.compute_workspace_fingerprint(root)
+        untracked = root / "new.txt"
+
+        untracked.write_text("one\n", encoding="utf-8")
+        added = quality_state.compute_workspace_fingerprint(root)
+        untracked.write_text("two\n", encoding="utf-8")
+        modified = quality_state.compute_workspace_fingerprint(root)
+        untracked.unlink()
+
+        self.assertNotEqual(baseline, added)
+        self.assertNotEqual(added, modified)
+        self.assertEqual(baseline, quality_state.compute_workspace_fingerprint(root))
+
+    def test_non_git_directory_raises_a_blocked_not_git_state_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(StateError) as context:
+                quality_state.compute_workspace_fingerprint(Path(directory))
+
+        self.assertTrue(str(context.exception).startswith("BLOCKED_NOT_GIT:"))
+
+    def test_empty_git_repository_reports_that_it_has_no_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_git(root, "init")
+
+            with self.assertRaises(quality_state.GitError) as context:
+                quality_state.compute_workspace_fingerprint(root)
+
+        self.assertTrue(str(context.exception).startswith("BLOCKED_NOT_GIT:"))
+        self.assertIn("no commit", str(context.exception).lower())
+
+
+class BaselineTests(unittest.TestCase):
+    def test_capture_workspace_baseline_records_head_and_clean_paths(self):
+        root = make_git_repo(self)
+        state = state_at("INTAKE", project_root=root)
+
+        result = quality_state.capture_workspace_baseline(state)
+
+        expected_head = run_git(root, "rev-parse", "HEAD").stdout.strip()
+        self.assertEqual(expected_head, result["base_revision"])
+        self.assertEqual([], result["initial_dirty_paths"])
+
+    def test_capture_workspace_baseline_records_tracked_and_untracked_dirty_paths(self):
+        root = make_git_repo(self)
+        (root / "app.txt").write_text("edited\n", encoding="utf-8")
+        (root / "new.txt").write_text("new\n", encoding="utf-8")
+        state = state_at("CLASSIFIED", project_root=root)
+
+        result = quality_state.capture_workspace_baseline(state)
+
+        self.assertEqual(["app.txt", "new.txt"], result["initial_dirty_paths"])
+
+    def test_capture_baseline_preserves_initial_dirty_file_bytes_after_task_file_changes(self):
+        root = make_git_repo(self)
+        dirty_file = root / "app.txt"
+        pre_task_bytes = b"user's local edit\n"
+        dirty_file.write_bytes(pre_task_bytes)
+        state = state_at("INTAKE", project_root=root)
+
+        quality_state.capture_workspace_baseline(state)
+
+        task_file = root / "task-output.txt"
+        task_file.write_bytes(b"generated once\n")
+        task_file.write_bytes(b"generated twice\n")
+        quality_state.compute_workspace_fingerprint(root)
+
+        self.assertEqual(pre_task_bytes, dirty_file.read_bytes())
+        self.assertEqual(["app.txt"], state["initial_dirty_paths"])
+
+    def test_capture_workspace_baseline_uses_the_new_path_for_a_rename(self):
+        root = make_git_repo(self)
+        run_git(root, "mv", "app.txt", "renamed.txt")
+        state = state_at("INTAKE", project_root=root)
+
+        result = quality_state.capture_workspace_baseline(state)
+
+        self.assertEqual(["renamed.txt"], result["initial_dirty_paths"])
+
+    def test_capture_workspace_baseline_rejects_non_git_and_terminal_states(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("INTAKE", project_root=Path(directory))
+            with self.assertRaises(quality_state.GitError):
+                quality_state.capture_workspace_baseline(state)
+
+        state = state_at("COMPLETED", project_root=Path.cwd())
+        before = deepcopy(state)
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.capture_workspace_baseline(state)
+        self.assertEqual(before, state)
+
+
+class VerificationTests(unittest.TestCase):
+    def test_record_verification_sets_the_path_fingerprint_and_valid_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            result = quality_state.record_verification(
+                state_at("CODE_REVIEW"),
+                verification_path,
+                VALID_FINGERPRINT,
+            )
+
+        self.assertEqual(
+            {
+                "path": str(verification_path),
+                "workspace_fingerprint": VALID_FINGERPRINT,
+                "valid": True,
+            },
+            result["verification"],
+        )
+
+    def test_record_verification_rejects_a_nonexistent_verification_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing_path = Path(directory) / "never-written.json"
+            state = state_at("CODE_REVIEW")
+            before = deepcopy(state["verification"])
+
+            with self.assertRaises(StateError):
+                quality_state.record_verification(
+                    state,
+                    missing_path,
+                    VALID_FINGERPRINT,
+                )
+
+            self.assertEqual(before, state["verification"])
+
+    def test_record_verification_rejects_a_directory_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+
+            with self.assertRaises(StateError):
+                quality_state.record_verification(
+                    state,
+                    Path(directory),
+                    VALID_FINGERPRINT,
+                )
+
+    def test_record_verification_rejects_invalid_inputs_and_leaves_verification_invalid(self):
+        invalid_cases = (
+            (None, VALID_FINGERPRINT),
+            ("", VALID_FINGERPRINT),
+            ("verification.json", None),
+            ("verification.json", "a" * 63),
+            ("verification.json", "A" * 64),
+        )
+
+        for verification_path, fingerprint in invalid_cases:
+            with self.subTest(
+                verification_path=verification_path,
+                fingerprint=fingerprint,
+            ):
+                state = state_at("CODE_REVIEW")
+                before = deepcopy(state["verification"])
+
+                with self.assertRaises(StateError):
+                    quality_state.record_verification(
+                        state,
+                        verification_path,
+                        fingerprint,
+                    )
+
+                self.assertEqual(before, state["verification"])
+                self.assertFalse(state["verification"]["valid"])
+
+    def test_stale_verification_is_invalidated_without_touching_spec_review_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW")
+            state["reviews"]["spec"] = [{"round": 1, "path": "spec-review.json"}]
+            state["artifact_digests"]["spec"] = "spec-digest"
+            quality_state.record_verification(state, verification_path, OLD_FINGERPRINT)
+        reviews_before = deepcopy(state["reviews"]["spec"])
+        digest_before = state["artifact_digests"]["spec"]
+
+        result = quality_state.invalidate_stale_verification(state, NEW_FINGERPRINT)
+
+        self.assertFalse(result["verification"]["valid"])
+        self.assertEqual(reviews_before, result["reviews"]["spec"])
+        self.assertEqual(digest_before, result["artifact_digests"]["spec"])
+
+    def test_matching_verification_fingerprint_is_left_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            state = state_at("CODE_REVIEW")
+            quality_state.record_verification(state, verification_path, VALID_FINGERPRINT)
+            before = deepcopy(state)
+
+            result = quality_state.invalidate_stale_verification(state, VALID_FINGERPRINT)
+
+            self.assertEqual(before, result)
+
+    def test_invalidate_stale_verification_rejects_malformed_fingerprints(self):
+        with tempfile.TemporaryDirectory() as directory:
+            verification_path = Path(directory) / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            for fingerprint in (None, "a" * 63, "A" * 64):
+                with self.subTest(fingerprint=fingerprint):
+                    state = state_at("CODE_REVIEW")
+                    quality_state.record_verification(
+                        state,
+                        verification_path,
+                        VALID_FINGERPRINT,
+                    )
+                    before = deepcopy(state["verification"])
+
+                    with self.assertRaises(StateError):
+                        quality_state.invalidate_stale_verification(state, fingerprint)
+
+                    self.assertEqual(before, state["verification"])
+
+
+class PassedTransitionGuardTests(unittest.TestCase):
+    """SPEC_PASSED and PLAN_PASSED must require a passing recorded review."""
+
+    def record(self, state, directory, artifact, verdict="PASS", blockers=None):
+        review_path = write_json(
+            directory,
+            f"{artifact}-{state['rounds'][artifact] + 1}.json",
+            valid_review(
+                artifact=artifact,
+                round_number=state["rounds"][artifact] + 1,
+                verdict=verdict,
+                blockers=blockers,
+            ),
+        )
+        return quality_state.record_review(state, review_path, VALID_DIGEST)
+
+    def test_spec_passed_rejects_a_stage_with_no_recorded_review(self):
+        state = state_at("SPEC_REVIEW")
+
+        with self.assertRaises(quality_state.TransitionError) as context:
+            quality_state.transition(state, "SPEC_PASSED")
+
+        self.assertIn("passing final spec review", str(context.exception))
+        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_a_non_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec", verdict="REVISE")
+
+            with self.assertRaises(quality_state.TransitionError):
+                quality_state.transition(state, "SPEC_PASSED")
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_a_passing_review_that_still_lists_blockers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec", blockers=["SPEC-OPEN-001"])
+
+            with self.assertRaises(quality_state.TransitionError):
+                quality_state.transition(state, "SPEC_PASSED")
+            self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_rejects_stale_blockers_even_with_no_open_findings(self):
+        """The guard checks the recorded review's blockers independently of
+        open_finding_ids, so a state where only one of the two was cleared is
+        still refused."""
+        state = state_at("SPEC_REVIEW")
+        state["rounds"]["spec"] = 1
+        state["reviews"]["spec"] = [
+            {"verdict": "PASS", "blockers": ["SPEC-STALE-001"]}
+        ]
+        state["open_finding_ids"]["spec"] = []
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "SPEC_PASSED")
+        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_spec_passed_accepts_a_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("SPEC_REVIEW")
+            self.record(state, directory, "spec")
+
+            result = quality_state.transition(state, "SPEC_PASSED")
+
+            self.assertEqual("SPEC_PASSED", result["stage"])
+
+    def test_plan_passed_rejects_a_stage_with_no_recorded_review(self):
+        state = state_at("PLAN_REVIEW")
+
+        with self.assertRaises(quality_state.TransitionError) as context:
+            quality_state.transition(state, "PLAN_PASSED")
+
+        self.assertIn("passing final plan review", str(context.exception))
+        self.assertEqual("PLAN_REVIEW", state["stage"])
+
+    def test_plan_passed_accepts_a_passing_final_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            self.record(state, directory, "plan")
+
+            result = quality_state.transition(state, "PLAN_PASSED")
+
+            self.assertEqual("PLAN_PASSED", result["stage"])
+
+    def test_light_plan_passed_needs_no_review_round(self):
+        """SKILL.md gives light no reviewer round for the compact Plan, so its
+        documented IMPLEMENTING -> PLAN_REVIEW -> PLAN_PASSED rework path must
+        stay open."""
+        state = state_at("PLAN_REVIEW", mode="light")
+
+        result = quality_state.transition(state, "PLAN_PASSED")
+
+        self.assertEqual("PLAN_PASSED", result["stage"])
+        self.assertEqual(0, result["rounds"]["plan"])
+
+    def test_light_spec_passed_still_requires_a_review(self):
+        state = state_at("SPEC_REVIEW", mode="light")
+
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(state, "SPEC_PASSED")
+
+
+class ResumeSelectionTests(unittest.TestCase):
+    def persist_candidate(self, state_root, task_id, state):
+        path = Path(state_root) / task_id / "state.json"
+        path.parent.mkdir(parents=True)
+        quality_state.save_state(path, state)
+        return path
+
+    def make_candidate(self, goal, project_root, task_id, updated_at, stage="CLASSIFIED"):
+        state = quality_state.new_state(
+            goal,
+            "standard",
+            project_root,
+            "artifacts",
+            task_id=task_id,
+            now=updated_at,
+        )
+        state["stage"] = stage
+        state["mode"] = "standard"
+        return state
+
+    def test_select_resume_returns_newest_matching_nonterminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            state_root.mkdir()
+            project_root = directory / "project"
+            other_project = directory / "other-project"
+            project_root.mkdir()
+            other_project.mkdir()
+            query_goal = "Build a quality state"
+
+            older_path = self.persist_candidate(
+                state_root,
+                "older",
+                self.make_candidate(
+                    "Build a quality state",
+                    project_root,
+                    "older",
+                    FIXED_NOW,
+                ),
+            )
+            newer_path = self.persist_candidate(
+                state_root,
+                "newer",
+                self.make_candidate(
+                    "  Ｂｕｉｌｄ   a QUALITY state ",
+                    project_root,
+                    "newer",
+                    FIXED_NOW + timedelta(minutes=1),
+                ),
+            )
+            self.persist_candidate(
+                state_root,
+                "completed",
+                self.make_candidate(
+                    query_goal,
+                    project_root,
+                    "completed",
+                    FIXED_NOW + timedelta(minutes=3),
+                    stage="COMPLETED",
+                ),
+            )
+            self.persist_candidate(
+                state_root,
+                "different-goal",
+                self.make_candidate(
+                    "A different goal",
+                    project_root,
+                    "different-goal",
+                    FIXED_NOW + timedelta(minutes=4),
+                ),
+            )
+            self.persist_candidate(
+                state_root,
+                "different-project",
+                self.make_candidate(
+                    query_goal,
+                    other_project,
+                    "different-project",
+                    FIXED_NOW + timedelta(minutes=5),
+                ),
+            )
+
+            selected = quality_state.select_resume_candidate(
+                state_root,
+                "  Ｂｕｉｌｄ   a QUALITY state ",
+                project_root,
+            )
+
+            self.assertEqual(newer_path, selected)
+            self.assertNotEqual(older_path, selected)
+
+    def test_select_resume_reuses_passed_spec_at_plan_review_without_duplicate_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            state_root.mkdir()
+            project_root = make_git_repo(self)
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("passed specification\n", encoding="utf-8")
+            review_path = write_json(
+                directory,
+                "spec-review.json",
+                valid_review(artifact="spec"),
+            )
+            goal = "Build the resumable quality workflow"
+            state = quality_state.new_state(
+                goal,
+                "standard",
+                project_root,
+                artifact_dir,
+                task_id="resume-task",
+                now=FIXED_NOW,
+            )
+            quality_state.classify(state, "standard", ["scope is understood"])
+            quality_state.set_artifact(state, "spec", spec_path)
+            quality_state.transition(state, "SPEC_REVIEW")
+            spec_digest = hashlib.sha256(spec_path.read_bytes()).hexdigest()
+            quality_state.record_review(state, review_path, spec_digest)
+            quality_state.transition(state, "SPEC_PASSED")
+            quality_state.transition(state, "PLAN_REVIEW")
+            state_path = self.persist_candidate(state_root, "resume-task", state)
+
+            selected = quality_state.select_resume_candidate(
+                state_root,
+                "  Ｂｕｉｌｄ   the RESUMABLE quality workflow ",
+                project_root,
+            )
+
+            self.assertEqual(state_path, selected)
+            loaded = quality_state.load_state(selected)
+            self.assertEqual("PLAN_REVIEW", loaded["stage"])
+            self.assertEqual(state["reviews"]["spec"][0], loaded["reviews"]["spec"][0])
+            self.assertEqual(spec_digest, loaded["artifact_digests"]["spec"])
+            self.assertEqual([state_path], list(state_root.glob("*/state.json")))
+
+    def test_select_resume_returns_none_when_only_matching_states_are_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            state_root.mkdir()
+            project_root = directory / "project"
+            project_root.mkdir()
+            state = self.make_candidate(
+                "A completed goal",
+                project_root,
+                "completed",
+                FIXED_NOW,
+                stage="COMPLETED",
+            )
+            self.persist_candidate(state_root, "completed", state)
+
+            self.assertIsNone(
+                quality_state.select_resume_candidate(
+                    state_root,
+                    "A completed goal",
+                    project_root,
+                )
+            )
+
+    def test_select_resume_breaks_same_updated_at_ties_by_task_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            state_root.mkdir()
+            project_root = directory / "project"
+            project_root.mkdir()
+            for task_id in ("task-z", "task-a"):
+                self.persist_candidate(
+                    state_root,
+                    task_id,
+                    self.make_candidate(
+                        "A tied goal",
+                        project_root,
+                        task_id,
+                        FIXED_NOW,
+                    ),
+                )
+
+            selected = quality_state.select_resume_candidate(
+                state_root,
+                "A tied goal",
+                project_root,
+            )
+
+            self.assertEqual(state_root / "task-z" / "state.json", selected)
+
+    def test_select_resume_skips_states_with_unparseable_updated_at_or_invalid_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            state_root.mkdir()
+            project_root = directory / "project"
+            project_root.mkdir()
+            invalid_time = self.make_candidate(
+                "A resumable goal",
+                project_root,
+                "invalid-time",
+                FIXED_NOW,
+            )
+            invalid_time["updated_at"] = "not-a-timestamp"
+            self.persist_candidate(state_root, "invalid-time", invalid_time)
+
+            invalid_schema = self.make_candidate(
+                "A resumable goal",
+                project_root,
+                "invalid-schema",
+                FIXED_NOW + timedelta(minutes=2),
+            )
+            invalid_schema.pop("schema_version")
+            path = state_root / "invalid-schema" / "state.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps(invalid_schema), encoding="utf-8")
+
+            valid = self.make_candidate(
+                "A resumable goal",
+                project_root,
+                "valid",
+                FIXED_NOW + timedelta(minutes=1),
+            )
+            valid_path = self.persist_candidate(state_root, "valid", valid)
+
+            self.assertEqual(
+                valid_path,
+                quality_state.select_resume_candidate(
+                    state_root,
+                    "A resumable goal",
+                    project_root,
+                ),
+            )
+
+
+class RevisionCheckStateTests(unittest.TestCase):
+    def test_record_review_writes_snapshot_with_reviewed_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for artifact_kind, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(artifact=artifact_kind):
+                    artifact = directory / f"{artifact_kind}.md"
+                    artifact.write_text(f"{artifact_kind} r1\n", encoding="utf-8")
+                    state = state_at(stage)
+                    quality_state.set_artifact(state, artifact_kind, artifact)
+                    digest = quality_state._file_digest(artifact)
+                    review = write_json(directory, f"{artifact_kind}-review.json", valid_review(artifact_kind))
+                    snapshot_dir = directory / artifact_kind / "snapshots"
+                    quality_state.record_review(state, review, digest, snapshot_dir=snapshot_dir)
+                    snapshot = snapshot_dir / f"{artifact_kind}-r1.md"
+                    self.assertEqual(digest, quality_state._file_digest(snapshot))
+                    self.assertEqual(digest, state["reviews"][artifact_kind][-1]["artifact_digest"])
+            for artifact_kind, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW"), ("code", "CODE_REVIEW")):
+                with self.subTest(no_snapshot=artifact_kind):
+                    state = state_at(stage)
+                    review = write_json(directory, f"{artifact_kind}-none.json", valid_review(artifact_kind))
+                    quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=None)
+                    self.assertFalse((directory / f"{artifact_kind}-r1.md").exists())
+            state = state_at("SPEC_REVIEW")
+            review = write_json(directory, "null-artifact.json", valid_review("spec"))
+            quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=directory / "null-artifact")
+            self.assertFalse((directory / "null-artifact").exists())
+            state = state_at("CODE_REVIEW")
+            review = write_json(directory, "code-snapshot.json", valid_review("code"))
+            quality_state.record_review(state, review, VALID_DIGEST, snapshot_dir=directory / "code-snapshot")
+            self.assertFalse((directory / "code-snapshot").exists())
+            state = state_at("SPEC_REVIEW")
+            review = write_json(directory, "three-positional.json", valid_review("spec"))
+            quality_state.record_review(state, review, VALID_DIGEST)
+            self.assertEqual(1, state["rounds"]["spec"])
+
+    def test_record_review_round_two_requires_revision_check(self):
+        for artifact, stage, round_number in (("spec", "SPEC_REVIEW", 2), ("spec", "SPEC_REVIEW", 3), ("plan", "PLAN_REVIEW", 2)):
+            with self.subTest(artifact=artifact, round_number=round_number):
+                state = state_at(stage)
+                state["rounds"][artifact] = round_number - 1
+                review = valid_review(artifact, round_number)
+                with tempfile.TemporaryDirectory() as directory:
+                    review_path = write_json(directory, "review.json", review)
+                    before = deepcopy(state)
+                    with self.assertRaisesRegex(StateError, rf"--revision-check.*{round_number}"):
+                        quality_state.record_review(state, review_path, VALID_DIGEST)
+                self.assertEqual(before, state)
+
+    def test_record_review_rejects_mismatched_revision_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            valid = write_revision_check(directory, "plan", 2)
+            cases = {
+                "missing": directory / "missing.json",
+                "artifact": write_json(directory, "artifact.json", valid_revision_check("spec", 2)),
+                "round": write_json(directory, "round.json", valid_revision_check("plan", 1)),
+                "digest": write_json(directory, "digest.json", valid_revision_check("plan", 2, "b" * 64)),
+                "passed": write_json(directory, "passed.json", {**valid_revision_check("plan", 2), "passed": False}),
+                "schema": write_json(directory, "schema.json", {**valid_revision_check("plan", 2), "extra": True}),
+            }
+            for case, revision_check in cases.items():
+                with self.subTest(case=case):
+                    state = state_at("PLAN_REVIEW")
+                    state["rounds"]["plan"] = 1
+                    review = write_json(directory, f"review-{case}.json", valid_review("plan", 2))
+                    before = deepcopy(state)
+                    with self.assertRaises(StateError):
+                        quality_state.record_review(
+                            state, review, VALID_DIGEST,
+                            revision_check_path=revision_check,
+                        )
+                    self.assertEqual(before, state)
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = 1
+            mismatched_review = write_json(directory, "review-mismatched-round.json", valid_review("plan", 1))
+            with self.assertRaisesRegex(StateError, r"review round must be 2"):
+                quality_state.record_review(state, mismatched_review, VALID_DIGEST)
+            self.assertTrue(valid.is_file())
+            invalid_review = valid_review("plan", 2)
+            invalid_review.pop("verdict")
+            invalid_path = write_json(directory, "review-schema-invalid.json", invalid_review)
+            before = deepcopy(state)
+            with self.assertRaisesRegex(StateError, r"requires --revision-check for plan round 2"):
+                quality_state.record_review(state, invalid_path, VALID_DIGEST)
+            self.assertEqual(before, state)
+
+    def test_record_review_stores_revision_check_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(artifact=artifact):
+                    state = state_at(stage)
+                    revision_check = write_revision_check(directory, artifact, 1)
+                    review = write_json(directory, f"{artifact}-review.json", valid_review(artifact, 1))
+                    quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=revision_check)
+                    self.assertEqual(
+                        {"round": 1, "path": str(revision_check.resolve()), "current_digest": VALID_DIGEST, "base_digest": None},
+                        state["revision_checks"][artifact][-1],
+                    )
+            state = state_at("PLAN_REVIEW")
+            rejected = write_json(
+                directory, "rejected.json", {**valid_revision_check("plan", 1), "passed": False}
+            )
+            with self.assertRaises(StateError):
+                quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=rejected)
+
+    def test_revision_check_option_rejected_for_code_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CODE_REVIEW")
+            review = write_json(directory, "review.json", valid_review("code", 1))
+            revision_check = write_revision_check(directory, "spec", 1)
+            with self.assertRaises(StateError):
+                quality_state.record_review(
+                    state, review, VALID_DIGEST, revision_check_path=revision_check
+                )
+
+    def test_legacy_state_without_revision_checks_is_exempt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            fixture = Path(__file__).parent / "fixtures" / "revision-check" / "state-legacy-without-revision-checks.json"
+            legacy = json.loads(fixture.read_text(encoding="utf-8"))
+            self.assertNotIn("revision_checks", legacy)
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(exempt=artifact):
+                    state = state_at(stage)
+                    state.pop("revision_checks")
+                    state["rounds"].update(legacy["rounds"])
+                    state["reviews"].update(legacy["reviews"])
+                    review = write_json(directory, f"{artifact}-review.json", valid_review(artifact, 2))
+                    quality_state.record_review(state, review, VALID_DIGEST)
+                    self.assertNotIn("revision_checks", state)
+
+            for artifact, stage in (("spec", "SPEC_REVIEW"), ("plan", "PLAN_REVIEW")):
+                with self.subTest(create_key=artifact):
+                    state = state_at(stage)
+                    state.pop("revision_checks")
+                    revision_check = write_revision_check(directory, artifact, 1)
+                    review = write_json(directory, f"{artifact}-review-r1.json", valid_review(artifact, 1))
+                    quality_state.record_review(state, review, VALID_DIGEST, revision_check_path=revision_check)
+                    self.assertEqual([artifact], [key for key, entries in state["revision_checks"].items() if entries])
+
+    def test_new_state_has_empty_revision_checks_and_load_does_not_inject(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("CLASSIFIED")
+            self.assertEqual({"spec": [], "plan": []}, state["revision_checks"])
+            state.pop("revision_checks")
+            path = write_json(directory, "legacy.json", state)
+            loaded = quality_state.load_state(path)
+            self.assertNotIn("revision_checks", loaded)
+            self.assertEqual(1, loaded["schema_version"])
+
+    def test_snapshot_write_failure_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "spec.md"
+            artifact.write_text("spec\n", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            quality_state.set_artifact(state, "spec", artifact)
+            digest = quality_state._file_digest(artifact)
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            blocked = directory / "blocked"
+            blocked.write_text("not a directory", encoding="utf-8")
+            before = deepcopy(state)
+            with self.assertRaises(quality_state.FilesystemError):
+                quality_state.record_review(state, review, digest, snapshot_dir=blocked)
+            self.assertEqual(before, state)
+            self.assertFalse((blocked / "spec-r1.md").exists())
+            self.assertFalse(any(path.name.startswith("tmp") for path in directory.iterdir()))
+            snapshot_dir = directory / "snapshots"
+            snapshot_dir.mkdir()
+            r1 = snapshot_dir / "spec-r1.md"
+            r1.write_text("r1\n", encoding="utf-8")
+            (snapshot_dir / "spec-r2.md").write_text("unrecorded r2\n", encoding="utf-8")
+            state_path = write_json(directory, "state.json", {
+                "rounds": {"spec": 1},
+                "reviews": {"spec": [{"artifact_digest": quality_state._file_digest(r1)}]},
+            })
+            current = directory / "current.md"
+            current.write_text((Path(__file__).parent / "fixtures" / "revision-check" / "spec-complete.md").read_text(encoding="utf-8"), encoding="utf-8")
+            output = directory / "out.json"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_DIR / "revision_check.py"), "--artifact", "spec", "--current", str(current), "--state", str(state_path), "--out", str(output)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(2, result.returncode, result.stderr)
+            self.assertEqual(quality_state._file_digest(r1), json.loads(output.read_text(encoding="utf-8"))["base_digest"])
+
+
+class RevisionCheckCLITests(unittest.TestCase):
+    def test_cli_record_review_accepts_revision_check_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "plan.md"
+            artifact.write_text("plan\n", encoding="utf-8")
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state_path = directory / "state.json"
+            quality_state.save_state(state_path, state)
+            digest = quality_state._file_digest(artifact)
+            review = write_json(directory, "review.json", valid_review("plan", 1))
+            revision_check = write_revision_check(directory, "plan", 1, digest)
+
+            with redirect_stdout(io.StringIO()):
+                result = quality_state.main([
+                    "record-review", "--state", str(state_path), "--review", str(review),
+                    "--artifact-digest", digest, "--revision-check", str(revision_check),
+                ])
+
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(0, result)
+            self.assertEqual(1, len(persisted["revision_checks"]["plan"]))
+            self.assertTrue((directory / "snapshots" / "plan-r1.md").is_file())
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state_path = directory / "forwarded-state.json"
+            quality_state.save_state(state_path, state)
+            with patch.object(quality_state, "record_review", side_effect=lambda supplied, *_args, **_kwargs: supplied) as recorded:
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, quality_state.main([
+                        "record-review", "--state", str(state_path), "--review", str(review),
+                        "--artifact-digest", digest, "--revision-check", str(revision_check),
+                    ]))
+            self.assertEqual(str(revision_check), str(recorded.call_args.kwargs["revision_check_path"]))
+            self.assertEqual((state_path.parent / "snapshots").resolve(), recorded.call_args.kwargs["snapshot_dir"])
+            state = state_at("PLAN_REVIEW")
+            quality_state.set_artifact(state, "plan", artifact)
+            state["rounds"]["plan"] = 1
+            state_path = directory / "round-two-state.json"
+            quality_state.save_state(state_path, state)
+            round_two_review = write_json(directory, "round-two-review.json", valid_review("plan", 2))
+            errors = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(errors):
+                result = quality_state.main([
+                    "record-review", "--state", str(state_path), "--review", str(round_two_review),
+                    "--artifact-digest", digest,
+                ])
+            self.assertNotEqual(0, result)
+            self.assertIn("--revision-check", errors.getvalue())
+
+
+class CompletionIntegrityCLITests(unittest.TestCase):
+    def invoke_main(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = quality_state.main(args)
+        return result, output.getvalue(), errors.getvalue()
+
+    def save_completion_ready_state(self, directory, root, *, fingerprint=None):
+        fingerprint = fingerprint or quality_state.compute_workspace_fingerprint(root)
+        state = state_at("CODE_REVIEW", project_root=root)
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "verdict": "PASS",
+                "blockers": [],
+                "artifact_digest": fingerprint,
+            }
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": fingerprint,
+            "valid": True,
+        }
+        state_path = Path(directory) / "state.json"
+        quality_state.save_state(state_path, state)
+        return state_path
+
+    def assert_refused_without_saving(self, state_path, expected_exit=3):
+        before = state_path.read_bytes()
+        result, _, errors = self.invoke_main(
+            ["transition", "--state", str(state_path), "--to", "COMPLETED"]
+        )
+        self.assertEqual(expected_exit, result, errors)
+        self.assertTrue(errors.startswith("error:"), errors)
+        self.assertEqual(before, state_path.read_bytes())
+        self.assertNotEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+        return errors
+
+    def test_unchanged_workspace_completes_with_current_verified_final_pass_digest(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            result, output, errors = self.invoke_main(
+                ["transition", "--state", str(state_path), "--to", "COMPLETED"]
+            )
+
+            self.assertEqual(0, result, errors)
+            self.assertEqual("COMPLETED", json.loads(output)["stage"])
+            self.assertEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+
+    def test_tracked_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            (root / "app.txt").write_text("changed after verification\n", encoding="utf-8")
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_untracked_mode_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        untracked = root / "mode-sensitive"
+        untracked.write_bytes(b"unchanged payload")
+        untracked.chmod(0o644)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            untracked.chmod(0o755)
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_head_change_after_verification_refuses_without_saving(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            run_git(root, "commit", "--allow-empty", "-m", "new head")
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("workspace", errors)
+
+    def test_final_revise_never_back_searches_an_earlier_pass(self):
+        root = make_git_repo(self)
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = self.save_completion_ready_state(directory, root)
+            state = quality_state.load_state(state_path)
+            state["rounds"]["code"] = 2
+            state["reviews"]["code"].append(
+                {"verdict": "REVISE", "blockers": [], "artifact_digest": "b" * 64}
+            )
+            quality_state.save_state(state_path, state)
+            errors = self.assert_refused_without_saving(state_path)
+        self.assertIn("passing final review", errors)
+
+    def test_final_pass_digest_mismatch_refuses_without_saving(self):
+        root = make_git_repo(self)
+        cases = (
+            ("digest-mismatch", "b" * 64, None, True),
+            ("invalid-verification", None, None, False),
+            ("malformed-stored-digests", "A" * 64, "A" * 64, True),
+        )
+        for label, review_digest, verification_digest, verification_valid in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(directory, root)
+                state = quality_state.load_state(state_path)
+                if review_digest is not None:
+                    state["reviews"]["code"][-1]["artifact_digest"] = review_digest
+                if verification_digest is not None:
+                    state["verification"]["workspace_fingerprint"] = verification_digest
+                state["verification"]["valid"] = verification_valid
+                quality_state.save_state(state_path, state)
+                errors = self.assert_refused_without_saving(state_path)
+                self.assertIn("requires", errors)
+
+    def test_malformed_project_root_returns_two_without_saving(self):
+        root = make_git_repo(self)
+        cases = (("missing", None), ("empty", ""), ("non-string", 7))
+        for label, value in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(directory, root)
+                state = quality_state.load_state(state_path)
+                if label == "missing":
+                    del state["project_root"]
+                else:
+                    state["project_root"] = value
+                quality_state.save_state(state_path, state)
+                errors = self.assert_refused_without_saving(state_path, expected_exit=2)
+                self.assertIn("project_root", errors)
+
+    def test_repository_observation_failures_return_four_without_saving(self):
+        valid_root = make_git_repo(self)
+        non_git_context = tempfile.TemporaryDirectory()
+        self.addCleanup(non_git_context.cleanup)
+        empty_context = tempfile.TemporaryDirectory()
+        self.addCleanup(empty_context.cleanup)
+        empty_root = Path(empty_context.name)
+        run_git(empty_root, "init")
+        cases = (
+            ("non-git", Path(non_git_context.name), None),
+            ("no-commit", empty_root, None),
+            ("git-failure", valid_root, quality_state.GitError("git observation failed")),
+            (
+                "filesystem-failure",
+                valid_root,
+                quality_state.FilesystemError("filesystem observation failed"),
+            ),
+        )
+
+        for label, root, error in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                state_path = self.save_completion_ready_state(
+                    directory,
+                    root,
+                    fingerprint="a" * 64,
+                )
+                context = (
+                    patch.object(
+                        quality_state,
+                        "compute_workspace_fingerprint",
+                        side_effect=error,
+                    )
+                    if error is not None
+                    else patch.object(
+                        quality_state,
+                        "compute_workspace_fingerprint",
+                        wraps=quality_state.compute_workspace_fingerprint,
+                    )
+                )
+                with context:
+                    errors = self.assert_refused_without_saving(
+                        state_path, expected_exit=4
+                    )
+                self.assertIn("error:", errors)
+
+
+class TransitionPurityTests(unittest.TestCase):
+    @staticmethod
+    def completion_state(digest="c" * 64):
+        state = state_at("CODE_REVIEW")
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {"verdict": "PASS", "blockers": [], "artifact_digest": digest}
+        ]
+        state["open_finding_ids"]["code"] = []
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": digest,
+            "valid": True,
+        }
+        return state
+
+    def test_pure_completion_transition_performs_no_git_or_filesystem_io(self):
+        state = self.completion_state()
+        with (
+            patch.object(
+                quality_state,
+                "compute_workspace_fingerprint",
+                side_effect=AssertionError("fingerprint I/O"),
+            ),
+            patch.object(
+                quality_state,
+                "_git_run",
+                side_effect=AssertionError("Git I/O"),
+            ),
+            patch.object(os, "lstat", side_effect=AssertionError("filesystem I/O")),
+        ):
+            result = quality_state.transition(state, "COMPLETED")
+        self.assertEqual("COMPLETED", result["stage"])
+
+    def test_pure_completion_transition_keeps_stored_digest_guard(self):
+        accepted = self.completion_state()
+        self.assertEqual("COMPLETED", quality_state.transition(accepted, "COMPLETED")["stage"])
+
+        refused = self.completion_state()
+        refused["verification"]["workspace_fingerprint"] = "d" * 64
+        before = deepcopy(refused)
+        with self.assertRaises(quality_state.TransitionError):
+            quality_state.transition(refused, "COMPLETED")
+        self.assertEqual(before, refused)
+
+    def test_state_schema_and_transition_parser_surface_are_unchanged(self):
+        state = state_at("CODE_REVIEW")
+        keys = set(state)
+        transitions = deepcopy(quality_state.ALLOWED_TRANSITIONS)
+        terminal_states = set(quality_state.TERMINAL_STATES)
+        parser = quality_state._build_parser()
+        subparsers = next(
+            action for action in parser._actions if hasattr(action, "choices") and action.choices
+        )
+        transition_parser = subparsers.choices["transition"]
+        options = {
+            option
+            for action in transition_parser._actions
+            for option in action.option_strings
+        }
+
+        self.assertEqual(1, state["schema_version"])
+        self.assertEqual(keys, set(quality_state.load_state(self._save_and_return(state))))
+        self.assertEqual({"-h", "--help", "--state", "--to", "--reason"}, options)
+        self.assertEqual(transitions, quality_state.ALLOWED_TRANSITIONS)
+        self.assertEqual(terminal_states, set(quality_state.TERMINAL_STATES))
+
+    def _save_and_return(self, state):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        path = Path(directory) / "state.json"
+        quality_state.save_state(path, state)
+        return path
+
+
+class CLITests(unittest.TestCase):
+    def invoke_main(self, args):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = quality_state.main(args)
+        return result, output.getvalue()
+
+    def invoke_main_with_stderr(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = quality_state.main(args)
+        return result, output.getvalue(), errors.getvalue()
+
+    def assert_cli_success(self, args):
+        result, output = self.invoke_main(args)
+        self.assertEqual(0, result, args)
+        return output
+
+    def test_cli_help_returns_zero_after_argparse_prints_help(self):
+        result, output = self.invoke_main(["--help"])
+
+        self.assertEqual(0, result)
+        self.assertIn("usage:", output)
+
+    def test_cli_init_accepts_explicit_task_id_and_refuses_to_overwrite_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            project_root = make_git_repo(self)
+            arguments = [
+                "init",
+                "--root",
+                str(directory / "states"),
+                "--goal",
+                "A unique task",
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(directory / "artifacts"),
+                "--task-id",
+                "explicit-task",
+            ]
+
+            first, _ = self.invoke_main(arguments)
+            second, _ = self.invoke_main(arguments)
+
+            self.assertEqual(0, first)
+            self.assertEqual(4, second)
+
+    def test_cli_init_warns_for_in_repo_nonstandard_state_root_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            project_root = make_git_repo(self)
+            common = [
+                "init",
+                "--goal",
+                "A unique task",
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(directory / "artifacts"),
+            ]
+            cases = (
+                ("standard", project_root / ".claude" / "quality-state", False),
+                ("in-repo", project_root / ".claude" / "other-state", True),
+                ("out-of-repo", directory / "outside-state", False),
+            )
+
+            for task_id, root, should_warn in cases:
+                with self.subTest(state_root=root):
+                    result, _, errors = self.invoke_main_with_stderr(
+                        common
+                        + [
+                            "--root",
+                            str(root),
+                            "--task-id",
+                            task_id,
+                        ]
+                    )
+
+                    self.assertEqual(0, result)
+                    if should_warn:
+                        self.assertIn("warning:", errors)
+                        self.assertIn(
+                            "state files re-enter the workspace fingerprint",
+                            errors,
+                        )
+                    else:
+                        self.assertNotIn("warning:", errors)
+                        self.assertNotIn(
+                            "state files re-enter the workspace fingerprint",
+                            errors,
+                        )
+
+    def test_cli_approve_plan_persists_plan_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            plan_path = directory / "plan.md"
+            plan_path.write_text("plan\n", encoding="utf-8")
+            state_path = directory / "state.json"
+            state = state_at("AWAITING_PLAN_APPROVAL", mode="standard")
+            state["artifacts"]["plan"] = str(plan_path)
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            quality_state.save_state(state_path, state)
+
+            result, _ = self.invoke_main([
+                "approve-plan",
+                "--state",
+                str(state_path),
+                "--plan",
+                str(plan_path),
+                "--approved-at",
+                "2026-08-25T12:00:00Z",
+            ])
+
+            self.assertEqual(0, result)
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(str(plan_path), persisted["plan_approval"]["path"])
+            self.assertEqual(
+                hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                persisted["plan_approval"]["digest"],
+            )
+
+    def test_cli_record_review_error_retries_then_blocks_on_disk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_path = directory / "state.json"
+            errors_path = write_json(directory, "errors.json", ["missing evidence"])
+            quality_state.save_state(state_path, state_at("PLAN_REVIEW"))
+            arguments = [
+                "record-review-error",
+                "--state",
+                str(state_path),
+                "--artifact",
+                "plan",
+                "--round",
+                "1",
+                "--errors",
+                str(errors_path),
+            ]
+
+            first, _ = self.invoke_main(arguments)
+            first_state = quality_state.load_state(state_path)
+            second, _ = self.invoke_main(arguments)
+            second_state = quality_state.load_state(state_path)
+
+            self.assertEqual(0, first)
+            self.assertEqual(1, first_state["review_validation_retry"]["attempts"])
+            self.assertEqual(0, second)
+            self.assertEqual("BLOCKED", second_state["stage"])
+            self.assertEqual("REVIEW_OUTPUT_INVALID", second_state["status_reason"])
+
+    def test_cli_record_review_round_two_uses_state_held_prior_blockers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_path = directory / "state.json"
+            quality_state.save_state(state_path, state_at("PLAN_REVIEW"))
+            first_path = write_json(
+                directory,
+                "plan-review-1.json",
+                valid_review(
+                    verdict="REVISE",
+                    blockers=["PLAN-CARRIED-001"],
+                ),
+            )
+            second_path = write_json(
+                directory,
+                "plan-review-2.json",
+                valid_review(
+                    round_number=2,
+                    verdict="REVISE",
+                    blockers=["PLAN-CARRIED-001"],
+                ),
+            )
+
+            first, _ = self.invoke_main([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(first_path),
+                "--artifact-digest",
+                VALID_DIGEST,
+            ])
+            second, _ = self.invoke_main([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(second_path),
+                "--artifact-digest",
+                VALID_DIGEST,
+                "--revision-check",
+                str(write_revision_check(directory, "plan", 2)),
+            ])
+
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(0, first)
+            self.assertEqual(0, second)
+            self.assertEqual(2, persisted["rounds"]["plan"])
+            self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+
+    def test_cli_registers_report_after_limit_exhausted_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            project_root = make_git_repo(self)
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("spec\n", encoding="utf-8")
+            report_path = artifact_dir / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root", str(state_root),
+                "--goal", "Register report after review limit",
+                "--requested-mode", "standard",
+                "--project-root", str(project_root),
+                "--artifact-dir", str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+            self.assert_cli_success([
+                "classify", "--state", str(state_path), "--mode", "standard",
+                "--reasons", str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "spec",
+                "--path", str(spec_path),
+            ])
+            self.assert_cli_success([
+                "transition", "--state", str(state_path), "--to", "SPEC_REVIEW",
+            ])
+            digest = quality_state._file_digest(spec_path)
+            for round_number in (1, 2, 3):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=[f"SPEC-LIMIT-{round_number}"],
+                    ),
+                )
+                self.assert_cli_success([
+                    "record-review", "--state", str(state_path), "--review", str(review_path),
+                    "--artifact-digest", digest,
+                ] + (
+                    ["--revision-check", str(write_revision_check(directory, "spec", round_number, digest))]
+                    if round_number >= 2 else []
+                ))
+
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "report",
+                "--path", str(report_path),
+            ])
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+            self.assertEqual(str(report_path), persisted["artifacts"]["report"])
+
+    def test_cli_registers_report_after_recurring_finding_transition(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            project_root = make_git_repo(self)
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("spec\n", encoding="utf-8")
+            report_path = artifact_dir / "report.md"
+            report_path.write_text("report\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root", str(state_root),
+                "--goal", "Register report after recurring finding",
+                "--requested-mode", "standard",
+                "--project-root", str(project_root),
+                "--artifact-dir", str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+            self.assert_cli_success([
+                "classify", "--state", str(state_path), "--mode", "standard",
+                "--reasons", str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "spec",
+                "--path", str(spec_path),
+            ])
+            self.assert_cli_success([
+                "transition", "--state", str(state_path), "--to", "SPEC_REVIEW",
+            ])
+            digest = quality_state._file_digest(spec_path)
+            for round_number in (1, 2):
+                review_path = write_json(
+                    directory,
+                    f"spec-{round_number}.json",
+                    valid_review(
+                        artifact="spec",
+                        round_number=round_number,
+                        verdict="REVISE",
+                        blockers=["SPEC-RECURRING"],
+                    ),
+                )
+                self.assert_cli_success([
+                    "record-review", "--state", str(state_path), "--review", str(review_path),
+                    "--artifact-digest", digest,
+                ] + (
+                    ["--revision-check", str(write_revision_check(directory, "spec", round_number, digest))]
+                    if round_number >= 2 else []
+                ))
+
+            self.assert_cli_success([
+                "set-artifact", "--state", str(state_path), "--kind", "report",
+                "--path", str(report_path),
+            ])
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual("NEEDS_REDESIGN", persisted["stage"])
+            self.assertEqual(2, persisted["rounds"]["spec"])
+            self.assertEqual(str(report_path), persisted["artifacts"]["report"])
+
+    def test_cli_persists_mutations_before_a_transition_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "states"
+            project_root = make_git_repo(self)
+            plan_path = directory / "plan.md"
+            plan_path.write_text("approved plan\n", encoding="utf-8")
+            result, output = self.invoke_main([
+                "init",
+                "--root",
+                str(state_root),
+                "--goal",
+                "Persist transition failures",
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(directory / "artifacts"),
+            ])
+            self.assertEqual(0, result)
+            state_path = state_root / json.loads(output)["task_id"] / "state.json"
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            self.assertEqual(
+                0,
+                self.invoke_main([
+                    "classify",
+                    "--state",
+                    str(state_path),
+                    "--mode",
+                    "standard",
+                    "--reasons",
+                    str(reasons_path),
+                ])[0],
+            )
+            state = quality_state.load_state(state_path)
+            state["artifacts"]["plan"] = str(plan_path)
+            state["verification"]["valid"] = True
+            # SPEC_PASSED and PLAN_PASSED each require a passing recorded
+            # review; this test is about persistence on a later transition
+            # error, so seed the minimum state those guards demand.
+            for artifact in ("spec", "plan"):
+                state["rounds"][artifact] = 1
+                state["reviews"][artifact] = [{"verdict": "PASS", "blockers": []}]
+                state["open_finding_ids"][artifact] = []
+            # approve-plan below also requires a recorded review digest for
+            # the plan content it is about to approve.
+            state["artifact_digests"]["plan"] = quality_state._file_digest(plan_path)
+            quality_state.save_state(state_path, state)
+            for target in ("SPEC_REVIEW", "SPEC_PASSED", "PLAN_REVIEW", "PLAN_PASSED", "AWAITING_PLAN_APPROVAL"):
+                self.assertEqual(
+                    0,
+                    self.invoke_main([
+                        "transition",
+                        "--state",
+                        str(state_path),
+                        "--to",
+                        target,
+                    ])[0],
+                )
+            self.assertEqual(
+                0,
+                self.invoke_main([
+                    "approve-plan",
+                    "--state",
+                    str(state_path),
+                    "--plan",
+                    str(plan_path),
+                    "--approved-at",
+                    "2026-08-25T12:00:00Z",
+                ])[0],
+            )
+            plan_path.write_text("tampered plan\n", encoding="utf-8")
+
+            result, _ = self.invoke_main([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "IMPLEMENTING",
+            ])
+
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(3, result)
+            self.assertEqual("PLAN_REVIEW", persisted["stage"])
+            self.assertIsNone(persisted["plan_approval"])
+            self.assertFalse(persisted["verification"]["valid"])
+
+    def test_cli_non_demotion_state_error_leaves_state_file_byte_identical(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            quality_state.save_state(state_path, state_at("INTAKE"))
+            before = state_path.read_bytes()
+
+            result, _ = self.invoke_main([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "BLOCKED",
+            ])
+
+            self.assertEqual(2, result)
+            self.assertEqual(before, state_path.read_bytes())
+
+    def test_cli_light_walk_reaches_completed_using_artifact_and_verification_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "state-root"
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            project_root = make_git_repo(self)
+            compact_plan = artifact_dir / "compact-plan.md"
+            compact_plan.write_text("compact plan\n", encoding="utf-8")
+            verification_path = directory / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            code_review_path = write_json(
+                directory,
+                "code-review.json",
+                valid_review(artifact="code"),
+            )
+
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root",
+                str(state_root),
+                "--goal",
+                "Complete a light quality workflow",
+                "--requested-mode",
+                "light",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+
+            self.assert_cli_success([
+                "capture-baseline",
+                "--state",
+                str(state_path),
+            ])
+            self.assert_cli_success([
+                "classify",
+                "--state",
+                str(state_path),
+                "--mode",
+                "light",
+                "--reasons",
+                str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact",
+                "--state",
+                str(state_path),
+                "--kind",
+                "compact_plan",
+                "--path",
+                str(compact_plan),
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "AWAITING_PLAN_APPROVAL",
+            ])
+            self.assert_cli_success([
+                "approve-plan",
+                "--state",
+                str(state_path),
+                "--plan",
+                str(compact_plan),
+                "--approved-at",
+                "2026-08-25T12:00:00Z",
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "IMPLEMENTING",
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "CODE_REVIEW",
+            ])
+
+            fingerprint = json.loads(self.assert_cli_success([
+                "fingerprint",
+                "--project-root",
+                str(project_root),
+            ]))["fingerprint"]
+            self.assertRegex(fingerprint, r"^[0-9a-f]{64}$")
+            self.assert_cli_success([
+                "record-verification",
+                "--state",
+                str(state_path),
+                "--path",
+                str(verification_path),
+                "--fingerprint",
+                fingerprint,
+            ])
+            self.assert_cli_success([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(code_review_path),
+                "--artifact-digest",
+                fingerprint,
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "COMPLETED",
+            ])
+
+            self.assertEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+
+    def test_cli_standard_walk_reaches_completed_using_artifact_and_verification_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "state-root"
+            artifact_dir = directory / "artifacts"
+            artifact_dir.mkdir()
+            project_root = make_git_repo(self)
+            spec_path = artifact_dir / "spec.md"
+            spec_path.write_text("specification\n", encoding="utf-8")
+            plan_path = artifact_dir / "plan.md"
+            plan_path.write_text("implementation plan\n", encoding="utf-8")
+            verification_path = directory / "verification.json"
+            verification_path.write_text("verification\n", encoding="utf-8")
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            spec_review_path = write_json(
+                directory,
+                "spec-review.json",
+                valid_review(artifact="spec"),
+            )
+            plan_review_path = write_json(
+                directory,
+                "plan-review.json",
+                valid_review(artifact="plan"),
+            )
+            code_review_path = write_json(
+                directory,
+                "code-review.json",
+                valid_review(artifact="code"),
+            )
+
+            initial = json.loads(self.assert_cli_success([
+                "init",
+                "--root",
+                str(state_root),
+                "--goal",
+                "Complete a standard quality workflow",
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(artifact_dir),
+            ]))
+            state_path = state_root / initial["task_id"] / "state.json"
+
+            self.assert_cli_success([
+                "capture-baseline",
+                "--state",
+                str(state_path),
+            ])
+            self.assert_cli_success([
+                "classify",
+                "--state",
+                str(state_path),
+                "--mode",
+                "standard",
+                "--reasons",
+                str(reasons_path),
+            ])
+            self.assert_cli_success([
+                "set-artifact",
+                "--state",
+                str(state_path),
+                "--kind",
+                "spec",
+                "--path",
+                str(spec_path),
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "SPEC_REVIEW",
+            ])
+            self.assert_cli_success([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(spec_review_path),
+                "--artifact-digest",
+                hashlib.sha256(spec_path.read_bytes()).hexdigest(),
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "SPEC_PASSED",
+            ])
+            self.assert_cli_success([
+                "set-artifact",
+                "--state",
+                str(state_path),
+                "--kind",
+                "plan",
+                "--path",
+                str(plan_path),
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "PLAN_REVIEW",
+            ])
+            self.assert_cli_success([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(plan_review_path),
+                "--artifact-digest",
+                hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "PLAN_PASSED",
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "AWAITING_PLAN_APPROVAL",
+            ])
+            self.assert_cli_success([
+                "approve-plan",
+                "--state",
+                str(state_path),
+                "--plan",
+                str(plan_path),
+                "--approved-at",
+                "2026-08-25T12:00:00Z",
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "IMPLEMENTING",
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "CODE_REVIEW",
+            ])
+            fingerprint = json.loads(self.assert_cli_success([
+                "fingerprint",
+                "--project-root",
+                str(project_root),
+            ]))["fingerprint"]
+            self.assert_cli_success([
+                "record-verification",
+                "--state",
+                str(state_path),
+                "--path",
+                str(verification_path),
+                "--fingerprint",
+                fingerprint,
+            ])
+            self.assert_cli_success([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(code_review_path),
+                "--artifact-digest",
+                fingerprint,
+            ])
+            self.assert_cli_success([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "COMPLETED",
+            ])
+
+            self.assertEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+
+    def test_cli_capture_baseline_persists_workspace_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            root = make_git_repo(self)
+            state_path = directory / "state.json"
+            quality_state.save_state(state_path, state_at("INTAKE", project_root=root))
+
+            result, _ = self.invoke_main([
+                "capture-baseline",
+                "--state",
+                str(state_path),
+            ])
+
+            persisted = quality_state.load_state(state_path)
+            self.assertEqual(0, result)
+            self.assertEqual(run_git(root, "rev-parse", "HEAD").stdout.strip(), persisted["base_revision"])
+
+    def test_cli_end_to_end_sequence_and_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            state_root = directory / "state-root"
+            artifact_dir = directory / "artifacts"
+            project_root = make_git_repo(self)
+            goal = "Build a quality state"
+
+            result, output = self.invoke_main([
+                "init",
+                "--root",
+                str(state_root),
+                "--goal",
+                goal,
+                "--requested-mode",
+                "standard",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(artifact_dir),
+            ])
+            self.assertEqual(0, result)
+            initial = json.loads(output)
+            state_path = state_root / initial["task_id"] / "state.json"
+            self.assertTrue(state_path.is_file())
+
+            result, output = self.invoke_main(["show", "--state", str(state_path)])
+            self.assertEqual(0, result)
+            self.assertEqual(initial, json.loads(output))
+
+            reasons_path = write_json(directory, "reasons.json", ["scope is understood"])
+            result, _ = self.invoke_main([
+                "classify",
+                "--state",
+                str(state_path),
+                "--mode",
+                "standard",
+                "--reasons",
+                str(reasons_path),
+            ])
+            self.assertEqual(0, result)
+
+            result, _ = self.invoke_main([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "IMPLEMENTING",
+            ])
+            self.assertEqual(3, result)
+
+            result, _ = self.invoke_main([
+                "transition",
+                "--state",
+                str(state_path),
+                "--to",
+                "SPEC_REVIEW",
+            ])
+            self.assertEqual(0, result)
+
+            spec_review_path = write_json(
+                directory,
+                "spec-review.json",
+                valid_review(artifact="spec"),
+            )
+            result, _ = self.invoke_main([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(spec_review_path),
+                "--artifact-digest",
+                hashlib.sha256(b"spec-artifact").hexdigest(),
+            ])
+            self.assertEqual(0, result)
+
+            for target in ("SPEC_PASSED", "PLAN_REVIEW"):
+                result, _ = self.invoke_main([
+                    "transition",
+                    "--state",
+                    str(state_path),
+                    "--to",
+                    target,
+                ])
+                self.assertEqual(0, result)
+
+            review_path = write_json(directory, "plan-review.json", valid_review())
+            artifact_digest = hashlib.sha256(b"plan-artifact").hexdigest()
+            result, _ = self.invoke_main([
+                "record-review",
+                "--state",
+                str(state_path),
+                "--review",
+                str(review_path),
+                "--artifact-digest",
+                artifact_digest,
+            ])
+            self.assertEqual(0, result)
+
+            result, output = self.invoke_main([
+                "select-resume",
+                "--root",
+                str(state_root),
+                "--goal",
+                "  Ｂｕｉｌｄ   a QUALITY state ",
+                "--project-root",
+                str(project_root),
+            ])
+            self.assertEqual(0, result)
+            self.assertIsNotNone(json.loads(output)["match"])
+
+            result, output = self.invoke_main([
+                "fingerprint",
+                "--project-root",
+                str(project_root),
+            ])
+            self.assertEqual(0, result)
+            self.assertRegex(json.loads(output)["fingerprint"], r"^[0-9a-f]{64}$")
+
+            non_git = directory / "not-a-git-repository"
+            non_git.mkdir()
+            result, _ = self.invoke_main([
+                "fingerprint",
+                "--project-root",
+                str(non_git),
+            ])
+            self.assertEqual(4, result)
+
+            result, _ = self.invoke_main([
+                "init",
+                "--root",
+                str(state_root),
+                "--goal",
+                goal,
+                "--requested-mode",
+                "invalid",
+                "--project-root",
+                str(project_root),
+                "--artifact-dir",
+                str(artifact_dir),
+            ])
+            self.assertEqual(2, result)
+
+
+class ReadinessStateCompatibilityTests(unittest.TestCase):
+    def test_new_state_has_exactly_two_new_fields(self):
+        state = quality_state.new_state("goal", "auto", Path.cwd(), "artifacts", now=FIXED_NOW)
+        self.assertEqual(
+            {
+                "schema_version", "task_id", "goal", "goal_key", "requested_mode",
+                "mode", "classification_reasons", "stage", "project_root", "artifact_dir",
+                "base_revision", "initial_dirty_paths", "artifacts", "artifact_digests",
+                "rounds", "reviews", "revision_checks", "open_finding_ids",
+                "review_validation_retry", "review_unverified_retry", "plan_approval",
+                "verification", "status_reason", "created_at", "updated_at", "readiness",
+                "draft_attempts",
+            },
+            set(state),
+        )
+        self.assertEqual({"spec": [], "plan": []}, state["readiness"])
+        self.assertEqual({"spec": 0, "plan": 0}, state["draft_attempts"])
+
+    def test_transitions_and_terminal_states_unchanged(self):
+        self.assertEqual(
+            {"INTAKE": {"CLASSIFIED", "BLOCKED", "CANCELLED"}, "CLASSIFIED": {"SPEC_REVIEW", "AWAITING_PLAN_APPROVAL", "BLOCKED", "CANCELLED"}, "SPEC_REVIEW": {"SPEC_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "SPEC_PASSED": {"PLAN_REVIEW", "BLOCKED", "CANCELLED"}, "PLAN_REVIEW": {"PLAN_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "PLAN_PASSED": {"AWAITING_PLAN_APPROVAL", "BLOCKED", "CANCELLED"}, "AWAITING_PLAN_APPROVAL": {"IMPLEMENTING", "SPEC_REVIEW", "PLAN_REVIEW", "BLOCKED", "CANCELLED"}, "IMPLEMENTING": {"CODE_REVIEW", "SPEC_REVIEW", "PLAN_REVIEW", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}, "CODE_REVIEW": {"IMPLEMENTING", "COMPLETED", "SPEC_REVIEW", "PLAN_REVIEW", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"}},
+            quality_state.ALLOWED_TRANSITIONS,
+        )
+        self.assertEqual({"COMPLETED", "BLOCKED", "NEEDS_REDESIGN", "CANCELLED"}, quality_state.TERMINAL_STATES)
+
+    def test_v1_state_without_new_fields_is_not_mutated_on_load(self):
+        fixture = Path(__file__).parent / "fixtures" / "state-v1-without-new-fields.json"
+        before = fixture.read_bytes()
+        loaded = quality_state.load_state(fixture)
+        self.assertNotIn("readiness", loaded)
+        self.assertNotIn("draft_attempts", loaded)
+        self.assertEqual(before, fixture.read_bytes())
+
+    def test_resume_preserves_rounds_reviews_and_approval(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = state_at("PLAN_REVIEW")
+            state["rounds"]["plan"] = 1
+            state["reviews"]["plan"] = [{"round": 1, "path": "review.json", "artifact_digest": VALID_DIGEST, "verdict": "REVISE", "blockers": []}]
+            state["open_finding_ids"]["plan"] = ["PLAN-01"]
+            state["revision_checks"]["plan"] = [{"round": 1, "path": "check.json", "current_digest": VALID_DIGEST, "base_digest": None}]
+            state["plan_approval"] = {"path": "plan.md", "digest": VALID_DIGEST, "approved_at": "2026-08-25T12:34:56Z"}
+            state_root = Path(directory) / "states"
+            state_path = state_root / state["task_id"] / "state.json"
+            quality_state.save_state(state_path, state)
+            selected = quality_state.select_resume_candidate(state_root, state["goal"], state["project_root"])
+            resumed = quality_state.load_state(selected)
+            for key in ("rounds", "reviews", "open_finding_ids", "plan_approval", "revision_checks"):
+                self.assertEqual(state[key], resumed[key])
+
+    def test_round_limits_and_required_checks_unchanged(self):
+        self.assertEqual({"spec": 3, "plan": 2, "code": 3}, quality_state.ROUND_LIMITS)
+        self.assertEqual(
+            {"spec": {"required_sections", "material_decisions_resolved", "acceptance_criteria_objective"}, "plan": {"required_sections", "traceability_complete", "placeholders_absent"}, "code": {"required_commands_passed", "acceptance_criteria_met", "unrelated_changes_absent", "documentation_current"}},
+            REQUIRED_CHECKS,
+        )
+
+
+class DraftAttemptTests(unittest.TestCase):
+    def test_record_draft_attempt_increments_only_draft_attempts(self):
+        state = state_at("SPEC_REVIEW")
+        before_rounds = deepcopy(state["rounds"])
+
+        quality_state.record_draft_attempt(state, "spec")
+
+        self.assertEqual({"spec": 1, "plan": 0}, state["draft_attempts"])
+        self.assertEqual(before_rounds, state["rounds"])
+
+    def test_record_draft_attempt_is_per_artifact(self):
+        state = state_at("SPEC_REVIEW")
+
+        quality_state.record_draft_attempt(state, "plan")
+
+        self.assertEqual({"spec": 0, "plan": 1}, state["draft_attempts"])
+
+    def test_draft_attempts_created_on_first_record(self):
+        fixture = Path(__file__).parent / "fixtures" / "state-v1-without-new-fields.json"
+        state = quality_state.load_state(fixture)
+
+        quality_state.record_draft_attempt(state, "spec")
+
+        self.assertEqual({"spec": 1, "plan": 0}, state["draft_attempts"])
+
+
+class ReadinessRecordingTests(unittest.TestCase):
+    def _readiness_state(self, directory, *, mode="standard"):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact = directory / "spec.md"
+        artifact.write_text("specification\n", encoding="utf-8")
+        state = state_at("SPEC_REVIEW", mode=mode)
+        quality_state.set_artifact(state, "spec", artifact)
+        return state, artifact, quality_state._file_digest(artifact)
+
+    def _readiness_result(self, directory, name, digest, **changes):
+        source = Path(__file__).parent / "fixtures" / "readiness-ready.json"
+        result = json.loads(source.read_text(encoding="utf-8"))
+        result["artifact_digest"] = digest
+        result.update(changes)
+        return write_json(directory, name, result)
+
+    def _record_ready(self, state, directory, digest, *, name="ready.json", formal_round=1, score=100):
+        result = self._readiness_result(
+            directory, name, digest, formal_round=formal_round, score=score,
+        )
+        return quality_state.record_readiness(
+            state, "spec", result, digest, formal_round, "gpt-5.6-sol", "ok",
+        )
+
+    def _invoke_cli(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            status = quality_state.main(args)
+        return status, output.getvalue(), errors.getvalue()
+
+    def test_readiness_record_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            artifact = directory / "spec.md"
+            artifact.write_text("spec", encoding="utf-8")
+            state = state_at("SPEC_REVIEW")
+            state["artifacts"]["spec"] = str(artifact)
+            result_data = json.loads(
+                (Path(__file__).parent / "fixtures" / "readiness-ready.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            result_data["prior_findings"] = [{
+                "id": "SPEC-01",
+                "source": "formal",
+                "judgement": "resolved",
+                "evidence": "spec.md:10",
+            }]
+            result_data["resolved_finding_ids"] = ["SPEC-01"]
+            result_data["artifact_digest"] = quality_state._file_digest(artifact)
+            result_path = write_json(directory, "readiness-resolved.json", result_data)
+            result = quality_state.record_readiness(state, "spec", result_path, quality_state._file_digest(artifact), 1, "gpt-5.6-sol", "ok")
+            record = result["readiness"]["spec"][0]
+            self.assertEqual({"attempt", "formal_round", "outcome", "verdict", "score", "checklist", "findings", "resolved_finding_ids", "artifact_digest", "reviewer_model", "result_path", "recorded_at"}, set(record))
+            self.assertEqual(result_data["resolved_finding_ids"], record["resolved_finding_ids"])
+            self.assertNotIn("prior_findings", record)
+
+    def test_readiness_recording_ignores_score(self):
+        with tempfile.TemporaryDirectory() as directory:
+            low_state, _, digest = self._readiness_state(directory)
+            high_state, _, high_digest = self._readiness_state(Path(directory) / "high")
+            self._record_ready(low_state, directory, digest, name="low.json", score=0)
+            self._record_ready(high_state, Path(directory) / "high", high_digest, name="high.json", score=100)
+
+            self.assertEqual("recorded", low_state["readiness"]["spec"][0]["outcome"])
+            self.assertEqual("recorded", high_state["readiness"]["spec"][0]["outcome"])
+
+    def test_record_readiness_does_not_touch_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            before_rounds = deepcopy(state["rounds"])
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(before_rounds, state["rounds"])
+
+    def test_review_recording_is_independent_of_readiness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for has_revise_readiness in (False, True):
+                for command in ("record-review", "record-review-unverified", "record-review-error"):
+                    with self.subTest(has_revise_readiness=has_revise_readiness, command=command):
+                        case_directory = Path(directory) / f"{has_revise_readiness}-{command}"
+                        case_directory.mkdir()
+                        state, _, digest = self._readiness_state(case_directory)
+                        if has_revise_readiness:
+                            revise = self._readiness_result(
+                                case_directory, "revise.json", digest,
+                                verdict="REVISE", score=80,
+                            )
+                            quality_state.record_readiness(
+                                state, "spec", revise, digest, 1, "gpt-5.6-sol", "ok",
+                            )
+                        if command == "record-review":
+                            review = write_json(case_directory, "review.json", valid_review("spec", 1))
+                            quality_state.record_review(state, review, digest)
+                        elif command == "record-review-unverified":
+                            review = write_json(case_directory, "review.json", unverified_review("spec", 1))
+                            quality_state.record_review_unverified(state, review, digest)
+                        else:
+                            quality_state.record_review_validation_failure(state, "spec", 1, ["invalid response"])
+
+                        self.assertEqual("SPEC_REVIEW", state["stage"])
+
+    def test_readiness_attempt_is_globally_monotonic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            self._record_ready(state, directory, digest, name="first.json")
+            self._record_ready(state, directory, digest, name="second.json")
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            quality_state.record_review(state, review, digest)
+            self._record_ready(state, directory, digest, name="third.json", formal_round=2)
+
+            self.assertEqual([1, 2, 3], [record["attempt"] for record in state["readiness"]["spec"]])
+            self.assertEqual([1, 1, 2], [record["formal_round"] for record in state["readiness"]["spec"]])
+
+    def test_record_readiness_has_no_attempt_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            for attempt in range(3):
+                self._record_ready(state, directory, digest, name=f"attempt-{attempt}.json")
+
+            self.assertEqual(3, len(state["readiness"]["spec"]))
+
+    def test_record_readiness_rejects_registered_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            with self.assertRaisesRegex(StateError, "artifact digest mismatch"):
+                quality_state.record_readiness(
+                    state, "spec", result, "0" * 64, 1, "gpt-5.6-sol", "ok",
+                )
+
+            self.assertEqual([], state["readiness"]["spec"])
+
+    def test_record_readiness_records_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            result = self._readiness_result(directory, "mismatch.json", "b" * 64)
+
+            quality_state.record_readiness(state, "spec", result, digest, 1, "gpt-5.6-sol", "ok")
+
+            record = state["readiness"]["spec"][0]
+            self.assertEqual("digest_mismatch", record["outcome"])
+            self.assertIsNone(record["verdict"])
+
+    def test_readiness_formal_round_advances_after_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            review = write_json(directory, "review.json", valid_review("spec", 1))
+            quality_state.record_review(state, review, digest)
+
+            self._record_ready(state, directory, digest, formal_round=2)
+
+            self.assertEqual(state["rounds"]["spec"] + 1, state["readiness"]["spec"][0]["formal_round"])
+
+    def test_record_readiness_rejects_mismatched_formal_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            state["rounds"]["spec"] = 1
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            with self.assertRaisesRegex(StateError, "formal_round"):
+                quality_state.record_readiness(state, "spec", result, digest, 1, "gpt-5.6-sol", "ok")
+
+    def test_record_readiness_persists_review_time_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, artifact, digest = self._readiness_state(directory)
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(quality_state._file_digest(artifact), state["readiness"]["spec"][0]["artifact_digest"])
+
+    def test_readiness_field_created_on_first_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            del state["readiness"]
+
+            self._record_ready(state, directory, digest)
+
+            self.assertEqual(1, len(state["readiness"]["spec"]))
+
+    def test_readiness_records_survive_stage_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for target in ("SPEC_PASSED", "NEEDS_REDESIGN", "BLOCKED", "CANCELLED"):
+                with self.subTest(target=target):
+                    case_directory = Path(directory) / target
+                    case_directory.mkdir()
+                    state, _, digest = self._readiness_state(case_directory)
+                    self._record_ready(state, case_directory, digest)
+                    quality_state.record_draft_attempt(state, "spec")
+                    before_readiness = deepcopy(state["readiness"])
+                    before_attempts = deepcopy(state["draft_attempts"])
+                    if target == "SPEC_PASSED":
+                        review = write_json(case_directory, "review.json", valid_review("spec", 1))
+                        quality_state.record_review(state, review, digest)
+                    quality_state.transition(state, target, "end")
+
+                    self.assertEqual(before_readiness, state["readiness"])
+                    self.assertEqual(before_attempts, state["draft_attempts"])
+
+    def test_readiness_record_outcome_enum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            self._record_ready(state, directory, digest, name="recorded.json")
+            mismatch = self._readiness_result(directory, "mismatch.json", "b" * 64)
+            quality_state.record_readiness(state, "spec", mismatch, digest, 1, "gpt-5.6-sol", "ok")
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+            stderr_path = Path(directory) / "stderr.log"
+            stderr_path.write_text("failed\n", encoding="utf-8")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "failed", stderr_path)
+
+            outcomes = {record["outcome"] for record in state["readiness"]["spec"]}
+            self.assertEqual({"recorded", "schema_invalid", "digest_mismatch", "invocation_failed"}, outcomes)
+
+    def test_failed_readiness_attempt_record_shape(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+            mismatch = self._readiness_result(directory, "mismatch.json", "b" * 64)
+            stderr_path = Path(directory) / "stderr.log"
+            stderr_path.write_text("failed\n", encoding="utf-8")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+            quality_state.record_readiness(state, "spec", mismatch, digest, 1, "gpt-5.6-sol", "ok")
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "failed", stderr_path)
+
+            for record in state["readiness"]["spec"]:
+                with self.subTest(outcome=record["outcome"]):
+                    self.assertIn(record["outcome"], {"schema_invalid", "digest_mismatch", "invocation_failed"})
+                    self.assertIsNone(record["verdict"])
+                    self.assertIsNone(record["score"])
+                    self.assertEqual([], record["checklist"])
+                    self.assertEqual([], record["findings"])
+                    self.assertEqual([], record["resolved_finding_ids"])
+                    for field in ("attempt", "formal_round", "outcome", "artifact_digest", "reviewer_model", "result_path", "recorded_at"):
+                        self.assertIsNotNone(record[field])
+
+    def test_invocation_status_enum_is_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            state_path = Path(directory) / "state.json"
+            quality_state.save_state(state_path, state)
+            result = self._readiness_result(directory, "ready.json", digest)
+            arguments = [
+                "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "unknown",
+            ]
+
+            self.assertNotEqual(0, self._invoke_cli(arguments)[0])
+            self.assertNotEqual(0, self._invoke_cli(arguments[:-1] + ["ok", "--outcome", "recorded"])[0])
+
+    def test_invocation_failure_is_recorded_and_requires_stderr_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for stderr_mode in ("present", "missing", "nonexistent"):
+                with self.subTest(stderr_mode=stderr_mode):
+                    case_directory = Path(directory) / stderr_mode
+                    case_directory.mkdir()
+                    state, _, digest = self._readiness_state(case_directory)
+                    state_path = case_directory / "state.json"
+                    quality_state.save_state(state_path, state)
+                    result = self._readiness_result(case_directory, "ready.json", digest)
+                    stderr_path = case_directory / "stderr.log"
+                    if stderr_mode == "present":
+                        stderr_path.write_text("failure\n", encoding="utf-8")
+                    arguments = [
+                        "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                        "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                        "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "failed",
+                    ]
+                    if stderr_mode != "missing":
+                        arguments.extend(["--stderr-path", str(stderr_path)])
+
+                    status, output, _ = self._invoke_cli(arguments)
+                    if stderr_mode == "present":
+                        self.assertEqual(0, status)
+                        record = json.loads(output)["readiness"]["spec"][0]
+                        self.assertEqual("invocation_failed", record["outcome"])
+                        self.assertEqual(str(stderr_path), record["result_path"])
+                    else:
+                        self.assertNotEqual(0, status)
+
+    def test_schema_invalid_precedes_digest_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid_mismatch = self._readiness_result(
+                directory, "invalid-mismatch.json", "b" * 64, checklist=[],
+            )
+
+            quality_state.record_readiness(
+                state, "spec", invalid_mismatch, digest, 1, "gpt-5.6-sol", "ok",
+            )
+
+            self.assertEqual("schema_invalid", state["readiness"]["spec"][0]["outcome"])
+
+    def test_readiness_commands_rejected_in_light_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory, mode="light")
+            state_path = Path(directory) / "state.json"
+            quality_state.save_state(state_path, state)
+            result = self._readiness_result(directory, "ready.json", digest)
+
+            readiness_status, _, _ = self._invoke_cli([
+                "record-readiness", "--state", str(state_path), "--artifact", "spec",
+                "--result", str(result), "--artifact-digest", digest, "--formal-round", "1",
+                "--reviewer-model", "gpt-5.6-sol", "--invocation-status", "ok",
+            ])
+            draft_status, _, _ = self._invoke_cli([
+                "record-draft-attempt", "--state", str(state_path), "--artifact", "spec",
+            ])
+
+            self.assertNotEqual(0, readiness_status)
+            self.assertNotEqual(0, draft_status)
+
+    def test_invalid_readiness_result_is_recorded_as_schema_invalid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state, _, digest = self._readiness_state(directory)
+            invalid = self._readiness_result(directory, "invalid.json", digest, checklist=[])
+
+            quality_state.record_readiness(state, "spec", invalid, digest, 1, "gpt-5.6-sol", "ok")
+
+            record = state["readiness"]["spec"][0]
+            self.assertEqual("schema_invalid", record["outcome"])
+            self.assertIsNone(record["verdict"])
+
+
+if __name__ == "__main__":
+    unittest.main()

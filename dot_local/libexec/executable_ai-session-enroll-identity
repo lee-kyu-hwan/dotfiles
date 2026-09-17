@@ -13,13 +13,15 @@ import stat
 import subprocess
 import tomllib
 
-from ai_session_identity import digest_line
+from ai_session_identity import digest_line, find_duplicate_enrollment
 
 
 ALIAS = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
 
 
-def _record(provider: str, profile: str, *, success: bool) -> dict[str, object]:
+def _record(
+    provider: str, profile: str, *, success: bool, status: str = "blocked_verifier"
+) -> dict[str, object]:
     if success:
         return {
             "schema_version": 1,
@@ -33,28 +35,69 @@ def _record(provider: str, profile: str, *, success: bool) -> dict[str, object]:
         "event": "identity_enrollment_failure",
         "provider": provider,
         "account_profile": profile,
-        "status": "blocked_verifier",
+        "status": status,
         "exit_code": 3,
     }
 
 
-def _load_account(registry: Path, provider: str, profile: str) -> dict[str, object]:
+def _load_account(
+    registry: Path, provider: str, profile: str
+) -> tuple[dict[str, object], tuple[str, ...]]:
     if registry.is_symlink():
         raise ValueError("unsafe registry")
     with registry.open("rb") as stream:
         raw = tomllib.load(stream)
     accounts = raw.get("accounts")
-    if raw.get("schema_version") != 1 or not isinstance(accounts, list):
+    if (
+        raw.get("schema_version") != 2
+        or raw.get("contract_id") != "orchestrator-permission-profiles-v2"
+        or not isinstance(accounts, list)
+    ):
         raise ValueError("invalid registry")
+    seen_aliases = set()
+    for account in accounts:
+        if not isinstance(account, dict):
+            raise ValueError("invalid account")
+        alias = account.get("alias")
+        account_provider = account.get("provider")
+        enabled = account.get("enabled", account.get("auth_kind") != "api_payg")
+        expected_identity_contract = {
+            "claude": "claude_auth_status_v1",
+            "codex": "unavailable",
+        }.get(account_provider)
+        if (
+            not isinstance(alias, str)
+            or ALIAS.fullmatch(alias) is None
+            or alias in seen_aliases
+            or expected_identity_contract is None
+            or account.get("identity_contract") != expected_identity_contract
+            or account.get("identity_enrollment_policy") != "explicit_only"
+            or not isinstance(enabled, bool)
+        ):
+            raise ValueError("invalid account")
+        seen_aliases.add(alias)
     matches = [
         account for account in accounts
-        if isinstance(account, dict)
-        and account.get("alias") == profile
-        and account.get("provider") == provider
+        if account.get("alias") == profile and account.get("provider") == provider
     ]
     if len(matches) != 1 or matches[0].get("identity_enrollment_policy") != "explicit_only":
         raise ValueError("account is not enrollable")
-    return matches[0]
+    if provider != "claude" or matches[0].get("identity_contract") != "claude_auth_status_v1":
+        raise ValueError("account identity is unavailable for enrollment")
+    other_aliases = []
+    if matches[0].get("enabled", matches[0].get("auth_kind") != "api_payg") is not True:
+        raise ValueError("account is not active")
+    for account in accounts:
+        alias = account.get("alias")
+        if (
+            alias != profile
+            and account.get("enabled", account.get("auth_kind") != "api_payg") is True
+            and account.get("provider") == "claude"
+            and account.get("identity_contract") == "claude_auth_status_v1"
+            and account.get("identity_enrollment_policy") == "explicit_only"
+        ):
+            other_aliases.append(alias)
+    return matches[0], tuple(sorted(other_aliases))
 
 
 def _status_environment(account: dict[str, object], provider: str) -> dict[str, str]:
@@ -83,11 +126,7 @@ def _identity_status(account: dict[str, object], provider: str) -> dict[str, obj
             raise ValueError("synthetic status is missing")
         raw = json.loads(encoded)
     else:
-        command = (
-            ["codex", "doctor", "--json"]
-            if provider == "codex"
-            else ["claude", "auth", "status", "--json"]
-        )
+        command = ["claude", "auth", "status", "--json"]
         completed = subprocess.run(
             command,
             env=_status_environment(account, provider),
@@ -101,17 +140,9 @@ def _identity_status(account: dict[str, object], provider: str) -> dict[str, obj
         if completed.returncode != 0:
             raise ValueError("official status failed")
         raw = json.loads(completed.stdout)
-    if not isinstance(raw, dict) or raw.get("logged_in") is not True:
+    if not isinstance(raw, dict) or raw.get("loggedIn") is not True:
         raise ValueError("official stable identity is unavailable")
-    auth_kind = account.get("auth_kind")
-    if raw.get("auth_kind") != auth_kind:
-        raise ValueError("auth kind mismatch")
-    return {
-        "provider": provider,
-        "auth_kind": auth_kind,
-        "subject_id": raw.get("subject_id"),
-        "tenant_id": raw.get("tenant_id"),
-    }
+    return raw
 
 
 def _ensure_owner_directory(path: Path) -> None:
@@ -182,9 +213,11 @@ def _atomic_write_digest(directory: Path, filename: str, data: bytes) -> None:
 def enroll(arguments: argparse.Namespace) -> None:
     if not ALIAS.fullmatch(arguments.account_profile):
         raise ValueError("invalid account profile")
-    account = _load_account(arguments.registry, arguments.provider, arguments.account_profile)
+    account, other_aliases = _load_account(
+        arguments.registry, arguments.provider, arguments.account_profile
+    )
     identity = _identity_status(account, arguments.provider)
-    encoded = digest_line(identity)
+    encoded = digest_line(identity, "claude_auth_status_v1")
     root = Path(
         os.environ.get(
             "AI_SESSION_IDENTITY_ROOT",
@@ -193,8 +226,13 @@ def enroll(arguments: argparse.Namespace) -> None:
     )
     if not root.is_absolute():
         raise ValueError("identity root must be absolute")
-    _ensure_owner_directory(root)
     provider_directory = root / arguments.provider
+    if find_duplicate_enrollment(
+        encoded,
+        (provider_directory / f"{alias}.sha256" for alias in other_aliases),
+    ):
+        raise RuntimeError("duplicate_mapping")
+    _ensure_owner_directory(root)
     _ensure_owner_directory(provider_directory)
     _atomic_write_digest(provider_directory, f"{arguments.account_profile}.sha256", encoded)
 
@@ -207,6 +245,19 @@ def main() -> int:
     arguments = parser.parse_args()
     try:
         enroll(arguments)
+    except RuntimeError as error:
+        status = "duplicate_mapping" if str(error) == "duplicate_mapping" else "blocked_verifier"
+        print(json.dumps(
+            _record(
+                arguments.provider,
+                arguments.account_profile,
+                success=False,
+                status=status,
+            ),
+            separators=(",", ":"),
+            sort_keys=True,
+        ))
+        return 3
     except (OSError, ValueError, json.JSONDecodeError, tomllib.TOMLDecodeError, subprocess.TimeoutExpired):
         print(json.dumps(
             _record(arguments.provider, arguments.account_profile, success=False),

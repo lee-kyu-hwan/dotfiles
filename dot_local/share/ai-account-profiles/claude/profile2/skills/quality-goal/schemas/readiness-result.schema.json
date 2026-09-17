@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "attempt", "formal_round", "score", "verdict", "checklist", "blockers", "findings", "prior_findings", "evidence", "required_next_action", "artifact_digest", "resolved_finding_ids"],
+  "properties": {
+    "artifact": {"type": "string", "enum": ["spec"]},
+    "attempt": {"type": "integer", "minimum": 1},
+    "formal_round": {"type": "integer", "minimum": 1},
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "verdict": {"type": "string", "enum": ["READY", "REVISE"]},
+    "checklist": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "status", "evidence"],
+        "properties": {
+          "id": {"type": "string", "enum": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"]},
+          "status": {"type": "string", "enum": ["pass", "fail", "not_applicable"]},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "blockers": {"type": "array", "items": {"type": "string", "pattern": "^READY-"}},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "severity", "description", "evidence_location", "rubric_item", "required_resolution"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^READY-"},
+          "severity": {"type": "string", "enum": ["Critical", "High", "Medium", "Low"]},
+          "description": {"type": "string"},
+          "evidence_location": {"type": "string"},
+          "rubric_item": {"type": "string"},
+          "required_resolution": {"type": "string"}
+        }
+      }
+    },
+    "prior_findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "source", "judgement", "evidence"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^(READY-|SPEC-)"},
+          "source": {"type": "string", "enum": ["readiness", "formal"]},
+          "judgement": {"type": "string", "enum": ["resolved", "unresolved", "partial"]},
+          "evidence": {"type": "string"}
+        }
+      }
+    },
+    "evidence": {
+      "type": "array", "minItems": 6,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["claim", "location", "verified"],
+        "properties": {
+          "claim": {"type": "string"},
+          "location": {"type": "string"},
+          "verified": {"type": "boolean"}
+        }
+      }
+    },
+    "required_next_action": {"type": ["string", "null"]},
+    "artifact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "resolved_finding_ids": {"type": "array", "items": {"type": "string", "pattern": "^(READY-|SPEC-)"}}
+  }
+}

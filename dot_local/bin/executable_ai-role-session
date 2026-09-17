@@ -81,7 +81,7 @@ class PolicyError(Exception):
         self.status = status
 
 
-ROLE_CONTRACT_ID = "orchestrator-permission-profiles-v1"
+ROLE_CONTRACT_ID = "orchestrator-permission-profiles-v2"
 SKILL_POLICY_FIELDS = {
     "version",
     "policy_id",

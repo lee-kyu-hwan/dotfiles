@@ -1,7 +1,7 @@
 schema_version = 1
 
 [roles.general]
-registry_contract = "orchestrator-permission-profiles-v1"
+registry_contract = "orchestrator-permission-profiles-v2"
 default_leader_mode = "none"
 leader_modes = ["none"]
 skill_policy_id = "general-v1"
@@ -44,7 +44,7 @@ denied_permissions = ["Agent", "Task"]
 benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
 
 [roles.orchestrator]
-registry_contract = "orchestrator-permission-profiles-v1"
+registry_contract = "orchestrator-permission-profiles-v2"
 default_leader_mode = "none"
 leader_modes = ["none"]
 skill_policy_id = "orchestrator-v1"
@@ -87,7 +87,7 @@ denied_permissions = ["Bash(git push:*)"]
 benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
 
 [roles.feature-orchestrator]
-registry_contract = "orchestrator-permission-profiles-v1"
+registry_contract = "orchestrator-permission-profiles-v2"
 default_leader_mode = "none"
 leader_modes = ["none"]
 skill_policy_id = "feature-orchestrator-v1"
@@ -130,7 +130,7 @@ denied_permissions = ["Bash(git push:*)"]
 benign_settings_keys = ["$schema", "spinnerTipsEnabled", "theme"]
 
 [roles.global-orchestrator]
-registry_contract = "orchestrator-permission-profiles-v1"
+registry_contract = "orchestrator-permission-profiles-v2"
 default_leader_mode = "standby"
 leader_modes = ["active", "reviewer", "standby"]
 active_skill_policy_id = "global-active-v1"

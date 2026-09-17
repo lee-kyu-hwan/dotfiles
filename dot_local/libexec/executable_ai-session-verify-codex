@@ -5,20 +5,23 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
-
-from ai_session_identity import compare_enrolled_identity
 
 
 FIELDS = {
-    "provider",
-    "account_profile",
-    "login_status",
-    "identity_status",
-    "usage_status",
-    "cost_limit_status",
+    "provider", "account_profile", "login_status", "identity_status",
+    "usage_status", "cost_limit_status",
 }
+SIGNALS = (
+    "stored API key", "stored ChatGPT tokens", "stored agent identity",
+)
+
+
+def _cost_status() -> str:
+    auth_kind = os.environ.get("AI_AUTH_KIND")
+    if auth_kind in {"consumer", "organization"}:
+        return "not_applicable"
+    return "unknown"
 
 
 def _base_result() -> dict[str, str]:
@@ -28,7 +31,7 @@ def _base_result() -> dict[str, str]:
         "login_status": "unknown",
         "identity_status": "unknown",
         "usage_status": "usage_unknown",
-        "cost_limit_status": "unknown",
+        "cost_limit_status": _cost_status(),
     }
 
 
@@ -53,34 +56,28 @@ def verify() -> dict[str, str]:
         raw = _official_status()
         if not isinstance(raw, dict):
             return result
-        logged_in = raw.get("logged_in")
-        if logged_in is False:
-            result["login_status"] = "not_logged_in"
-            result["cost_limit_status"] = "not_applicable"
+        checks = raw.get("checks")
+        if not isinstance(checks, dict):
             return result
-        if logged_in is not True:
+        credentials = checks.get("auth.credentials")
+        if not isinstance(credentials, dict) or credentials.get("category") != "auth":
+            return result
+        details = credentials.get("details")
+        if not isinstance(details, dict):
+            return result
+        values = tuple(details.get(name) for name in SIGNALS)
+        if any(value not in {"true", "false"} for value in values):
+            return result
+        if details.get("stored auth mode") != "chatgpt":
+            return result
+        if values == ("false", "false", "false"):
+            result["login_status"] = "not_logged_in"
+            return result
+        if values[0] == "true" or not any(value == "true" for value in values[1:]):
             return result
         result["login_status"] = "logged_in"
-        auth_kind = os.environ.get("AI_AUTH_KIND", "")
-        if raw.get("auth_kind") != auth_kind:
-            return result
-        identity = {
-            "provider": "codex",
-            "auth_kind": auth_kind,
-            "subject_id": raw.get("subject_id"),
-            "tenant_id": raw.get("tenant_id"),
-        }
-        digest_path = os.environ.get("AI_IDENTITY_DIGEST_FILE")
-        if digest_path:
-            result["identity_status"] = compare_enrolled_identity(identity, Path(digest_path))
-        usage_status = raw.get("usage_status")
-        if usage_status in {"sufficient", "blocked_usage", "usage_unknown"}:
-            result["usage_status"] = usage_status
-        if auth_kind == "api_payg":
-            cost_status = raw.get("cost_limit_status")
-            result["cost_limit_status"] = cost_status if cost_status == "enforced" else "unknown"
-        else:
-            result["cost_limit_status"] = "not_applicable"
+        if os.environ.get("AI_IDENTITY_CONTRACT") == "unavailable":
+            result["identity_status"] = "unavailable"
     except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
         pass
     return result

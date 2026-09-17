@@ -1,5 +1,6 @@
 import json
 import hashlib
+import hmac
 import os
 import pty
 from pathlib import Path
@@ -24,10 +25,22 @@ CLAUDE_SETTINGS_REFERENCE = ROOT / "docs/claude-settings-reference.json"
 INSTRUCTION_ROOT = ROOT / "dot_config/ai-session/instructions"
 CLI_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/cli"
 INSTALLED_CLI_CHECKER = ROOT / "tests/check_installed_orchestrator_cli_contract.py"
-REGISTRY_CONTRACT = "orchestrator-permission-profiles-v1"
-BASE_REVISION = "fcfb47ee2a0514518d150554ee491aae87d26d52"
+REGISTRY_CONTRACT = "orchestrator-permission-profiles-v2"
+BASE_REVISION = "72ad4f24e9df5919773cb877de01007f641ae163"
 E2E_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/e2e"
 LIVE_ACTION_SENTINEL = E2E_FIXTURE_ROOT / "executable_fail-on-live-action"
+PROFILE2_PUBLIC_ROOT = ROOT / "dot_local/share/ai-account-profiles/claude/profile2"
+CANONICAL_QUALITY_SKILL = ROOT / "dot_claude/skills/quality-goal"
+CANONICAL_QUALITY_REVIEWER = ROOT / "dot_claude/agents/quality-reviewer.md"
+
+
+def is_public_quality_file(path):
+    return (
+        path.is_file()
+        and not path.is_symlink()
+        and "__pycache__" not in path.parts
+        and path.suffix != ".pyc"
+    )
 
 
 def source_artifact_path(target_path):
@@ -74,15 +87,23 @@ T15_ALLOWED_FILES = {
     "tests/test_ai_session.py",
     "tests/test_orchestrator_profiles.py",
     "tests/check_installed_orchestrator_cli_contract.py",
+    "docs/session-account-profiles.md",
     "docs/orchestrator-permission-profiles.md",
+    "dot_local/share/ai-account-profiles/claude/profile2/agents/quality-reviewer.md",
 }
 T15_ALLOWED_PREFIXES = (
     "tests/fixtures/orchestrator-profiles/",
     "docs/development/2026-09-15-103-orchestrator-permission-profiles-2/",
+    "docs/development/2026-09-16-111-profile-onboarding/",
+    "dot_local/share/ai-account-profiles/claude/profile2/skills/quality-goal/",
 )
 INITIAL_DIRTY_PREFIXES = (
     ".claude/profile-migration/",
     "docs/development/2026-09-15-103-orchestrator-permission-profiles/",
+)
+WORKFLOW_ARTIFACT_PREFIXES = (
+    ".claude/quality-state/",
+    "docs/development/2026-09-16-111-profile-onboarding/",
 )
 PRESERVED_PATHS = (
     "dot_claude/skills/create-worktree",
@@ -238,7 +259,7 @@ class OrchestratorProfileFixture(unittest.TestCase):
                 "provider": "codex",
                 "account_profile": "codex-default",
                 "login_status": "logged_in",
-                "identity_status": "matched",
+                "identity_status": "unavailable",
                 "usage_status": "sufficient",
                 "cost_limit_status": "not_applicable",
             }, sort_keys=True))
@@ -362,8 +383,8 @@ class OrchestratorProfileFixture(unittest.TestCase):
         registry.write_text(
             textwrap.dedent(
                 f"""
-                schema_version = 1
-                contract_id = "orchestrator-permission-profiles-v1"
+                schema_version = 2
+                contract_id = "orchestrator-permission-profiles-v2"
                 task_bindings = {task_bindings}
                 session_bindings = []
 
@@ -374,6 +395,8 @@ class OrchestratorProfileFixture(unittest.TestCase):
                 config_home = "{root}/homes/codex"
                 allowed_scopes = [{{ kind = "{allowed_kind}", value = "{code_root}" }}]
                 identity_enrollment_policy = "explicit_only"
+                identity_contract = "unavailable"
+                usage_contract = "none"
 
                 [[accounts]]
                 alias = "claude-profile1"
@@ -382,6 +405,8 @@ class OrchestratorProfileFixture(unittest.TestCase):
                 config_home_mode = "provider_default"
                 allowed_scopes = [{{ kind = "directory", value = "{profile1_root}" }}]
                 identity_enrollment_policy = "explicit_only"
+                identity_contract = "claude_auth_status_v1"
+                usage_contract = "none"
 
                 [[accounts]]
                 alias = "claude-profile2"
@@ -391,6 +416,8 @@ class OrchestratorProfileFixture(unittest.TestCase):
                 config_home = "{root}/homes/claude/profile2"
                 allowed_scopes = [{{ kind = "directory", value = "{profile2_root}" }}]
                 identity_enrollment_policy = "explicit_only"
+                identity_contract = "claude_auth_status_v1"
+                usage_contract = "none"
 
                 {codex_mapping_block}
 
@@ -499,14 +526,25 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "tests/fixtures/orchestrator-profiles/cli/executable_fake-cli-upper",
             "tests/fixtures/orchestrator-profiles/e2e/executable_fake-workmux",
             "tests/fixtures/orchestrator-profiles/e2e/executable_fail-on-live-action",
+            ".chezmoiignore",
+            "docs/session-account-profiles.md",
             "docs/orchestrator-permission-profiles.md",
         }
+        expected_files.add(
+            "dot_local/share/ai-account-profiles/claude/profile2/agents/quality-reviewer.md"
+        )
+        expected_files.update(
+            "dot_local/share/ai-account-profiles/claude/profile2/skills/quality-goal/"
+            + str(path.relative_to(CANONICAL_QUALITY_SKILL))
+            for path in CANONICAL_QUALITY_SKILL.rglob("*")
+            if is_public_quality_file(path)
+        )
         self.assertTrue(all((ROOT / path).is_file() for path in expected_files))
         inspect_only = {
             "docs/claude-settings-reference.json",
             "dot_codex/hooks.json",
             "dot_codex/private_full_auto.config.toml",
-            "docs/development/2026-09-15-103-orchestrator-permission-profiles/installed-cli-contract-evidence.md",
+            "docs/development/2026-09-15-103-orchestrator-permission-profiles-2/authoritative-inputs.md",
         }
         self.assertTrue(all((ROOT / path).is_file() for path in inspect_only))
         self.assertTrue(all((ROOT / path).exists() for path in PRESERVED_PATHS))
@@ -543,6 +581,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         task_changes = {
             path for path in changed
             if not path.startswith(INITIAL_DIRTY_PREFIXES)
+            and not path.startswith(WORKFLOW_ARTIFACT_PREFIXES)
         }
         unexpected = {
             path for path in task_changes
@@ -626,8 +665,8 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             set(registry),
             "accounts.toml strict schema is missing",
         )
-        self.assertEqual(1, registry["schema_version"])
-        self.assertEqual("orchestrator-permission-profiles-v1", registry["contract_id"])
+        self.assertEqual(2, registry["schema_version"])
+        self.assertEqual(REGISTRY_CONTRACT, registry["contract_id"])
         self.assertNotIn("defaults", registry)
         self.assertNotIn("scope_bindings", registry)
 
@@ -653,6 +692,15 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 {"directory"},
                 {scope["kind"] for scope in account["allowed_scopes"]},
             )
+            self.assertEqual("none", account["usage_contract"])
+        self.assertEqual("unavailable", accounts["codex-default"]["identity_contract"])
+        self.assertEqual(
+            {"claude_auth_status_v1"},
+            {
+                accounts["claude-profile1"]["identity_contract"],
+                accounts["claude-profile2"]["identity_contract"],
+            },
+        )
 
         self.assertIsInstance(registry["task_bindings"], list)
         self.assertIsInstance(registry["session_bindings"], list)
@@ -662,6 +710,121 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         )
         self.assertEqual(LEGACY_CODEX_RECORD, registry["legacy_records"]["codex-dotfiles"])
         self.assertEqual(LEGACY_CLAUDE_RECORD, registry["legacy_records"]["claude-dotfiles"])
+
+    def test_strict_registry_v2_contracts_and_legacy_v1_compatibility(self):
+        registry, code_root, _, _ = self.write_strict_registry()
+        selected = self.select_account(registry, "codex", code_root / "other")
+        self.assertEqual(0, selected.returncode, selected.stderr)
+
+        original = registry.read_text(encoding="utf-8")
+        variants = {
+            "strict-v1": original.replace(
+                "schema_version = 2",
+                "schema_version = 1",
+                1,
+            ).replace(
+                'contract_id = "orchestrator-permission-profiles-v2"',
+                'contract_id = "orchestrator-permission-profiles-v1"',
+                1,
+            ),
+            "missing-identity": original.replace(
+                'identity_contract = "unavailable"\n', "", 1
+            ),
+            "unknown-identity": original.replace(
+                'identity_contract = "unavailable"',
+                'identity_contract = "derived_from_alias"',
+                1,
+            ),
+            "provider-mismatch": original.replace(
+                'identity_contract = "unavailable"',
+                'identity_contract = "claude_auth_status_v1"',
+                1,
+            ),
+            "missing-usage": original.replace('usage_contract = "none"\n', "", 1),
+            "unknown-usage": original.replace(
+                'usage_contract = "none"', 'usage_contract = "estimated"', 1
+            ),
+        }
+        verifier_count = Path(self.temporary.name) / "registry-v2-verifier-count"
+        provider_count = Path(self.temporary.name) / "registry-v2-provider-count"
+        verifier = self.make_fake_executable(
+            "registry-v2-verifier",
+            """
+            import os
+            from pathlib import Path
+            Path(os.environ["AI_TEST_VERIFIER_COUNT"]).write_text("called")
+            raise SystemExit(91)
+            """,
+        )
+        provider = self.make_fake_executable(
+            "registry-v2-provider",
+            """
+            import os
+            from pathlib import Path
+            Path(os.environ["AI_TEST_PROVIDER_COUNT"]).write_text("called")
+            raise SystemExit(92)
+            """,
+        )
+        for name, contents in variants.items():
+            with self.subTest(name=name):
+                verifier_count.unlink(missing_ok=True)
+                provider_count.unlink(missing_ok=True)
+                candidate = Path(self.temporary.name) / f"{name}.toml"
+                candidate.write_text(contents, encoding="utf-8")
+                result = subprocess.run(
+                    [
+                        sys.executable, str(ACCOUNT_SELECTOR), "launch",
+                        "--registry", str(candidate),
+                        "--provider", "codex",
+                        "--role-profile", "general",
+                        "--role-contract", REGISTRY_CONTRACT,
+                        "--verifier", str(verifier),
+                        "--", str(provider),
+                    ],
+                    cwd=code_root / "other",
+                    env={
+                        **self.environment,
+                        "AI_TEST_VERIFIER_COUNT": str(verifier_count),
+                        "AI_TEST_PROVIDER_COUNT": str(provider_count),
+                    },
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("blocked_contract", result.stderr)
+                self.assertFalse(verifier_count.exists())
+                self.assertFalse(provider_count.exists())
+
+        legacy = Path(self.temporary.name) / "legacy-v1-selection.toml"
+        legacy.write_text(
+            textwrap.dedent(
+                f"""
+                version = 1
+                [accounts.codex-default]
+                provider = "codex"
+                auth_kind = "consumer"
+                config_home = "{self.temporary.name}/legacy-home"
+                allowed_scopes = ["repository:acme/widgets"]
+                [defaults]
+                codex = "codex-default"
+                """
+            ),
+            encoding="utf-8",
+        )
+        legacy_result = subprocess.run(
+            [
+                sys.executable, str(ACCOUNT_SELECTOR), "select",
+                "--registry", str(legacy),
+                "--provider", "codex",
+                "--role-profile", "general",
+                "--repository", "acme/widgets",
+            ],
+            cwd=ROOT,
+            env=self.environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(0, legacy_result.returncode, legacy_result.stderr)
 
     def test_real_path_account_selection(self):
         with ACCOUNT_REGISTRY.open("rb") as stream:
@@ -2177,7 +2340,9 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 "provider": "codex",
                 "account_profile": "codex-default",
                 "login_status": "logged_in",
-                "identity_status": "matched",
+                "identity_status": (
+                    "unavailable" if os.environ["AI_PROVIDER"] == "codex" else "matched"
+                ),
                 "usage_status": "sufficient",
                 "cost_limit_status": "not_applicable",
             }, sort_keys=True))
@@ -2599,7 +2764,9 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 "provider": "claude",
                 "account_profile": os.environ["AI_ACCOUNT_PROFILE"],
                 "login_status": "logged_in",
-                "identity_status": "matched",
+                "identity_status": (
+                    "unavailable" if os.environ["AI_PROVIDER"] == "codex" else "matched"
+                ),
                 "usage_status": "sufficient",
                 "cost_limit_status": "not_applicable",
             }, sort_keys=True))
@@ -2751,10 +2918,10 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         spec.loader.exec_module(module)
         return module
 
-    def write_identity_digest(self, identity_module, path, identity):
+    def write_identity_digest(self, identity_module, path, identity, contract="claude_auth_status_v1"):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.parent.chmod(0o700)
-        path.write_bytes(identity_module.digest_line(identity))
+        path.write_bytes(identity_module.digest_line(identity, contract))
         path.chmod(0o600)
 
     def make_official_status_fixture(self, provider):
@@ -2779,83 +2946,173 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 "claude_config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
                 "open_fds": open_fds,
             }, sort_keys=True), encoding="utf-8")
+            import time
+            time.sleep(float(os.environ.get("AI_TEST_STATUS_SLEEP", "0")))
             print(os.environ["AI_TEST_STATUS_PAYLOAD"])
             os.write(2, b"raw-provider-stderr TOKEN-fixture config/internal/path\\n")
+            raise SystemExit(int(os.environ.get("AI_TEST_STATUS_EXIT", "0")))
             """,
         )
         return executable, capture
 
-    def test_live_verifier(self):
+    def run_official_verifier(self, provider, payload, **extra_environment):
         paths = self.require_t7_verifier_contract()
-        identity_module = self.load_identity_module(paths["identity"])
-        subject_id = "Subject-Case-A"
-        identity = {
-            "provider": "codex",
-            "auth_kind": "consumer",
-            "subject_id": subject_id,
-        }
-        digest_file = Path(self.temporary.name) / "identity/codex-default.sha256"
-        self.write_identity_digest(identity_module, digest_file, identity)
-        _provider, capture = self.make_official_status_fixture("codex")
-        config_home = Path(self.temporary.name) / "selected-codex-home"
-        config_home.mkdir()
+        _executable, capture = self.make_official_status_fixture(provider)
         environment = {
             **self.environment,
-            "AI_ACCOUNT_PROFILE": "codex-default",
+            "AI_ACCOUNT_PROFILE": f"{provider}-fixture",
             "AI_AUTH_KIND": "consumer",
-            "AI_IDENTITY_DIGEST_FILE": str(digest_file),
+            "AI_IDENTITY_CONTRACT": (
+                "claude_auth_status_v1" if provider == "claude" else "unavailable"
+            ),
+            "AI_USAGE_CONTRACT": "none",
             "AI_TEST_STATUS_CAPTURE": str(capture),
-            "AI_TEST_STATUS_PAYLOAD": json.dumps({
-                "logged_in": True,
-                "auth_kind": "consumer",
-                "subject_id": subject_id,
-                "usage_status": "sufficient",
-                "email": "private@example.invalid",
-            }),
-            "CODEX_HOME": str(config_home),
+            "AI_TEST_STATUS_PAYLOAD": (
+                payload if isinstance(payload, str) else json.dumps(payload)
+            ),
+            **(
+                {"AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES": "[]"}
+                if provider == "claude"
+                else {}
+            ),
+            **extra_environment,
         }
-        environment.pop("CLAUDE_CONFIG_DIR", None)
         result = subprocess.run(
-            [str(paths["codex"])],
-            env=environment,
-            text=True,
-            capture_output=True,
+            [str(paths[provider])], env=environment, text=True, capture_output=True
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        payload = json.loads(result.stdout)
+        return result, capture
+
+    def test_claude_official_status_contract(self):
+        paths = self.require_t7_verifier_contract()
+        identity_module = self.load_identity_module(paths["identity"])
+        official = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "orgId": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+            "subscriptionType": "pro",
+            "email": "private@example.invalid",
+            "configDirectory": "/private/config",
+        }
+        digest = Path(self.temporary.name) / "identity/claude-fixture.sha256"
+        self.write_identity_digest(identity_module, digest, official)
+        success, capture = self.run_official_verifier(
+            "claude", official, AI_IDENTITY_DIGEST_FILE=str(digest)
+        )
+        self.assertEqual(0, success.returncode, success.stderr)
         self.assertEqual(
             {
-                "provider", "account_profile", "login_status",
-                "identity_status", "usage_status", "cost_limit_status",
+                "provider": "claude",
+                "account_profile": "claude-fixture",
+                "login_status": "logged_in",
+                "identity_status": "matched",
+                "usage_status": "usage_unknown",
+                "cost_limit_status": "not_applicable",
             },
-            set(payload),
-            "verifier must return six redacted fields",
+            json.loads(success.stdout),
         )
-        self.assertEqual(
-            ("logged_in", "matched", "sufficient", "not_applicable"),
-            (
-                payload["login_status"], payload["identity_status"],
-                payload["usage_status"], payload["cost_limit_status"],
-            ),
-        )
-        status_capture = json.loads(capture.read_text(encoding="utf-8"))
-        self.assertEqual([str(self.bin_dir / "codex"), "doctor", "--json"], status_capture["argv"])
-        self.assertEqual(str(config_home), status_capture["codex_home"])
-        self.assertIsNone(status_capture["claude_config_dir"])
-        self.assertEqual([], status_capture["open_fds"])
-        self.assertEqual("", result.stderr)
+        call = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual([str(self.bin_dir / "claude"), "auth", "status", "--json"], call["argv"])
+        self.assertEqual([], call["open_fds"])
 
-        insecure_digest = Path(self.temporary.name) / "insecure-identity/codex-default.sha256"
-        self.write_identity_digest(identity_module, insecure_digest, identity)
-        insecure_digest.parent.chmod(0o755)
-        insecure = subprocess.run(
-            [str(paths["codex"])],
-            env={**environment, "AI_IDENTITY_DIGEST_FILE": str(insecure_digest)},
-            text=True,
-            capture_output=True,
+        cases = (
+            ({"loggedIn": False}, "not_logged_in"),
+            ({"loggedIn": "true"}, "unknown"),
+            ({"loggedIn": True, "authMethod": "claude.ai", "orgId": "bad", "subscriptionType": "pro"}, "logged_in"),
+            ("not-json", "unknown"),
         )
-        self.assertEqual(0, insecure.returncode, insecure.stderr)
-        self.assertEqual("unknown", json.loads(insecure.stdout)["identity_status"])
+        for payload, expected_login in cases:
+            with self.subTest(payload=repr(payload)):
+                result, _ = self.run_official_verifier(
+                    "claude", payload, AI_IDENTITY_DIGEST_FILE=str(digest)
+                )
+                parsed = json.loads(result.stdout)
+                self.assertEqual(expected_login, parsed["login_status"])
+                self.assertNotEqual("matched", parsed["identity_status"])
+        nonzero, _ = self.run_official_verifier(
+            "claude", official,
+            AI_IDENTITY_DIGEST_FILE=str(digest),
+            AI_TEST_STATUS_EXIT="7",
+        )
+        self.assertEqual("unknown", json.loads(nonzero.stdout)["login_status"])
+
+    def test_codex_doctor_status_contract(self):
+        logged_in = {
+            "checks": {
+                "auth.credentials": {
+                    "category": "auth",
+                    "details": {
+                        "stored auth mode": "chatgpt",
+                        "stored API key": "false",
+                        "stored ChatGPT tokens": "true",
+                        "stored agent identity": "false",
+                        "auth file": "/private/auth.json",
+                    },
+                    "summary": "private@example.invalid",
+                    "remediation": "TOKEN-fixture",
+                }
+            }
+        }
+        cases = (
+            (logged_in, "logged_in"),
+            ({"checks": {"auth.credentials": {"category": "auth", "details": {
+                "stored auth mode": "chatgpt", "stored API key": "false",
+                "stored ChatGPT tokens": "false", "stored agent identity": "false",
+            }}}}, "not_logged_in"),
+            ({"checks": {}}, "unknown"),
+            ({"logged_in": True, "auth_kind": "consumer"}, "unknown"),
+            ({"checks": {"auth.credentials": {"category": "auth", "details": {
+                "stored auth mode": "chatgpt", "stored API key": False,
+                "stored ChatGPT tokens": "true", "stored agent identity": "false",
+            }}}}, "unknown"),
+            ({"checks": {"auth.credentials": {"category": "auth", "details": {
+                "stored auth mode": "api", "stored API key": "false",
+                "stored ChatGPT tokens": "true", "stored agent identity": "false",
+            }}}}, "unknown"),
+        )
+        digest_sentinel = Path(self.temporary.name) / "must-not-read.sha256"
+        for payload, expected in cases:
+            with self.subTest(expected=expected, payload=repr(payload)):
+                result, capture = self.run_official_verifier(
+                    "codex", payload, AI_IDENTITY_DIGEST_FILE=str(digest_sentinel)
+                )
+                parsed = json.loads(result.stdout)
+                self.assertEqual(expected, parsed["login_status"])
+                if expected == "logged_in":
+                    self.assertEqual("unavailable", parsed["identity_status"])
+                    self.assertEqual("usage_unknown", parsed["usage_status"])
+                self.assertFalse(any(
+                    sentinel in result.stdout + result.stderr
+                    for sentinel in (
+                        logged_in["checks"]["auth.credentials"]["details"]["auth file"],
+                        logged_in["checks"]["auth.credentials"]["summary"],
+                        logged_in["checks"]["auth.credentials"]["remediation"],
+                    )
+                ))
+                self.assertFalse(digest_sentinel.exists())
+                call = json.loads(capture.read_text(encoding="utf-8"))
+                self.assertEqual([str(self.bin_dir / "codex"), "doctor", "--json"], call["argv"])
+                self.assertEqual([], call["open_fds"])
+
+    def test_verifier_auth_kind_cost_contract(self):
+        provider_payloads = {
+            "claude": {"loggedIn": False},
+            "codex": {"checks": {"auth.credentials": {"category": "auth", "details": {
+                "stored auth mode": "chatgpt", "stored API key": "false",
+                "stored ChatGPT tokens": "false", "stored agent identity": "false",
+            }}}},
+        }
+        for provider, payload in provider_payloads.items():
+            for auth_kind, expected in (
+                ("consumer", "not_applicable"),
+                ("organization", "not_applicable"),
+                ("api_payg", "unknown"),
+                ("malformed", "unknown"),
+            ):
+                with self.subTest(provider=provider, auth_kind=auth_kind):
+                    result, _ = self.run_official_verifier(
+                        provider, payload, AI_AUTH_KIND=auth_kind
+                    )
+                    self.assertEqual(expected, json.loads(result.stdout)["cost_limit_status"])
 
     def test_account_status_precedence(self):
         self.require_t7_verifier_contract()
@@ -2902,7 +3159,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                         "--registry", str(registry),
                         "--provider", "claude",
                         "--role-profile", "general",
-                        "--role-contract", "orchestrator-permission-profiles-v1",
+                        "--role-contract", "orchestrator-permission-profiles-v2",
                         "--verifier", str(verifier),
                         "--", str(provider),
                     ],
@@ -2923,196 +3180,373 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertEqual("1" * len(cases), verifier_count.read_text(encoding="utf-8"))
 
     def test_identity_canonicalization(self):
-        paths = self.require_t7_verifier_contract()
-        identity_module = self.load_identity_module(paths["identity"])
+        identity_module = self.load_identity_module(
+            self.require_t7_verifier_contract()["identity"]
+        )
         raw = {
-            "provider": "  CoDeX\t",
-            "auth_kind": " Consumer ",
-            "subject_id": "  Case-SensitivE-e\u0301  ",
-            "tenant_id": "ignored-for-consumer",
-            "email": "excluded@example.invalid",
-            "display_name": "Excluded Name",
-            "token": "excluded-token",
-            "usage": {"remaining": 99},
+            "loggedIn": True,
+            "authMethod": "  claude.ai ",
+            "orgId": "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+            "subscriptionType": " pro ",
+            "email": "first@example.invalid",
+            "configDirectory": "/private/one",
+            "projectsDirectory": "/private/projects",
+            "orgName": "Private Org",
         }
         expected = (
-            '{"auth_kind":"consumer","provider":"codex","schema_version":1,'
-            '"subject_id":"Case-SensitivE-é"}'
-        ).encode("utf-8")
-        self.assertEqual(expected, identity_module.canonical_bytes(raw))
-        self.assertEqual(
-            hashlib.sha256(expected).hexdigest().encode("ascii") + b"\n",
-            identity_module.digest_line(raw),
+            b'{"auth_method":"claude.ai","identity_contract":"claude_auth_status_v1",'
+            b'"org_id":"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee","provider":"claude",'
+            b'"schema_version":2,"subscription_type":"pro"}'
         )
-        organization = {
-            "provider": " CLAUDE ",
-            "auth_kind": " ORGANIZATION ",
-            "subject_id": "Opaque-ID",
-            "tenant_id": "Tenant-Case",
-        }
         self.assertEqual(
-            b'{"auth_kind":"organization","provider":"claude","schema_version":1,'
-            b'"subject_id":"Opaque-ID","tenant_id":"Tenant-Case"}',
-            identity_module.canonical_bytes(organization),
+            expected,
+            identity_module.canonical_bytes(raw, "claude_auth_status_v1"),
         )
+        equivalent = dict(raw)
+        equivalent.update({
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+            "email": "changed@example.invalid",
+            "configDirectory": "/changed",
+            "projectsDirectory": "/changed/projects",
+            "orgName": "Changed",
+        })
+        self.assertTrue(hmac.compare_digest(
+            identity_module.digest_line(raw, "claude_auth_status_v1"),
+            identity_module.digest_line(equivalent, "claude_auth_status_v1"),
+        ))
         for field, value in (
-            ("subject_id", "   "),
-            ("subject_id", "bad\0value"),
-            ("subject_id", "bad\u0007value"),
-            ("tenant_id", "\t"),
+            ("authMethod", "different"),
+            ("orgId", "11111111-2222-4333-8444-555555555555"),
+            ("subscriptionType", "max"),
         ):
-            with self.subTest(field=field, value=repr(value)):
-                invalid = dict(organization)
-                invalid[field] = value
-                with self.assertRaises(ValueError):
-                    identity_module.canonical_bytes(invalid)
+            changed = dict(raw)
+            changed[field] = value
+            self.assertFalse(hmac.compare_digest(
+                identity_module.digest_line(raw, "claude_auth_status_v1"),
+                identity_module.digest_line(changed, "claude_auth_status_v1"),
+            ))
+        for field, value in (
+            ("authMethod", "bad\0value"),
+            ("orgId", "not-a-uuid"),
+            ("subscriptionType", "\t"),
+        ):
+            invalid = dict(raw)
+            invalid[field] = value
+            with self.assertRaises(ValueError):
+                identity_module.canonical_bytes(invalid, "claude_auth_status_v1")
         with self.assertRaises(ValueError):
-            identity_module.canonical_bytes({
-                "provider": "codex", "auth_kind": "consumer", "email": "only@example.invalid"
-            })
+            identity_module.canonical_bytes(raw, "unavailable")
+
+    def test_identity_digest_version_boundaries(self):
+        identity_module = self.load_identity_module(
+            self.require_t7_verifier_contract()["identity"]
+        )
+        raw = {
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+        }
+        v2 = identity_module.digest_line(raw, "claude_auth_status_v1")
+        self.assertEqual(68, len(v2))
+        self.assertRegex(v2.decode("ascii"), r"^v2:[0-9a-f]{64}\n$")
+        directory = Path(self.temporary.name) / "digest-boundaries"
+        directory.mkdir(mode=0o700)
+        for name, data, expected in (
+            ("v1", b"a" * 64 + b"\n", 1),
+            ("v2", v2, 2),
+        ):
+            candidate = directory / name
+            candidate.write_bytes(data)
+            candidate.chmod(0o600)
+            actual_version, actual_data = identity_module.read_digest_file(candidate)
+            self.assertEqual(expected, actual_version)
+            self.assertTrue(hmac.compare_digest(data, actual_data))
+        for length in (64, 66, 69):
+            candidate = directory / f"invalid-{length}"
+            candidate.write_bytes(b"a" * length)
+            candidate.chmod(0o600)
+            with self.assertRaises(ValueError):
+                identity_module.read_digest_file(candidate)
+
+    def test_org_context_identity_boundaries(self):
+        identity_module = self.load_identity_module(
+            self.require_t7_verifier_contract()["identity"]
+        )
+        baseline = {
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+            "email": "same@example.invalid",
+        }
+        different_org = dict(
+            baseline, orgId="11111111-2222-4333-8444-555555555555"
+        )
+        different_email = dict(baseline, email="different@example.invalid")
+        self.assertFalse(hmac.compare_digest(
+            identity_module.digest_line(baseline, "claude_auth_status_v1"),
+            identity_module.digest_line(different_org, "claude_auth_status_v1"),
+        ))
+        self.assertTrue(hmac.compare_digest(
+            identity_module.digest_line(baseline, "claude_auth_status_v1"),
+            identity_module.digest_line(different_email, "claude_auth_status_v1"),
+        ))
+        identity_source = self.require_t7_verifier_contract()["identity"].read_text(
+            encoding="utf-8"
+        )
+        for discarded_direction in ("HMAC", "hmac.new", "salt", "email_digest"):
+            self.assertNotIn(discarded_direction, identity_source)
+
+    def test_claude_identity_unverifiable(self):
+        paths = self.require_t7_verifier_contract()
+        identity_module = self.load_identity_module(paths["identity"])
+        valid = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+        }
+        digest = Path(self.temporary.name) / "unverifiable/claude-fixture.sha256"
+        self.write_identity_digest(identity_module, digest, valid)
+        malformed = (
+            {key: value for key, value in valid.items() if key != "orgId"},
+            dict(valid, orgId=7),
+            dict(valid, subscriptionType={"nested": "pro"}),
+            {"loggedIn": True, "identity": {
+                "authMethod": valid["authMethod"],
+                "orgId": valid["orgId"],
+                "subscriptionType": valid["subscriptionType"],
+            }},
+        )
+        for payload in malformed:
+            with self.subTest(payload=repr(payload)):
+                result, _ = self.run_official_verifier(
+                    "claude", payload, AI_IDENTITY_DIGEST_FILE=str(digest)
+                )
+                self.assertEqual(0, result.returncode)
+                projected = json.loads(result.stdout)
+                self.assertEqual("logged_in", projected["login_status"])
+                self.assertEqual(
+                    "identity_unverifiable", projected["identity_status"]
+                )
+                self.assertNotEqual("matched", projected["identity_status"])
+
+        malformed_paths, _ = self.run_official_verifier(
+            "claude",
+            valid,
+            AI_IDENTITY_DIGEST_FILE=str(digest),
+            AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES="not-json",
+        )
+        malformed_projection = json.loads(malformed_paths.stdout)
+        self.assertEqual("logged_in", malformed_projection["login_status"])
+        self.assertEqual("unknown", malformed_projection["identity_status"])
 
     def test_identity_enrollment(self):
         paths = self.require_t7_verifier_contract()
         identity_module = self.load_identity_module(paths["identity"])
         registry, _, _, _ = self.write_strict_registry()
         identity_root = Path(self.temporary.name) / "enrolled-identities"
-        subject_id = "Synthetic-Subject-A"
+        official = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+        }
         environment = {
             **self.environment,
             "AI_SESSION_SYNTHETIC_TEST": "1",
             "AI_SESSION_IDENTITY_ROOT": str(identity_root),
-            "AI_SESSION_SYNTHETIC_STATUS_JSON": json.dumps({
-                "logged_in": True,
-                "auth_kind": "consumer",
-                "subject_id": subject_id,
-            }),
+            "AI_SESSION_SYNTHETIC_STATUS_JSON": json.dumps(official),
         }
         command = [
             sys.executable, str(paths["enrollment"]),
             "--registry", str(registry),
-            "--provider", "codex",
-            "--account-profile", "codex-default",
+            "--provider", "claude",
+            "--account-profile", "claude-profile2",
         ]
         enrolled = subprocess.run(command, env=environment, text=True, capture_output=True)
         self.assertEqual(0, enrolled.returncode, enrolled.stderr)
-        self.assertEqual(
-            {
-                "schema_version": 1,
-                "event": "enrolled_identity",
-                "provider": "codex",
-                "account_profile": "codex-default",
-                "status": "enrolled",
-            },
-            json.loads(enrolled.stdout),
-        )
-        digest_file = identity_root / "codex/codex-default.sha256"
-        self.assertEqual(
-            identity_module.digest_line({
-                "provider": "codex",
-                "auth_kind": "consumer",
-                "subject_id": subject_id,
-            }),
+        digest_file = identity_root / "claude/claude-profile2.sha256"
+        self.assertTrue(hmac.compare_digest(
+            identity_module.digest_line(official, "claude_auth_status_v1"),
             digest_file.read_bytes(),
-        )
+        ))
         self.assertEqual(0o700, identity_root.stat().st_mode & 0o777)
         self.assertEqual(0o700, digest_file.parent.stat().st_mode & 0o777)
         self.assertEqual(0o600, digest_file.stat().st_mode & 0o777)
         self.assertFalse(digest_file.is_symlink())
-        self.assertEqual(os.getuid(), digest_file.parent.stat().st_uid)
+
+        duplicate_only_root = Path(self.temporary.name) / "duplicate-only-identities"
+        duplicate_other = duplicate_only_root / "claude/claude-profile1.sha256"
+        self.write_identity_digest(identity_module, duplicate_other, official)
+        duplicate_only_snapshot = {
+            path.relative_to(duplicate_only_root): path.read_bytes()
+            for path in duplicate_only_root.rglob("*")
+            if path.is_file()
+        }
+        duplicate_only = subprocess.run(
+            command,
+            env={**environment, "AI_SESSION_IDENTITY_ROOT": str(duplicate_only_root)},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(3, duplicate_only.returncode)
+        self.assertEqual(
+            "duplicate_mapping", json.loads(duplicate_only.stdout)["status"]
+        )
+        self.assertFalse(
+            (duplicate_only_root / "claude/claude-profile2.sha256").exists()
+        )
+        self.assertFalse(any(
+            path.name.startswith(".identity-")
+            for path in duplicate_only_root.rglob("*")
+        ))
+        self.assertEqual(
+            set(duplicate_only_snapshot),
+            {
+                path.relative_to(duplicate_only_root)
+                for path in duplicate_only_root.rglob("*")
+                if path.is_file()
+            },
+        )
+
+        other_digest = identity_root / "claude/claude-profile1.sha256"
+        self.write_identity_digest(identity_module, other_digest, official)
+        duplicate_root_snapshot = sorted(identity_root.rglob("*"))
+        duplicate = subprocess.run(
+            command,
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(3, duplicate.returncode)
+        duplicate_payload = json.loads(duplicate.stdout)
+        self.assertEqual("duplicate_mapping", duplicate_payload["status"])
+        self.assertEqual(duplicate_root_snapshot, sorted(identity_root.rglob("*")))
+        self.assertTrue(hmac.compare_digest(
+            identity_module.digest_line(official, "claude_auth_status_v1"),
+            digest_file.read_bytes(),
+        ))
+        other_digest.unlink()
 
         old_digest = digest_file.read_bytes()
+        replacement_identity = dict(official, subscriptionType="max")
         failed = subprocess.run(
             command,
             env={
                 **environment,
-                "AI_SESSION_SYNTHETIC_STATUS_JSON": json.dumps({
-                    "logged_in": True,
-                    "auth_kind": "consumer",
-                    "subject_id": "Replacement-Subject",
-                }),
+                "AI_SESSION_SYNTHETIC_STATUS_JSON": json.dumps(replacement_identity),
                 "AI_SESSION_TEST_FAIL_BEFORE_REPLACE": "1",
             },
             text=True,
             capture_output=True,
         )
         self.assertEqual(3, failed.returncode)
-        self.assertEqual(old_digest, digest_file.read_bytes())
-        self.assertNotIn("Replacement-Subject", failed.stdout + failed.stderr)
-        self.assertNotIn(old_digest.decode().strip(), failed.stdout + failed.stderr)
+        self.assertTrue(hmac.compare_digest(old_digest, digest_file.read_bytes()))
+        self.assertNotIn("max", failed.stdout + failed.stderr)
 
-        symlink_root = Path(self.temporary.name) / "symlink-identities"
-        outside = Path(self.temporary.name) / "identity-outside"
-        symlink_root.mkdir(mode=0o700)
-        outside.mkdir(mode=0o700)
-        (symlink_root / "codex").symlink_to(outside, target_is_directory=True)
-        blocked = subprocess.run(
-            command,
-            env={**environment, "AI_SESSION_IDENTITY_ROOT": str(symlink_root)},
+        codex_root = Path(self.temporary.name) / "codex-enrollment-must-not-exist"
+        codex = subprocess.run(
+            [
+                sys.executable, str(paths["enrollment"]),
+                "--registry", str(registry),
+                "--provider", "codex",
+                "--account-profile", "codex-default",
+            ],
+            env={**environment, "AI_SESSION_IDENTITY_ROOT": str(codex_root)},
             text=True,
             capture_output=True,
         )
-        self.assertEqual(3, blocked.returncode)
-        self.assertEqual([], list(outside.iterdir()))
+        self.assertEqual(3, codex.returncode)
+        self.assertFalse(codex_root.exists())
+
+    def test_identity_state_nonpromotion(self):
+        identity_module = self.load_identity_module(
+            self.require_t7_verifier_contract()["identity"]
+        )
+        raw = {
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+        }
+        root = Path(self.temporary.name) / "identity-states"
+        missing = root / "missing.sha256"
+        self.assertEqual(
+            "not_enrolled",
+            identity_module.compare_enrolled_identity(
+                raw, missing, "claude_auth_status_v1"
+            ),
+        )
+        root.mkdir(mode=0o700)
+        legacy = root / "legacy.sha256"
+        legacy.write_bytes(b"a" * 64 + b"\n")
+        legacy.chmod(0o600)
+        self.assertEqual(
+            "stale_enrollment",
+            identity_module.compare_enrolled_identity(
+                raw, legacy, "claude_auth_status_v1"
+            ),
+        )
+        current = root / "current.sha256"
+        current.write_bytes(identity_module.digest_line(raw, "claude_auth_status_v1"))
+        current.chmod(0o600)
+        self.assertEqual(
+            "matched",
+            identity_module.compare_enrolled_identity(
+                raw, current, "claude_auth_status_v1"
+            ),
+        )
+        drifted = dict(raw, subscriptionType="max")
+        self.assertEqual(
+            "identity_drift",
+            identity_module.compare_enrolled_identity(
+                drifted, current, "claude_auth_status_v1"
+            ),
+        )
+        current.chmod(0o644)
+        self.assertEqual(
+            "unknown",
+            identity_module.compare_enrolled_identity(
+                raw, current, "claude_auth_status_v1"
+            ),
+        )
 
     def test_verifier_redaction(self):
-        paths = self.require_t7_verifier_contract()
-        identity_module = self.load_identity_module(paths["identity"])
-        subject_id = "ACCOUNT-ID-SECRET"
-        digest_file = Path(self.temporary.name) / "identity/claude-profile2.sha256"
-        self.write_identity_digest(identity_module, digest_file, {
-            "provider": "claude",
-            "auth_kind": "consumer",
-            "subject_id": subject_id,
-        })
-        _provider, capture = self.make_official_status_fixture("claude")
-        private_home = Path(self.temporary.name) / "private-config-home/internal"
-        private_home.mkdir(parents=True)
-        environment = {
-            **self.environment,
-            "AI_ACCOUNT_PROFILE": "claude-profile2",
-            "AI_AUTH_KIND": "consumer",
-            "AI_IDENTITY_DIGEST_FILE": str(digest_file),
-            "AI_TEST_STATUS_CAPTURE": str(capture),
-            "AI_TEST_STATUS_PAYLOAD": json.dumps({
-                "logged_in": True,
-                "auth_kind": "consumer",
-                "subject_id": subject_id,
-                "email": "private@example.invalid",
-                "token": "TOKEN-fixture",
-                "config_path": str(private_home / "credentials.json"),
-            }),
-            "CLAUDE_CONFIG_DIR": str(private_home),
-        }
-        environment.pop("CODEX_HOME", None)
-        result = subprocess.run(
-            [str(paths["claude"])], env=environment, text=True, capture_output=True
+        identity_module = self.load_identity_module(
+            self.require_t7_verifier_contract()["identity"]
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        payload = json.loads(result.stdout)
+        official = {
+            "loggedIn": True,
+            "authMethod": "claude.ai",
+            "orgId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "subscriptionType": "pro",
+            "email": "private@example.invalid",
+            "configDirectory": "/private/config",
+            "projectsDirectory": "/private/projects",
+            "orgName": "Private Org",
+            "token": "TOKEN-fixture",
+        }
+        digest = Path(self.temporary.name) / "redaction/claude.sha256"
+        self.write_identity_digest(identity_module, digest, official)
+        result, _ = self.run_official_verifier(
+            "claude", official, AI_IDENTITY_DIGEST_FILE=str(digest)
+        )
+        self.assertEqual(0, result.returncode)
         self.assertEqual(
             {
                 "provider", "account_profile", "login_status",
                 "identity_status", "usage_status", "cost_limit_status",
             },
-            set(payload),
-            "verifier must return six redacted fields",
+            set(json.loads(result.stdout)),
         )
-        self.assertEqual("usage_unknown", payload["usage_status"])
         public = result.stdout + result.stderr
-        for secret in (
-            subject_id, "private@example.invalid", "TOKEN-fixture",
-            str(private_home), identity_module.digest_line({
-                "provider": "claude",
-                "auth_kind": "consumer",
-                "subject_id": subject_id,
-            }).decode().strip(),
-            "raw-provider-stderr",
+        for sentinel in (
+            official["orgId"], official["email"], official["configDirectory"],
+            official["projectsDirectory"], official["token"],
+            digest.read_text(encoding="ascii").strip(), "raw-provider-stderr",
         ):
-            self.assertNotIn(secret, public)
-        status_capture = json.loads(capture.read_text(encoding="utf-8"))
-        self.assertEqual([str(self.bin_dir / "claude"), "auth", "status", "--json"], status_capture["argv"])
-        self.assertEqual(str(private_home), status_capture["claude_config_dir"])
-        self.assertIsNone(status_capture["codex_home"])
+            self.assertFalse(sentinel in public)
 
     T8_SCRUB_KEYS = (
         "CODEX_HOME",
@@ -3161,7 +3595,9 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 "provider": os.environ["AI_PROVIDER"],
                 "account_profile": os.environ["AI_ACCOUNT_PROFILE"],
                 "login_status": "logged_in",
-                "identity_status": "matched",
+                "identity_status": (
+                    "unavailable" if os.environ["AI_PROVIDER"] == "codex" else "matched"
+                ),
                 "usage_status": "sufficient",
                 "cost_limit_status": "not_applicable",
             }}, sort_keys=True))
@@ -3191,7 +3627,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 "--role-profile",
                 "general",
                 "--role-contract",
-                "orchestrator-permission-profiles-v1",
+                "orchestrator-permission-profiles-v2",
                 "--verifier",
                 str(verifier),
                 "--",
@@ -3263,6 +3699,259 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     set(),
                     (set(verifier_environment) | set(provider_environment)) - set(expected),
                 )
+
+    def test_profile2_quality_bundle_mirror(self):
+        canonical = {
+            Path("agents/quality-reviewer.md"): CANONICAL_QUALITY_REVIEWER,
+            **{
+                Path("skills/quality-goal") / path.relative_to(CANONICAL_QUALITY_SKILL): path
+                for path in CANONICAL_QUALITY_SKILL.rglob("*")
+                if is_public_quality_file(path)
+            },
+        }
+        mirrored = {
+            path.relative_to(PROFILE2_PUBLIC_ROOT): path
+            for path in PROFILE2_PUBLIC_ROOT.rglob("*")
+            if is_public_quality_file(path)
+        } if PROFILE2_PUBLIC_ROOT.is_dir() else {}
+        self.assertEqual(set(canonical), set(mirrored))
+        for relative, source in canonical.items():
+            with self.subTest(path=relative):
+                target = mirrored[relative]
+                self.assertFalse(target.is_symlink())
+                self.assertEqual(source.read_bytes(), target.read_bytes())
+
+        rendered = Path(self.temporary.name) / "rendered-profile2"
+        for relative, source in mirrored.items():
+            target = rendered / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        deployed_skill = rendered / "skills/quality-goal/SKILL.md"
+        reviewer = deployed_skill.parent / "../../agents/quality-reviewer.md"
+        self.assertTrue(reviewer.is_file())
+        self.assertFalse(reviewer.is_symlink())
+        self.assertEqual(CANONICAL_QUALITY_REVIEWER.read_bytes(), reviewer.read_bytes())
+
+    def test_profile2_public_asset_denylist(self):
+        deny_targets = {
+            ".local/share/ai-account-profiles/claude/profile2/settings.json",
+            ".local/share/ai-account-profiles/claude/profile2/.claude.json",
+            ".local/share/ai-account-profiles/claude/profile2/.credentials.json",
+            ".local/share/ai-account-profiles/claude/profile2/credentials*",
+            ".local/share/ai-account-profiles/claude/profile2/tokens*",
+            *{
+                f".local/share/ai-account-profiles/claude/profile2/{name}/**"
+                for name in (
+                    "sessions", "projects", "backups", "file-history", "debug",
+                    "todos", "plans", "plugins",
+                )
+            },
+            ".local/share/ai-account-profiles/claude/profile2/history.jsonl",
+            ".local/share/ai-account-profiles/claude/profile2/skills/**/__pycache__",
+            ".local/share/ai-account-profiles/claude/profile2/skills/**/*.pyc",
+        }
+        ignores = {
+            line.strip()
+            for line in (ROOT / ".chezmoiignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith(("#", "{{"))
+        }
+        self.assertIn(".claude/settings.json", ignores)
+        self.assertTrue(deny_targets.issubset(ignores))
+        self.assertNotIn(
+            ".local/share/ai-account-profiles/claude/profile2/agents/**", ignores
+        )
+        self.assertNotIn(
+            ".local/share/ai-account-profiles/claude/profile2/skills/**", ignores
+        )
+        if PROFILE2_PUBLIC_ROOT.exists():
+            self.assertFalse(any(path.is_symlink() for path in PROFILE2_PUBLIC_ROOT.rglob("*")))
+
+    def test_profile2_chezmoi_diff_redaction(self):
+        rendered = Path(self.temporary.name) / "rendered-profile2-diff"
+        source_prefix = PROFILE2_PUBLIC_ROOT.relative_to(ROOT)
+        managed_paths = subprocess.run(
+            [
+                "git", "ls-files", "--cached", "--others", "--exclude-standard",
+                "--", str(source_prefix),
+            ],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.splitlines()
+        sources = [ROOT / path for path in managed_paths]
+        expected_sources = {
+            path for path in PROFILE2_PUBLIC_ROOT.rglob("*")
+            if is_public_quality_file(path)
+        }
+        self.assertEqual(expected_sources, set(sources))
+
+        rendered_targets = []
+        source_contents = []
+        target_contents = []
+        for source in sorted(sources):
+            relative = source.relative_to(PROFILE2_PUBLIC_ROOT)
+            target = rendered / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            rendered_targets.append(target.resolve())
+            source_contents.append(source.read_bytes().lower())
+            target_contents.append(target.read_bytes().lower())
+
+        self.assertTrue(rendered_targets)
+        rendered_root = rendered.resolve()
+        temporary_root = Path(self.temporary.name).resolve()
+        self.assertTrue(rendered_root.is_relative_to(temporary_root))
+        self.assertTrue(all(target.is_relative_to(rendered_root) for target in rendered_targets))
+        self.assertTrue(all(
+            target.relative_to(rendered_root).parts[0] in {"agents", "skills"}
+            for target in rendered_targets
+        ))
+        sentinels = tuple(value.lower().encode("utf-8") for value in (
+            "deployment-leak@example.invalid",
+            "token=synthetic-private-value",
+            "account-id=synthetic-private-value",
+            "/synthetic/config-home/private-profile",
+            "session-secret=synthetic-private-value",
+        ))
+        self.assertFalse(any(
+            sentinel in content
+            for content in (*source_contents, *target_contents)
+            for sentinel in sentinels
+        ))
+
+    def test_public_asset_private_boundary(self):
+        forbidden_names = {
+            "settings.json", ".claude.json", ".credentials.json", "history.jsonl",
+            "sessions", "projects", "backups", "file-history", "debug", "todos",
+            "plans", "plugins",
+        }
+        self.assertEqual(
+            {"agents", "skills"},
+            {path.name for path in PROFILE2_PUBLIC_ROOT.iterdir()},
+        )
+        self.assertTrue(
+            all(path.name not in forbidden_names for path in PROFILE2_PUBLIC_ROOT.rglob("*"))
+        )
+        selector = ACCOUNT_SELECTOR.read_text(encoding="utf-8")
+        self.assertNotIn("PROFILE2_PUBLIC_ROOT", selector)
+
+    def test_profile_onboarding_documentation_contract(self):
+        account_guide = (ROOT / "docs/session-account-profiles.md").read_text(encoding="utf-8")
+        permission_guide = (ROOT / "docs/orchestrator-permission-profiles.md").read_text(
+            encoding="utf-8"
+        )
+        combined = account_guide + "\n" + permission_guide
+        for required in (
+            'schema_version = 2',
+            'contract_id = "orchestrator-permission-profiles-v2"',
+            'identity_contract = "claude_auth_status_v1"',
+            'identity_contract = "unavailable"',
+            'usage_contract = "none"',
+            "v2:<64 lowercase hex>",
+            "stale_enrollment",
+            "--accept-usage-unknown",
+            "provider_login_foreground",
+            "identity_enroll_foreground",
+            "inspect_identity_foreground",
+            "retry_with_usage_consent",
+            "profile_status",
+            "human-only foreground recovery",
+            "no fallback",
+            "quality-reviewer.md",
+            "skills/quality-goal",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, combined)
+        self.assertIn("| `none` | 없음 | `usage_unknown` |", combined)
+        self.assertIn("| `none` | 있음 | `ready` |", combined)
+        self.assertIn("| `provider_status` | 있음 | `usage_unknown` |", combined)
+        self.assertIn("| `login_required` | `not_logged_in` | 3 |", permission_guide)
+        self.assertIn("| `enrollment_required` | `blocked_verifier` | 3 |", permission_guide)
+        self.assertIn(
+            "| `identity_unverifiable` | `identity_unverifiable` | 3 |",
+            permission_guide,
+        )
+        self.assertIn(
+            "| `duplicate_mapping` | `duplicate_mapping` | 3 |",
+            permission_guide,
+        )
+        for identity_semantic in (
+            "같은 조직 컨텍스트",
+            "같은 조직의 서로 다른 사용자는 구분할 수 없다",
+            "동일성을 증명하지 않는다",
+            "같은 email과 다른 `orgId` 조합은 서로 다른",
+            "Email 원문이나 email HMAC, salt, key를 만들거나 저장하는 방향은 폐기했다",
+            "duplicate_mapping",
+            "identity_unverifiable",
+            "Keychain manual gate",
+            "Claude 기대 version `2.1.272`",
+            "실측 설치본 `2.1.273`",
+            "pre-commit runner availability is not a judgment",
+        ):
+            with self.subTest(identity_semantic=identity_semantic):
+                self.assertIn(identity_semantic, combined)
+
+    def test_118_status_dependency_and_owned_paths(self):
+        permission_guide = (ROOT / "docs/orchestrator-permission-profiles.md").read_text(
+            encoding="utf-8"
+        )
+        ordered = (
+            "#118 create-worktree backend",
+            "resolved profile/worktree result",
+            "ai-session status",
+            "foreground operator action",
+        )
+        dependency = permission_guide.split("## #118 one-way status dependency", 1)[1]
+        positions = [dependency.index(item) for item in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("ready일 때만", permission_guide)
+        for shared in (
+            "tests/test_orchestrator_profiles.py",
+            "dot_config/ai-session/accounts.toml",
+            ".chezmoiignore",
+            "docs/session-account-profiles.md",
+        ):
+            self.assertIn(shared, permission_guide)
+
+        tracked = subprocess.run(
+            ["git", "diff", "--name-only", BASE_REVISION, "--"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.splitlines()
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.splitlines()
+        owned_prefixes = (
+            "dot_agents/skills/create-worktree/",
+            "dot_claude/skills/create-worktree/",
+            "docs/development/2026-09-16-118-profile-aware-create-worktree/",
+        )
+        self.assertEqual(
+            [], [path for path in (*tracked, *untracked) if path.startswith(owned_prefixes)]
+        )
+
+    def test_registry_exception_boundaries(self):
+        selector = ACCOUNT_SELECTOR.read_text(encoding="utf-8")
+        self.assertIn('binding.identity_contract == "unavailable"', selector)
+        self.assertIn('binding.usage_contract == "none" and accept_usage_unknown', selector)
+        self.assertIn('return decision("ready", admitted=True)', selector)
+        self.assertNotIn('identity_status = "matched"', selector)
+        self.assertNotIn('usage_status = "sufficient"', selector)
+        self.assertLess(
+            selector.index('if login_status == "not_logged_in"'),
+            selector.index('if binding.identity_contract == "unavailable"'),
+        )
+        self.assertLess(
+            selector.index('elif cost_limit_status != "not_applicable"'),
+            selector.index('if usage_status == "blocked_usage"'),
+        )
 
     def test_claude_default_env_unset(self):
         registry, _, profile1_root, _ = self.write_strict_registry()
@@ -3682,7 +4371,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             sys.executable, str(ACCOUNT_SELECTOR), "move-rebind",
             "--registry", str(fixture["registry"]),
             "--provider", "claude",
-            "--role-contract", "orchestrator-permission-profiles-v1",
+            "--role-contract", "orchestrator-permission-profiles-v2",
             "--binding-kind", "task",
             "--binding-id", "fixture-move",
             "--old-worktree", str(fixture["source"]),
@@ -4139,7 +4828,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                         "--role-profile",
                         "general",
                         "--role-contract",
-                        "orchestrator-permission-profiles-v1",
+                        "orchestrator-permission-profiles-v2",
                         "--account-profile",
                         legacy_alias,
                         "--verifier",
@@ -4357,7 +5046,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "provider": "codex",
             "account_profile": "codex-default",
             "login_status": "logged_in",
-            "identity_status": "matched",
+            "identity_status": "unavailable",
             "usage_status": "sufficient",
             "cost_limit_status": "not_applicable",
         }
@@ -4366,7 +5055,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "--registry", str(registry),
             "--provider", "codex",
             "--role-profile", "general",
-            "--role-contract", "orchestrator-permission-profiles-v1",
+            "--role-contract", "orchestrator-permission-profiles-v2",
             "--verifier", str(verifier),
             "--", str(provider),
         ]
