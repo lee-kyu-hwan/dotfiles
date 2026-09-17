@@ -14,6 +14,8 @@ ZSHRC_TEMPLATE = ROOT / "dot_zshrc.tmpl"
 PROFILE1_SOURCE = ROOT / "dot_local/share/private_ai-account-profiles/private_claude/private_profile1"
 BLOCK_START = "# >>> claude-profile1 >>>"
 BLOCK_END = "# <<< claude-profile1 <<<"
+PROFILE2_START = "# >>> claude-profile2 >>>"
+PROFILE2_END = "# <<< claude-profile2 <<<"
 PROFILE1_HOME = Path(".local/share/ai-account-profiles/claude/profile1")
 
 FAKE_CLAUDE = textwrap.dedent(
@@ -35,11 +37,15 @@ FAKE_CLAUDE = textwrap.dedent(
 )
 
 
-def launcher_block() -> str:
+def zshrc_block(start_marker: str, end_marker: str) -> str:
     text = ZSHRC_TEMPLATE.read_text(encoding="utf-8")
-    start = text.index(BLOCK_START)
-    end = text.index(BLOCK_END, start) + len(BLOCK_END)
+    start = text.index(start_marker)
+    end = text.index(end_marker, start) + len(end_marker)
     return text[start:end] + "\n"
+
+
+def launcher_block() -> str:
+    return zshrc_block(BLOCK_START, BLOCK_END) + zshrc_block(PROFILE2_START, PROFILE2_END)
 
 
 @unittest.skipUnless(shutil.which("zsh"), "zsh is required")
@@ -69,14 +75,16 @@ class ClaudeProfile1LauncherTests(unittest.TestCase):
         if claude_json is not None:
             (self.home / ".claude.json").write_text(claude_json, encoding="utf-8")
 
-    def run_launcher(self, *arguments, exit_code=0):
+    def run_launcher(self, *arguments, exit_code=0, command="claude-profile1", inherited_config_dir=None):
         environment = {
             "HOME": str(self.home),
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "FAKE_CLAUDE_RECORD": str(self.record),
             "FAKE_CLAUDE_EXIT": str(exit_code),
         }
-        script = 'source "$1"; shift; claude-profile1 "$@"'
+        if inherited_config_dir is not None:
+            environment["CLAUDE_CONFIG_DIR"] = inherited_config_dir
+        script = f'source "$1"; shift; {command} "$@"'
         result = subprocess.run(
             ["zsh", "-f", "-c", script, "zsh", str(self.block), *arguments],
             env=environment,
@@ -182,6 +190,42 @@ class ClaudeProfile1LauncherTests(unittest.TestCase):
 
         for path, content in before.items():
             self.assertEqual(content, path.read_bytes(), path)
+
+
+    def test_profile2_is_plain_claude_on_default_home(self):
+        self.write_default_home(claude_json=json.dumps({"mcpServers": {"a": {"type": "http", "url": "https://a"}}}))
+
+        result, record = self.run_launcher("hello", "-p", command="claude-profile2")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["hello", "-p"], record["argv"])
+        self.assertIsNone(record["config_dir"])
+        self.assertFalse((self.home / ".local/share/ai-account-profiles/claude/profile2").exists())
+
+    def test_profile2_clears_inherited_config_dir(self):
+        self.write_default_home()
+
+        _, record = self.run_launcher(
+            "-p",
+            command="claude-profile2",
+            inherited_config_dir=str(self.home / PROFILE1_HOME),
+        )
+
+        self.assertIsNone(record["config_dir"])
+
+    def test_profile2_propagates_claude_exit_code(self):
+        self.write_default_home()
+
+        result, _ = self.run_launcher("-p", exit_code=5, command="claude-profile2")
+
+        self.assertEqual(5, result.returncode)
+
+    def test_profile1_ignores_inherited_config_dir(self):
+        self.write_default_home()
+
+        _, record = self.run_launcher("-p", inherited_config_dir="/tmp/some-other-home")
+
+        self.assertEqual(str(self.home / PROFILE1_HOME), record["config_dir"])
 
 
 class ClaudeProfile1SharedSourceTests(unittest.TestCase):
