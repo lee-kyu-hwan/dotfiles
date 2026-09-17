@@ -164,6 +164,14 @@ EXTRACT_MCP
 }
 # <<< claude-profile1 <<<
 
+# >>> claude-profile2 >>>
+# `claude-profile2` 는 기본 home(~/.claude)의 `claude` 와 같다. 이름만 claude-profile1 과 대칭으로 둔다.
+# 이어받은 CLAUDE_CONFIG_DIR(예: claude-profile1 세션 안의 터미널)이 있어도 항상 기본 home 을 쓰도록 비우고 실행한다.
+claude-profile2() {
+    env -u CLAUDE_CONFIG_DIR claude "$@"
+}
+# <<< claude-profile2 <<<
+
 # eza (ls 대체)
 if command -v eza &>/dev/null; then
     alias ls='eza --icons'
