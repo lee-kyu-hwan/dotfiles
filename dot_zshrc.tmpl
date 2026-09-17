@@ -128,6 +128,11 @@ fi
 # ============================================================
 alias dotfiles='cd ~/code/dotfiles'
 
+# Claude Code 계정 home 분리 (공식 CLAUDE_CONFIG_DIR 방식, 이슈 #131)
+# `claude` 는 기본 home(~/.claude), `claude-profile1` 은 독립 home 을 쓴다.
+# 로그인은 각 home 에서 공식 /login 으로만 한다. 자격 증명은 저장소에 두지 않는다.
+alias claude-profile1='CLAUDE_CONFIG_DIR=$HOME/.local/share/ai-account-profiles/claude/profile1 claude'
+
 # eza (ls 대체)
 if command -v eza &>/dev/null; then
     alias ls='eza --icons'
