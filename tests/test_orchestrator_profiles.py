@@ -28,7 +28,8 @@ INSTALLED_CLI_CHECKER = ROOT / "tests/check_installed_orchestrator_cli_contract.
 REGISTRY_CONTRACT = "orchestrator-permission-profiles-v2"
 E2E_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/e2e"
 LIVE_ACTION_SENTINEL = E2E_FIXTURE_ROOT / "executable_fail-on-live-action"
-PROFILE2_PUBLIC_ROOT = ROOT / "dot_local/share/ai-account-profiles/claude/profile2"
+PROFILE2_PUBLIC_SOURCE = "dot_local/share/private_ai-account-profiles/private_claude/private_profile2"
+PROFILE2_PUBLIC_ROOT = ROOT / PROFILE2_PUBLIC_SOURCE
 CANONICAL_QUALITY_SKILL = ROOT / "dot_claude/skills/quality-goal"
 CANONICAL_QUALITY_REVIEWER = ROOT / "dot_claude/agents/quality-reviewer.md"
 
@@ -477,10 +478,10 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "docs/orchestrator-permission-profiles.md",
         }
         expected_files.add(
-            "dot_local/share/ai-account-profiles/claude/profile2/agents/quality-reviewer.md"
+            f"{PROFILE2_PUBLIC_SOURCE}/agents/quality-reviewer.md"
         )
         expected_files.update(
-            "dot_local/share/ai-account-profiles/claude/profile2/skills/quality-goal/"
+            f"{PROFILE2_PUBLIC_SOURCE}/skills/quality-goal/"
             + str(path.relative_to(CANONICAL_QUALITY_SKILL))
             for path in CANONICAL_QUALITY_SKILL.rglob("*")
             if is_public_quality_file(path)
@@ -587,8 +588,11 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             set(accounts),
         )
         self.assertEqual("~/.codex", accounts["codex-default"]["config_home"])
-        self.assertEqual("provider_default", accounts["claude-profile1"]["config_home_mode"])
-        self.assertNotIn("config_home", accounts["claude-profile1"])
+        self.assertEqual("explicit", accounts["claude-profile1"]["config_home_mode"])
+        self.assertEqual(
+            "~/.local/share/ai-account-profiles/claude/profile1",
+            accounts["claude-profile1"]["config_home"],
+        )
         self.assertEqual("explicit", accounts["claude-profile2"]["config_home_mode"])
         self.assertEqual(
             "~/.local/share/ai-account-profiles/claude/profile2",
@@ -2477,9 +2481,10 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "T15-ANTHROPIC-CREDENTIAL",
             "T15-RAW-IDENTITY",
             "a" * 64,
+            "~/.local/share/ai-account-profiles/claude/profile1",
             "~/.local/share/ai-account-profiles/claude/profile2",
         ):
-            with self.subTest(marker=marker[:16]):
+            with self.subTest(marker=marker):
                 self.assertTrue(all(marker not in surface for surface in surfaces))
 
     def test_no_auth_copy_or_symlink(self):
@@ -3669,6 +3674,39 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         if PROFILE2_PUBLIC_ROOT.exists():
             self.assertFalse(any(path.is_symlink() for path in PROFILE2_PUBLIC_ROOT.rglob("*")))
 
+    def test_account_home_private_source_and_profile1_denylist(self):
+        # chezmoi private_ directories render as 0700; the account-home parents must
+        # never have a public (0755) source twin that chezmoi would also manage.
+        share = ROOT / "dot_local/share"
+        self.assertEqual(
+            ["private_ai-account-profiles", "private_claude", "private_profile2"],
+            list(PROFILE2_PUBLIC_ROOT.relative_to(share).parts),
+        )
+        for parent, name in (
+            (share, "ai-account-profiles"),
+            (share / "private_ai-account-profiles", "claude"),
+            (share / "private_ai-account-profiles/private_claude", "profile2"),
+            (share / "private_ai-account-profiles/private_claude", "profile1"),
+        ):
+            with self.subTest(public_twin=f"{parent.name}/{name}"):
+                self.assertFalse((parent / name).exists())
+
+        ignores = {
+            line.strip()
+            for line in (ROOT / ".chezmoiignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith(("#", "{{"))
+        }
+        for name in (
+            "settings.json", ".claude.json", ".credentials.json", "credentials*",
+            "tokens*", "history.jsonl",
+            *(f"{directory}/**" for directory in (
+                "sessions", "projects", "backups", "file-history", "debug",
+                "todos", "plans", "plugins",
+            )),
+        ):
+            with self.subTest(profile1_ignore=name):
+                self.assertIn(f".local/share/ai-account-profiles/claude/profile1/{name}", ignores)
+
     def test_profile2_chezmoi_diff_redaction(self):
         rendered = Path(self.temporary.name) / "rendered-profile2-diff"
         source_prefix = PROFILE2_PUBLIC_ROOT.relative_to(ROOT)
@@ -3951,8 +3989,11 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             source_accounts = {
                 account["alias"]: account for account in tomllib.load(stream)["accounts"]
             }
-        self.assertEqual("provider_default", source_accounts["claude-profile1"]["config_home_mode"])
-        self.assertNotIn("config_home", source_accounts["claude-profile1"])
+        self.assertEqual("explicit", source_accounts["claude-profile1"]["config_home_mode"])
+        self.assertEqual(
+            "~/.local/share/ai-account-profiles/claude/profile1",
+            source_accounts["claude-profile1"]["config_home"],
+        )
         self.assertEqual("explicit", source_accounts["claude-profile2"]["config_home_mode"])
         self.assertEqual(
             "~/.local/share/ai-account-profiles/claude/profile2",

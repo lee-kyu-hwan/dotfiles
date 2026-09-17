@@ -140,12 +140,35 @@ home은 남기지 않는다. Backend는 이 동시 실행이나 account 전환�
 command**다. 저장소에 별도 pytest, type check, build, CI 판정 명령은 없다.
 즉 pre-commit 실행기 존재 여부를 판정 명령으로 삼지 않는다.
 
+## Claude account home 권한과 mode
+
+`claude-profile1`과 `claude-profile2`는 모두 `config_home_mode = "explicit"`이며 각각
+`~/.local/share/ai-account-profiles/claude/profile1`, `.../profile2`를
+`CLAUDE_CONFIG_DIR`로 받는다. Launcher 밖에서 직접 실행한 `claude`는 계속 `~/.claude`를
+쓴다. `provider_default` mode의 코드 지원은 남아 있지만, 그 mode는 사용자 `~/.claude`의
+`settings.json`과 `settings.local.json`을 pre-scan 대상으로 만들므로 benign allowlist 밖의
+키를 가진 풍부한 설정 home에서는 launch와 status가 `blocked_policy`(exit 4)로 끝난다.
+
+Explicit home은 launch와 status 전에 symlink가 아닌 기존 디렉터리여야 하며, 없으면
+`blocked_verifier`다. 새 home에는 로그인 상태가 없으므로 사람이 전경 pane에서 그 home으로
+로그인하고 enrollment해야 admission을 통과한다(아래 Operator recovery).
+
+Account home 상위 디렉터리는 owner-only(0700)다. Chezmoi source는
+`dot_local/share/private_ai-account-profiles/private_claude/private_profile2`처럼 세
+디렉터리에 `private_` 속성을 붙여 `~/.local/share/ai-account-profiles`, `.../claude`,
+`.../claude/profile2`를 0700으로 렌더링한다. `profile1` home은 source에 배포 자산이 없어
+chezmoi가 만들지 않는다. 기존 home은 operator가 `chmod 700`으로 맞추고, 새 머신에서
+0700으로 만드는 방법은 이슈 #131에서 다룬다.
+
 ## Profile2 public asset boundary
 
 Profile2 public allowlist는 regular non-symlink
 `agents/quality-reviewer.md`와 `skills/quality-goal/**`의 canonical byte mirror뿐이다.
+Source 위치는 `dot_local/share/private_ai-account-profiles/private_claude/private_profile2/`다.
 `settings.json`, `.claude.json`, credential/token, sessions, projects, history, backups,
 file-history, debug, todos, plans와 plugins는 private이며 배포하거나 symlink하지 않는다.
+Profile1에는 public bundle이 없고, 같은 private 항목을 `.chezmoiignore`에서 대칭으로
+제외한다.
 
 ## Operator recovery
 

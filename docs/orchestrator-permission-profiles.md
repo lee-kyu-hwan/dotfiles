@@ -49,10 +49,19 @@ The active aliases are:
 - `codex-default`: the only selectable Codex account for real paths below
   `~/code`; it uses the already-existing provider-default home.
 - `claude-profile1`: selected below `~/code/profile1`; its home mode is
-  `provider_default`, so `CLAUDE_CONFIG_DIR` remains unset.
+  `explicit`.
 - `claude-profile2`: selected below `~/code/profile2`; its home mode is
-  `explicit`, so only the reviewed private child environment receives its
-  configured neutral home.
+  `explicit`.
+
+For both explicit Claude aliases only the reviewed private child environment
+receives the configured neutral home as `CLAUDE_CONFIG_DIR`. A `claude` started
+directly outside the launcher still uses `~/.claude` and is not selected by this
+contract. The launcher keeps supporting `config_home_mode = "provider_default"`,
+but that mode makes the user's `~/.claude/settings.json` and
+`~/.claude/settings.local.json` pre-scan inputs: a home whose settings carry
+keys beyond the benign allowlist returns
+`blocked_policy` (exit 4) for launch and status. That is why `claude-profile1`
+moved to an explicit home instead of weakening the pre-scan.
 
 Claude paths outside both reviewed roots return `blocked_contract`. Adding a
 root or account requires a separately reviewed registry-source change before
@@ -183,15 +192,15 @@ plugin directories are admitted. Project, local, or account-home settings with
 policy-bearing keys are untrusted `effective sources` and are blocked before
 provider execution; only the manifest's exact benign keys are tolerated.
 
-Before deploying this change, the operator must migrate any `env`,
-`permissions`, `sandbox`, or `hooks` content out of the real
-`~/.claude/settings.json` and into the reviewed common composition layer, then
-leave the account-home file absent, empty, or limited to the exact benign
-allowlist (`$schema`, `spinnerTipsEnabled`, and `theme`). In particular, this
-machine's current account-home file contains `env`, `permissions`, and `hooks`;
-under R4.5 a provider-default `claude-profile1` launch must fail closed until
-that operator migration is completed. The launcher does not digest-exempt,
-rewrite, delete, or otherwise modify the account-home file.
+Any selected account home must leave its `settings.json` and
+`settings.local.json` absent, empty, or
+limited to the exact benign allowlist (`$schema`, `spinnerTipsEnabled`, and
+`theme`). Both active Claude aliases use explicit neutral homes, so the user's
+`~/.claude/settings.json` (which contains `env`, `permissions`, and `hooks` on
+this machine) is not a pre-scan input. A registry that points a
+`provider_default` alias at such a home fails closed under R4.5 until that
+content moves into the reviewed common composition layer. The launcher does not
+digest-exempt, rewrite, delete, or otherwise modify the account-home file.
 
 The common hooks restore workmux observability without copying account-home
 settings:
