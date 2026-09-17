@@ -143,6 +143,29 @@ read-only 로 재확인하는 절차다. 이 워크플로는 실제 login/logout
 - 실제 login/logout, account 전환, credential 읽기·복사·rename·symlink: **수행하지 않음**
 - Codex 가 주장한 `changed_files` 대비 **허위 주장 0건**
 
+### 머지 전 보완 — 작업 시점 게이트를 영구 회귀 스위트에서 분리 (2026-09-17)
+
+위 `경계 준수` 의 범위 검사는 **이 실행의 작업 시점 게이트**였고 영구 회귀 테스트가 아니다.
+그런데 그 판정이 `tests/test_orchestrator_profiles.py` 에 영구 테스트로 남아 있어, 작업 트리에
+`72ad4f2` 이후 허용 목록 밖의 추적 변경이나 미추적 파일이 있으면 계약과 무관하게 실패했다.
+머지 전 PR 브랜치 자체에서도 미추적 작업 산출물 디렉터리 때문에 이미 실패하고 있었다.
+PR 을 현재 `origin/main` 에 머지한 스크래치 검증에서도 main 에 먼저 들어온 무관한 파일 때문에 1건이
+실패했고, 이후 main 의 무관한 커밋이나 `#118` 머지에서도 계속 실패하는 구조였다.
+그래서 다음 세 단언을 영구 스위트에서 제거했다.
+
+| 제거한 단언 | 작업 시점 사실인 이유 |
+|---|---|
+| `test_changed_path_allowlist` 전체 | `BASE_REVISION`(`72ad4f2`) 이후 변경이 이 실행의 허용 목록 안에 있는지 판정했다. 미추적 파일도 포함해 작업 공간 상태에 따라 결과가 달라진다 |
+| `test_118_status_dependency_and_owned_paths` 의 뒷부분 | `72ad4f2` 이후 `#118` 소유 경로 변경이 0건인지 판정했다. `#118` 이 머지되는 순간 실패한다 |
+| `test_full_auto_compatibility` 의 앞부분 | `dot_codex/private_full_auto.config.toml` 이 커밋 `fcfb47ee` 시점과 바이트 동일한지 판정했다. 그 파일을 정당하게 고치는 순간 실패하고 전체 이력이 없는 clone 에서도 실패한다 |
+
+계약 단언은 유지했다. `test_118_status_dependency_and_owned_paths` 는 운영 문서의 `#118`
+단방향 status 의존 순서와 공유 파일 언급을, `test_full_auto_compatibility` 는 role manifest·
+skill policy·dispatcher·selector 가 full-auto 설정을 참조하지 않는다는 계약을 계속 검사한다.
+사용처가 0 이 된 모듈 상수 `BASE_REVISION`, `T15_ALLOWED_FILES`, `T15_ALLOWED_PREFIXES`,
+`INITIAL_DIRTY_PREFIXES`, `WORKFLOW_ARTIFACT_PREFIXES` 를 함께 정리했고, `test_file_ownership` 이
+쓰는 `PRESERVED_PATHS` 는 남겼다.
+
 ## Remaining advisory findings
 
 | finding | 심각도 | 영향 | 후속 |

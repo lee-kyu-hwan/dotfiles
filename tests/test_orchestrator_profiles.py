@@ -26,7 +26,6 @@ INSTRUCTION_ROOT = ROOT / "dot_config/ai-session/instructions"
 CLI_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/cli"
 INSTALLED_CLI_CHECKER = ROOT / "tests/check_installed_orchestrator_cli_contract.py"
 REGISTRY_CONTRACT = "orchestrator-permission-profiles-v2"
-BASE_REVISION = "72ad4f24e9df5919773cb877de01007f641ae163"
 E2E_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/e2e"
 LIVE_ACTION_SENTINEL = E2E_FIXTURE_ROOT / "executable_fail-on-live-action"
 PROFILE2_PUBLIC_ROOT = ROOT / "dot_local/share/ai-account-profiles/claude/profile2"
@@ -52,59 +51,6 @@ def source_artifact_path(target_path):
         return ROOT / "dot_claude" / Path(*relative.parts[1:])
     return ROOT / relative
 
-T15_ALLOWED_FILES = {
-    ".chezmoiignore",
-    "dot_config/ai-session/accounts.toml",
-    "dot_config/ai-session/roles.toml",
-    "dot_config/ai-session/skill-policies.toml",
-    "dot_claude/settings.json",
-    "dot_config/ai-session/claude/general.settings.json",
-    "dot_config/ai-session/claude/orchestrator.settings.json",
-    "dot_config/ai-session/claude/feature-orchestrator.settings.json",
-    "dot_config/ai-session/claude/global-orchestrator.settings.json",
-    "dot_config/ai-session/instructions/codex-general.md",
-    "dot_config/ai-session/instructions/codex-orchestrator.md",
-    "dot_config/ai-session/instructions/codex-feature-orchestrator.md",
-    "dot_config/ai-session/instructions/codex-global-orchestrator.md",
-    "dot_config/ai-session/instructions/claude-general.md",
-    "dot_config/ai-session/instructions/claude-orchestrator.md",
-    "dot_config/ai-session/instructions/claude-feature-orchestrator.md",
-    "dot_config/ai-session/instructions/claude-global-orchestrator.md",
-    "dot_local/bin/executable_ai-role-session",
-    "dot_local/bin/executable_ai-session",
-    "dot_local/bin/symlink_ai-codex",
-    "dot_local/bin/symlink_ai-codex-orchestrator",
-    "dot_local/bin/symlink_ai-codex-feature-orchestrator",
-    "dot_local/bin/symlink_ai-codex-global-orchestrator",
-    "dot_local/bin/symlink_ai-claude",
-    "dot_local/bin/symlink_ai-claude-orchestrator",
-    "dot_local/bin/symlink_ai-claude-feature-orchestrator",
-    "dot_local/bin/symlink_ai-claude-global-orchestrator",
-    "dot_local/libexec/executable_ai-session-verify-codex",
-    "dot_local/libexec/executable_ai-session-verify-claude",
-    "dot_local/libexec/executable_ai-session-enroll-identity",
-    "dot_local/libexec/ai_session_identity.py",
-    "tests/test_ai_session.py",
-    "tests/test_orchestrator_profiles.py",
-    "tests/check_installed_orchestrator_cli_contract.py",
-    "docs/session-account-profiles.md",
-    "docs/orchestrator-permission-profiles.md",
-    "dot_local/share/ai-account-profiles/claude/profile2/agents/quality-reviewer.md",
-}
-T15_ALLOWED_PREFIXES = (
-    "tests/fixtures/orchestrator-profiles/",
-    "docs/development/2026-09-15-103-orchestrator-permission-profiles-2/",
-    "docs/development/2026-09-16-111-profile-onboarding/",
-    "dot_local/share/ai-account-profiles/claude/profile2/skills/quality-goal/",
-)
-INITIAL_DIRTY_PREFIXES = (
-    ".claude/profile-migration/",
-    "docs/development/2026-09-15-103-orchestrator-permission-profiles/",
-)
-WORKFLOW_ARTIFACT_PREFIXES = (
-    ".claude/quality-state/",
-    "docs/development/2026-09-16-111-profile-onboarding/",
-)
 PRESERVED_PATHS = (
     "dot_claude/skills/create-worktree",
     "dot_config/workmux",
@@ -561,41 +507,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertIn("def classify_verifier_payload", selector_source)
         self.assertNotIn("def select_strict_account", dispatcher_source)
         self.assertNotIn("def classify_verifier_payload", dispatcher_source)
-
-    def test_changed_path_allowlist(self):
-        tracked = subprocess.run(
-            ["git", "diff", "--name-only", BASE_REVISION, "--"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-        changed = set(tracked) | set(untracked)
-        task_changes = {
-            path for path in changed
-            if not path.startswith(INITIAL_DIRTY_PREFIXES)
-            and not path.startswith(WORKFLOW_ARTIFACT_PREFIXES)
-        }
-        unexpected = {
-            path for path in task_changes
-            if path not in T15_ALLOWED_FILES
-            and not path.startswith(T15_ALLOWED_PREFIXES)
-        }
-        self.assertEqual(set(), unexpected)
-        for path in PRESERVED_PATHS:
-            with self.subTest(path=path):
-                preserved = subprocess.run(
-                    ["git", "diff", "--quiet", BASE_REVISION, "--", path],
-                    cwd=ROOT,
-                )
-                self.assertEqual(0, preserved.returncode)
 
     def test_path_selection_regression(self):
         registry, code_root, profile1_root, profile2_root = self.write_strict_registry(
@@ -2879,14 +2790,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
 
     def test_full_auto_compatibility(self):
         self.require_t6_capability_contract()
-        relative = "dot_codex/private_full_auto.config.toml"
-        baseline = subprocess.run(
-            ["git", "show", f"fcfb47ee2a0514518d150554ee491aae87d26d52:{relative}"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-        ).stdout
-        self.assertEqual(baseline, (ROOT / relative).read_bytes())
         for path in (ROLE_MANIFEST, SKILL_POLICY_MANIFEST, ROLE_DISPATCHER, ACCOUNT_SELECTOR):
             self.assertNotIn(
                 "private_full_auto.config.toml",
@@ -3913,29 +3816,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "docs/session-account-profiles.md",
         ):
             self.assertIn(shared, permission_guide)
-
-        tracked = subprocess.run(
-            ["git", "diff", "--name-only", BASE_REVISION, "--"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-        owned_prefixes = (
-            "dot_agents/skills/create-worktree/",
-            "dot_claude/skills/create-worktree/",
-            "docs/development/2026-09-16-118-profile-aware-create-worktree/",
-        )
-        self.assertEqual(
-            [], [path for path in (*tracked, *untracked) if path.startswith(owned_prefixes)]
-        )
 
     def test_registry_exception_boundaries(self):
         selector = ACCOUNT_SELECTOR.read_text(encoding="utf-8")
