@@ -58,6 +58,7 @@ tests/**
 .local/share/ai-account-profiles/claude/profile1/todos/**
 .local/share/ai-account-profiles/claude/profile1/plans/**
 .local/share/ai-account-profiles/claude/profile1/plugins/**
+.local/share/ai-account-profiles/claude/profile1/.shared-mcp.json
 
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
