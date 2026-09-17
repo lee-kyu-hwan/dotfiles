@@ -1,4 +1,4 @@
-"""Shared, non-disclosing identity canonicalization for ai-session helpers."""
+"""Canonical, versioned identity projection and owner-only digest handling."""
 
 from __future__ import annotations
 
@@ -9,63 +9,69 @@ import os
 from pathlib import Path
 import re
 import stat
+from collections.abc import Iterable, Mapping
 import unicodedata
-from typing import Mapping
+import uuid
 
 
 ASCII_EDGE_WHITESPACE = " \t\n\r\v\f"
-DIGEST_LINE = re.compile(rb"[0-9a-f]{64}\n\Z")
+V1_DIGEST_LINE = re.compile(rb"[0-9a-f]{64}\n\Z")
+V2_DIGEST_LINE = re.compile(rb"v2:[0-9a-f]{64}\n\Z")
 
 
-def _canonical_string(value: object, field: str, *, lowercase: bool = False) -> str:
+def _canonical_string(value: object, field: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{field} must be a string")
     normalized = unicodedata.normalize("NFC", value.strip(ASCII_EDGE_WHITESPACE))
     if not normalized or any(unicodedata.category(character) == "Cc" for character in normalized):
         raise ValueError(f"{field} must be a non-empty value without control characters")
-    return normalized.lower() if lowercase else normalized
+    return normalized
 
 
-def canonical_identity(raw: Mapping[str, object]) -> dict[str, object]:
-    """Project official stable fields into the versioned canonical identity."""
-    if not isinstance(raw, Mapping):
-        raise ValueError("identity must be an object")
-    provider = _canonical_string(raw.get("provider"), "provider", lowercase=True)
-    auth_kind = _canonical_string(raw.get("auth_kind"), "auth_kind", lowercase=True)
-    if provider not in {"codex", "claude"}:
-        raise ValueError("provider is unsupported")
-    if auth_kind not in {"consumer", "organization", "api_payg"}:
-        raise ValueError("auth_kind is unsupported")
-    canonical: dict[str, object] = {
-        "schema_version": 1,
-        "provider": provider,
-        "auth_kind": auth_kind,
-        "subject_id": _canonical_string(raw.get("subject_id"), "subject_id"),
+def canonical_identity(
+    raw: Mapping[str, object], identity_contract: str
+) -> dict[str, object]:
+    """Project the reviewed Claude surface into its schema-2 public contract."""
+    if not isinstance(raw, Mapping) or identity_contract != "claude_auth_status_v1":
+        raise ValueError("identity contract is unsupported")
+    auth_method = _canonical_string(raw.get("authMethod"), "authMethod")
+    subscription_type = _canonical_string(
+        raw.get("subscriptionType"), "subscriptionType"
+    )
+    raw_org_id = _canonical_string(raw.get("orgId"), "orgId")
+    try:
+        org_id = str(uuid.UUID(raw_org_id))
+    except (ValueError, AttributeError) as error:
+        raise ValueError("orgId must be a UUID") from error
+    return {
+        "schema_version": 2,
+        "identity_contract": identity_contract,
+        "provider": "claude",
+        "auth_method": auth_method,
+        "org_id": org_id,
+        "subscription_type": subscription_type,
     }
-    if auth_kind == "organization":
-        canonical["tenant_id"] = _canonical_string(raw.get("tenant_id"), "tenant_id")
-    return canonical
 
 
-def canonical_bytes(raw: Mapping[str, object]) -> bytes:
+def canonical_bytes(raw: Mapping[str, object], identity_contract: str) -> bytes:
     return json.dumps(
-        canonical_identity(raw),
+        canonical_identity(raw, identity_contract),
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
 
 
-def identity_digest(raw: Mapping[str, object]) -> str:
-    return hashlib.sha256(canonical_bytes(raw)).hexdigest()
+def identity_digest(raw: Mapping[str, object], identity_contract: str) -> str:
+    return hashlib.sha256(canonical_bytes(raw, identity_contract)).hexdigest()
 
 
-def digest_line(raw: Mapping[str, object]) -> bytes:
-    return identity_digest(raw).encode("ascii") + b"\n"
+def digest_line(raw: Mapping[str, object], identity_contract: str) -> bytes:
+    return b"v2:" + identity_digest(raw, identity_contract).encode("ascii") + b"\n"
 
 
-def read_digest_file(path: Path) -> bytes:
-    """Read an owner-only enrolled digest without following a symlink."""
+def read_digest_file(path: Path) -> tuple[int, bytes]:
+    """Read a v1 or v2 owner-only digest without following symlinks."""
     directory = path.parent.lstat()
     if (
         stat.S_ISLNK(directory.st_mode)
@@ -85,19 +91,44 @@ def read_digest_file(path: Path) -> bytes:
         if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise ValueError("identity digest owner or mode is invalid")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            data = stream.read(66)
+            data = stream.read(69)
     finally:
         os.close(descriptor)
-    if not DIGEST_LINE.fullmatch(data):
-        raise ValueError("identity digest content is invalid")
-    return data
+    if V1_DIGEST_LINE.fullmatch(data):
+        return 1, data
+    if V2_DIGEST_LINE.fullmatch(data):
+        return 2, data
+    raise ValueError("identity digest content is invalid")
 
 
-def compare_enrolled_identity(raw: Mapping[str, object], digest_path: Path) -> str:
-    """Return only a public verifier state; never return either digest."""
+def compare_enrolled_identity(
+    raw: Mapping[str, object], digest_path: Path, identity_contract: str
+) -> str:
+    """Return a public state without exposing canonical bytes or either digest."""
     try:
-        enrolled = read_digest_file(digest_path)
-        current = digest_line(raw)
+        if not digest_path.exists() and not digest_path.is_symlink():
+            return "not_enrolled"
+        version, enrolled = read_digest_file(digest_path)
+        if version == 1:
+            return "stale_enrollment"
+        current = digest_line(raw, identity_contract)
     except (OSError, ValueError):
         return "unknown"
     return "matched" if hmac.compare_digest(enrolled, current) else "identity_drift"
+
+
+def find_duplicate_enrollment(current: bytes, other_paths: Iterable[Path]) -> bool:
+    """Compare one v2 digest with reviewed other-profile paths without exposing it."""
+    if V2_DIGEST_LINE.fullmatch(current) is None:
+        raise ValueError("current identity digest content is invalid")
+    for path in other_paths:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        version, enrolled = read_digest_file(path)
+        if version == 1:
+            continue
+        if hmac.compare_digest(enrolled, current):
+            return True
+    return False

@@ -48,6 +48,8 @@ STRICT_ACCOUNT_FIELDS = {
     "config_home_mode",
     "allowed_scopes",
     "identity_enrollment_policy",
+    "identity_contract",
+    "usage_contract",
     "enabled",
     "max_cost_usd",
 }
@@ -60,7 +62,12 @@ STORED_BINDING_FIELDS = {
     "binding_generation",
 }
 RESERVED_SELECTABLE_ALIASES = {"default", "dotfiles", "work", "personal"}
-ROLE_CONTRACT_ID = "orchestrator-permission-profiles-v1"
+ROLE_CONTRACT_ID = "orchestrator-permission-profiles-v2"
+IDENTITY_CONTRACTS = {
+    "claude": "claude_auth_status_v1",
+    "codex": "unavailable",
+}
+USAGE_CONTRACTS = {"none", "provider_status"}
 WRITE_NEEDS = {"none", "git"}
 PERMISSION_ENVIRONMENT_VARIABLES = (
     "AI_SESSION_GIT_COMMON_DIR_RELATION",
@@ -87,6 +94,13 @@ CREDENTIAL_ENVIRONMENT_VARIABLES = (
     "ANTHROPIC_FOUNDRY_API_KEY",
     "AI_COST_LIMIT_USD",
 )
+VERIFIER_ONLY_ENVIRONMENT_VARIABLES = (
+    "AI_AUTH_KIND",
+    "AI_IDENTITY_CONTRACT",
+    "AI_USAGE_CONTRACT",
+    "AI_IDENTITY_DIGEST_FILE",
+    "AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES",
+)
 BENIGN_CLAUDE_SETTING_TYPES = {
     "$schema": str,
     "spinnerTipsEnabled": bool,
@@ -105,6 +119,8 @@ class VerificationError(Exception):
         if status not in {
             "not_logged_in",
             "identity_drift",
+            "identity_unverifiable",
+            "duplicate_mapping",
             "blocked_verifier",
             "usage_unknown",
             "blocked_usage",
@@ -124,6 +140,8 @@ class Account:
     allowed_scopes: tuple[str, ...]
     enabled: bool
     max_cost_usd: float | None
+    identity_contract: str
+    usage_contract: str
 
 
 @dataclass(frozen=True)
@@ -162,6 +180,8 @@ class Binding:
     selection_reason: str
     config_home: Path | None
     auth_kind: str
+    identity_contract: str
+    usage_contract: str
     binding_generation: int = 1
 
     def public_dict(self) -> dict[str, str | int]:
@@ -175,6 +195,18 @@ class Binding:
             "selection_reason": self.selection_reason,
             "binding_generation": self.binding_generation,
         }
+
+
+@dataclass(frozen=True)
+class AdmissionDecision:
+    login_status: str
+    identity_status: str
+    usage_status: str
+    cost_limit_status: str
+    public_status: str
+    exit_code: int
+    admitted: bool
+    failure_reason: str | None = None
 
 
 def require_alias(value: Any, field: str) -> str:
@@ -294,9 +326,9 @@ def parse_stored_bindings(raw: Any, field: str, accounts: dict[str, Account]) ->
 
 def load_strict_registry(raw: dict[str, Any]) -> Registry:
     reject_unknown_fields(raw, STRICT_REGISTRY_FIELDS, "strict registry")
-    if raw.get("schema_version") != 1:
-        raise ContractError("blocked_contract: account registry schema_version은 1이어야 합니다")
-    if raw.get("contract_id") != "orchestrator-permission-profiles-v1":
+    if raw.get("schema_version") != 2:
+        raise ContractError("blocked_contract: account registry schema_version은 2여야 합니다")
+    if raw.get("contract_id") != ROLE_CONTRACT_ID:
         raise ContractError("blocked_contract: account registry contract_id가 일치하지 않습니다")
 
     raw_accounts = raw.get("accounts")
@@ -322,6 +354,18 @@ def load_strict_registry(raw: dict[str, Any]) -> Registry:
             raise ContractError(f"blocked_contract: 지원하지 않는 auth_kind입니다: {auth_kind}")
         if raw_account.get("identity_enrollment_policy") != "explicit_only":
             raise ContractError(f"blocked_contract: {field}.identity_enrollment_policy가 유효하지 않습니다")
+        identity_contract = require_string(
+            raw_account.get("identity_contract"), f"{field}.identity_contract"
+        )
+        if identity_contract != IDENTITY_CONTRACTS[provider]:
+            raise ContractError(
+                f"blocked_contract: {field}.identity_contract가 provider와 일치하지 않습니다"
+            )
+        usage_contract = require_string(
+            raw_account.get("usage_contract"), f"{field}.usage_contract"
+        )
+        if usage_contract not in USAGE_CONTRACTS:
+            raise ContractError(f"blocked_contract: {field}.usage_contract가 유효하지 않습니다")
 
         raw_scopes = raw_account.get("allowed_scopes")
         if not isinstance(raw_scopes, list) or not raw_scopes:
@@ -380,6 +424,8 @@ def load_strict_registry(raw: dict[str, Any]) -> Registry:
             allowed_scopes=scopes,
             enabled=enabled,
             max_cost_usd=max_cost,
+            identity_contract=identity_contract,
+            usage_contract=usage_contract,
         )
 
     raw_mappings = raw.get("workspace_directory_mappings")
@@ -510,6 +556,8 @@ def load_registry(path: Path) -> Registry:
             allowed_scopes=scopes,
             enabled=enabled,
             max_cost_usd=max_cost,
+            identity_contract="legacy_v1",
+            usage_contract="provider_status",
         )
 
     raw_defaults = raw.get("defaults", {})
@@ -727,6 +775,8 @@ def select_legacy_account(
         selection_reason=reason,
         config_home=account.config_home,
         auth_kind=account.auth_kind,
+        identity_contract=account.identity_contract,
+        usage_contract=account.usage_contract,
     )
 
 
@@ -864,6 +914,8 @@ def select_strict_account(registry: Registry, context: SelectionContext) -> Bind
         selection_reason=reason,
         config_home=account.config_home,
         auth_kind=account.auth_kind,
+        identity_contract=account.identity_contract,
+        usage_contract=account.usage_contract,
         binding_generation=generation,
     )
 
@@ -895,7 +947,11 @@ def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
 
 def child_environment(binding: Binding, cost_limit_usd: float | None) -> dict[str, str]:
     environment = os.environ.copy()
-    for variable in (*CREDENTIAL_ENVIRONMENT_VARIABLES, *PERMISSION_ENVIRONMENT_VARIABLES):
+    for variable in (
+        *CREDENTIAL_ENVIRONMENT_VARIABLES,
+        *PERMISSION_ENVIRONMENT_VARIABLES,
+        *VERIFIER_ONLY_ENVIRONMENT_VARIABLES,
+    ):
         environment.pop(variable, None)
     credential_variable = "CODEX_HOME" if binding.provider == "codex" else "CLAUDE_CONFIG_DIR"
     if binding.config_home is not None:
@@ -1129,11 +1185,46 @@ def apply_permission_boundary(
     )
 
 
+def active_claude_identity_digest_paths(
+    registry: Registry, binding: Binding
+) -> tuple[Path, tuple[Path, ...]]:
+    raw_root = (
+        os.environ.get("AI_SESSION_IDENTITY_ROOT")
+        if os.environ.get("AI_SESSION_SYNTHETIC_TEST") == "1"
+        else None
+    )
+    root = (
+        Path(raw_root)
+        if raw_root is not None
+        else Path.home() / ".local/share/ai-account-profiles/identities"
+    )
+    if not root.is_absolute():
+        raise VerificationError("blocked_verifier", "identity root는 절대경로여야 합니다")
+    provider_root = root / "claude"
+    selected = provider_root / f"{binding.account_profile}.sha256"
+    other_paths = tuple(
+        sorted(
+            (
+                provider_root / f"{account.name}.sha256"
+                for account in registry.accounts.values()
+                if account.name != binding.account_profile
+                and account.enabled
+                and account.provider == "claude"
+                and account.identity_contract == "claude_auth_status_v1"
+            ),
+            key=str,
+        )
+    )
+    return selected, other_paths
+
+
 def verify_admission(
     verifier: Path,
+    registry: Registry,
     binding: Binding,
     environment: dict[str, str],
-) -> str:
+    accept_usage_unknown: bool,
+) -> AdmissionDecision:
     if not verifier.is_absolute() or not verifier.is_file() or not os.access(verifier, os.X_OK):
         raise VerificationError("blocked_verifier", "verifier는 실행 가능한 절대경로 파일이어야 합니다")
     if verifier.is_symlink():
@@ -1147,12 +1238,21 @@ def verify_admission(
         )
     verifier_environment = environment.copy()
     verifier_environment["AI_AUTH_KIND"] = binding.auth_kind
-    verifier_environment["AI_IDENTITY_DIGEST_FILE"] = str(
-        Path.home()
-        / ".local/share/ai-account-profiles/identities"
-        / binding.provider
-        / f"{binding.account_profile}.sha256"
-    )
+    verifier_environment["AI_IDENTITY_CONTRACT"] = binding.identity_contract
+    verifier_environment["AI_USAGE_CONTRACT"] = binding.usage_contract
+    if binding.identity_contract == "claude_auth_status_v1":
+        selected_digest, other_digests = active_claude_identity_digest_paths(
+            registry, binding
+        )
+        verifier_environment["AI_IDENTITY_DIGEST_FILE"] = str(selected_digest)
+        verifier_environment["AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES"] = json.dumps(
+            [str(path) for path in other_digests], separators=(",", ":")
+        )
+    else:
+        verifier_environment.pop("AI_IDENTITY_DIGEST_FILE", None)
+        verifier_environment.pop(
+            "AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES", None
+        )
     try:
         result = subprocess.run(
             [str(verifier)],
@@ -1178,10 +1278,14 @@ def verify_admission(
         ) from error
     if not isinstance(payload, dict):
         raise VerificationError("blocked_verifier", "verifier 결과는 JSON object여야 합니다")
-    return classify_verifier_payload(payload, binding)
+    return classify_verifier_payload(payload, binding, accept_usage_unknown)
 
 
-def classify_verifier_payload(payload: dict[str, object], binding: Binding) -> str:
+def classify_verifier_payload(
+    payload: dict[str, object],
+    binding: Binding,
+    accept_usage_unknown: bool = False,
+) -> AdmissionDecision:
     required = {
         "provider",
         "account_profile",
@@ -1200,41 +1304,155 @@ def classify_verifier_payload(payload: dict[str, object], binding: Binding) -> s
             "verifier 결과가 선택된 provider/account profile binding과 일치하지 않습니다",
         )
     login_status = payload["login_status"]
-    if login_status == "not_logged_in":
-        raise VerificationError("not_logged_in", "선택한 account profile은 미로그인 상태입니다")
     identity_status = payload["identity_status"]
-    if identity_status == "identity_drift":
-        raise VerificationError(
-            "identity_drift", "선택한 account profile에서 identity drift가 감지되었습니다"
-        )
     usage_status = payload["usage_status"]
     cost_limit_status = payload["cost_limit_status"]
-    if login_status != "logged_in":
-        raise VerificationError(
-            "blocked_verifier", "verifier login status를 확인할 수 없습니다"
-        )
-    if identity_status != "matched":
-        raise VerificationError(
-            "blocked_verifier", "verifier identity 상태를 확인할 수 없습니다"
-        )
+    if login_status not in {"logged_in", "not_logged_in", "unknown"}:
+        raise VerificationError("blocked_verifier", "verifier login status를 확인할 수 없습니다")
+    if identity_status not in {
+        "matched",
+        "not_enrolled",
+        "stale_enrollment",
+        "identity_drift",
+        "identity_unverifiable",
+        "duplicate_mapping",
+        "unavailable",
+        "unknown",
+    }:
+        raise VerificationError("blocked_verifier", "verifier identity 상태를 확인할 수 없습니다")
     if usage_status not in {"sufficient", "usage_unknown", "blocked_usage"}:
-        raise VerificationError(
-            "blocked_verifier", "verifier usage status를 확인할 수 없습니다"
+        raise VerificationError("blocked_verifier", "verifier usage status를 확인할 수 없습니다")
+    if cost_limit_status not in {"not_applicable", "enforced", "unknown"}:
+        raise VerificationError("blocked_verifier", "verifier 비용 상태를 확인할 수 없습니다")
+
+    def decision(
+        public_status: str,
+        admitted: bool = False,
+        failure_reason: str | None = None,
+    ) -> AdmissionDecision:
+        return AdmissionDecision(
+            login_status=login_status,
+            identity_status=identity_status,
+            usage_status=usage_status,
+            cost_limit_status=cost_limit_status,
+            public_status=public_status,
+            exit_code=0 if admitted else 3,
+            admitted=admitted,
+            failure_reason=failure_reason,
         )
+
+    if login_status == "not_logged_in":
+        return decision("login_required")
+    if login_status != "logged_in":
+        return decision("blocked_verifier", failure_reason="login_contract")
+    if identity_status == "identity_drift":
+        return decision("identity_drift")
+    if identity_status in {"not_enrolled", "stale_enrollment"}:
+        return decision("enrollment_required")
+    if identity_status == "identity_unverifiable":
+        return decision("identity_unverifiable")
+    if identity_status == "duplicate_mapping":
+        return decision("duplicate_mapping")
+    if binding.identity_contract == "unavailable":
+        identity_admitted = binding.provider == "codex" and identity_status == "unavailable"
+    elif binding.identity_contract in {"claude_auth_status_v1", "legacy_v1"}:
+        identity_admitted = identity_status == "matched"
+    else:
+        identity_admitted = False
+    if not identity_admitted:
+        return decision("blocked_verifier", failure_reason="identity_contract")
     if binding.auth_kind == "api_payg":
         if cost_limit_status != "enforced":
-            raise VerificationError(
-                "blocked_verifier", "PAYG 비용 한도가 실제로 강제되었는지 확인할 수 없습니다"
-            )
+            return decision("blocked_verifier", failure_reason="cost_enforcement")
     elif cost_limit_status != "not_applicable":
-        raise VerificationError(
-            "blocked_verifier", "consumer/organization profile의 비용 한도 상태가 유효하지 않습니다"
-        )
-    if usage_status == "usage_unknown":
-        raise VerificationError("usage_unknown", "usage_unknown: 사용량 admission을 확인할 수 없습니다")
+        return decision("blocked_verifier", failure_reason="cost_contract")
     if usage_status == "blocked_usage":
-        raise VerificationError("blocked_usage", "blocked_usage: 배정 계정의 사용량이 부족합니다")
-    return usage_status
+        return decision("blocked_usage")
+    if usage_status == "usage_unknown":
+        if binding.usage_contract == "none" and accept_usage_unknown:
+            return decision("ready", admitted=True)
+        return decision("usage_unknown")
+    return decision("ready", admitted=True)
+
+
+def decision_to_launch_error(decision: AdmissionDecision) -> VerificationError:
+    if decision.public_status == "blocked_verifier":
+        reasons = {
+            "login_contract": "verifier login 상태 계약이 일치하지 않습니다",
+            "identity_contract": "verifier identity 상태 계약이 일치하지 않습니다",
+            "cost_enforcement": "비용 한도가 실제로 강제되었는지 확인할 수 없습니다",
+            "cost_contract": "verifier 비용 상태 계약이 일치하지 않습니다",
+        }
+        if decision.failure_reason in reasons:
+            return VerificationError("blocked_verifier", reasons[decision.failure_reason])
+    mapping = {
+        "login_required": ("not_logged_in", "선택한 account profile은 미로그인 상태입니다"),
+        "enrollment_required": ("blocked_verifier", "identity enrollment가 필요합니다"),
+        "blocked_verifier": ("blocked_verifier", "verifier 상태를 확인할 수 없습니다"),
+        "identity_drift": ("identity_drift", "선택한 account profile에서 identity drift가 감지되었습니다"),
+        "identity_unverifiable": (
+            "identity_unverifiable",
+            "선택한 account profile의 identity를 검증할 수 없습니다",
+        ),
+        "duplicate_mapping": (
+            "duplicate_mapping",
+            "선택한 account profile의 identity mapping이 중복됩니다",
+        ),
+        "usage_unknown": ("usage_unknown", "usage_unknown: 사용량 admission을 확인할 수 없습니다"),
+        "blocked_usage": ("blocked_usage", "blocked_usage: 배정 계정의 사용량이 부족합니다"),
+    }
+    try:
+        status, message = mapping[decision.public_status]
+    except KeyError as error:
+        raise VerificationError("blocked_verifier", "admission decision이 유효하지 않습니다") from error
+    return VerificationError(status, message)
+
+
+def status_commands(decision: AdmissionDecision, binding: Binding) -> list[dict[str, str]]:
+    command_id = {
+        "login_required": "provider_login_foreground",
+        "enrollment_required": "identity_enroll_foreground",
+        "identity_drift": "inspect_identity_foreground",
+        "usage_unknown": (
+            "retry_with_usage_consent" if binding.usage_contract == "none" else None
+        ),
+    }.get(decision.public_status)
+    if command_id is None:
+        return []
+    return [{
+        "command_id": command_id,
+        "provider": binding.provider,
+        "account_profile": binding.account_profile,
+    }]
+
+
+def status_record(
+    arguments: argparse.Namespace,
+    binding: Binding | None,
+    status: str,
+    *,
+    login_status: str = "unknown",
+    identity_status: str = "unknown",
+    usage_status: str = "usage_unknown",
+    cost_limit_status: str = "unknown",
+    commands: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "event": "profile_status",
+        "provider": arguments.provider,
+        "account_profile": binding.account_profile if binding else None,
+        "status": status,
+        "login_status": login_status,
+        "identity_status": identity_status,
+        "usage_status": usage_status,
+        "cost_limit_status": cost_limit_status,
+        "commands": [] if commands is None else commands,
+    }
+
+
+def write_status_record(record: dict[str, object]) -> None:
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
 
 
 def write_public_record(record: dict[str, object]) -> None:
@@ -1297,14 +1515,22 @@ def launch(
     )
     if binding.provider == "claude":
         prescan_selected_claude_home(environment)
-    usage_status = verify_admission(arguments.verifier, binding, environment)
-    environment["AI_USAGE_ADMISSION_STATUS"] = usage_status
+    decision = verify_admission(
+        arguments.verifier,
+        registry,
+        binding,
+        environment,
+        arguments.accept_usage_unknown,
+    )
+    if not decision.admitted:
+        raise decision_to_launch_error(decision)
+    environment["AI_USAGE_ADMISSION_STATUS"] = decision.usage_status
     if strict_records:
         write_public_record(
             {
                 **binding.public_dict(),
                 "event": "account_binding",
-                "usage_admission_status": usage_status,
+                "usage_admission_status": decision.usage_status,
             }
         )
     else:
@@ -1315,7 +1541,7 @@ def launch(
             f"account_profile={binding.account_profile} "
             f"config_home={binding.config_home} "
             f"selection_source={binding.selection_source} "
-            f"usage_admission_status={usage_status}",
+            f"usage_admission_status={decision.usage_status}",
             file=sys.stderr,
             flush=True,
         )
@@ -1324,6 +1550,37 @@ def launch(
     except OSError as error:
         raise ContractError(f"launcher process를 시작할 수 없습니다: {command[0]}") from error
     return 0
+
+
+def status(arguments: argparse.Namespace, registry: Registry, binding: Binding) -> int:
+    environment = child_environment(binding, arguments.cost_limit_usd)
+    try:
+        if binding.provider == "claude":
+            prescan_selected_claude_home(environment)
+        decision = verify_admission(
+            arguments.verifier,
+            registry,
+            binding,
+            environment,
+            arguments.accept_usage_unknown,
+        )
+    except (ContractError, VerificationError) as error:
+        public_status, exit_code = error_status(error)
+        write_status_record(status_record(arguments, binding, public_status))
+        return exit_code
+    write_status_record(
+        status_record(
+            arguments,
+            binding,
+            decision.public_status,
+            login_status=decision.login_status,
+            identity_status=decision.identity_status,
+            usage_status=decision.usage_status,
+            cost_limit_status=decision.cost_limit_status,
+            commands=status_commands(decision, binding),
+        )
+    )
+    return decision.exit_code
 
 
 def context_from_arguments(arguments: argparse.Namespace, registry: Registry) -> SelectionContext:
@@ -1877,7 +2134,12 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--role-contract")
     launch_parser.add_argument("--write-need", choices=sorted(WRITE_NEEDS), default="none")
     launch_parser.add_argument("--verifier", type=Path, required=True)
+    launch_parser.add_argument("--accept-usage-unknown", action="store_true")
     launch_parser.add_argument("program", nargs=argparse.REMAINDER)
+    status_parser = subparsers.add_parser("status", help="account admission 상태를 읽기 전용으로 확인")
+    add_selection_arguments(status_parser)
+    status_parser.add_argument("--verifier", type=Path, required=True)
+    status_parser.add_argument("--accept-usage-unknown", action="store_true")
     move_parser = subparsers.add_parser(
         "move-rebind",
         help="shutdown과 handoff 뒤 temp-safe linked worktree를 atomic binding으로 이동",
@@ -1923,14 +2185,16 @@ def run(arguments: argparse.Namespace) -> int:
     if arguments.command == "select":
         print(json.dumps(binding.public_dict(), ensure_ascii=False, sort_keys=True))
         return 0
+    if arguments.command == "status":
+        return status(arguments, registry, binding)
     strict_records = registry.strict or os.environ.get("AI_ROLE_ADMITTED") == "1"
     try:
         return launch(arguments, registry, binding, strict_records=strict_records)
     except (ContractError, VerificationError) as error:
         if not strict_records:
             raise
-        status, exit_code = error_status(error)
-        write_public_record(failure_record(arguments, binding, status, exit_code))
+        public_status, exit_code = error_status(error)
+        write_public_record(failure_record(arguments, binding, public_status, exit_code))
         return exit_code
 
 
@@ -1942,6 +2206,9 @@ def main(argv: list[str] | None = None) -> int:
         return run(arguments)
     except (ContractError, VerificationError) as error:
         status, exit_code = error_status(error)
+        if arguments is not None and arguments.command == "status":
+            write_status_record(status_record(arguments, None, status))
+            return exit_code
         if (
             arguments is not None
             and arguments.command == "launch"

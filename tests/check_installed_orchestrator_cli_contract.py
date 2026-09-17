@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ROLE_MANIFEST = ROOT / "dot_config/ai-session/roles.toml"
 FROZEN_EVIDENCE = (
     ROOT
-    / "docs/development/2026-09-15-103-orchestrator-permission-profiles"
-    / "installed-cli-contract-evidence.md"
+    / "docs/development/2026-09-15-103-orchestrator-permission-profiles-2"
+    / "authoritative-inputs.md"
 )
 EXPECTED_VERSIONS = {"codex": "0.154.0", "claude": "2.1.272"}
 EXPECTED_RANGES = {

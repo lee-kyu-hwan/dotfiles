@@ -81,11 +81,14 @@ provider, or account.
 
 The reviewed Claude adapter has an official authentication-status contract but
 no reviewed machine-readable usage/quota contract. A logged-in fixture therefore
-produces `usage_unknown`, which blocks admission. The operator must not infer
-usage from login, scrape a TUI, call a private endpoint, relay raw output, or
-try another consumer account. Relogin is not presumed to fix this status. Keep
-the launch blocked until a separately reviewed official usage adapter is added,
-then retry in a new process.
+produces `usage_unknown`, which is fail closed by default. Admission opens only
+when the selected account declares `usage_contract = "none"` and that exact
+`status` or `launch` invocation includes `--accept-usage-unknown`. Either
+condition alone remains blocked. The admitted decision keeps `usage_unknown` in
+the verifier payload, status JSON, provider environment, and public records.
+The operator must not infer usage from login, scrape a TUI, call a private
+endpoint, relay raw output, or try another consumer account. This is a **no
+fallback** rule.
 
 ## Permission and common-dir boundary
 
@@ -162,13 +165,14 @@ redacted result. Codex consumes only reviewed official fields. Claude consumes
 official authentication status and does not invent usage evidence. No verifier
 may launch the provider or try a fallback account.
 
-Identity is a stable canonical projection: normalized provider/auth kind,
-case-preserved stable subject ID, and stable organization tenant ID when
-applicable. It excludes email, display name, token, path, and usage. The shared
-canonicalizer rejects unstable, empty, control-bearing, or malformed identity.
-Enrollment is explicit and host-local; launch-time verification never creates
-or refreshes enrollment state. Public records and diagnostics contain neither
-raw identity nor its digest.
+Claude identity is the schema 2 `claude_auth_status_v1` canonical projection of
+official `authMethod`, UUID `orgId`, and `subscriptionType`. It excludes email,
+display name, token, path, and usage. Enrollment is explicit and host-local as
+`v2:<64 lowercase hex>` plus LF; legacy v1 input is `stale_enrollment` and is
+never rewritten automatically. Codex declares `identity_contract =
+"unavailable"`, does not read a digest, and preserves `unavailable` rather than
+promoting it to matched. Public records and diagnostics contain neither raw
+identity nor its digest.
 
 ## Trusted settings, effective sources, and workmux
 
@@ -207,7 +211,8 @@ capability, including in reviewer or standby mode.
 ## Mixed deployment
 
 The role launcher and strict registry share the contract token
-`orchestrator-permission-profiles-v1`. An old binary with a new registry and a
+`orchestrator-permission-profiles-v2`. The registry header is `schema_version = 2`
+and `contract_id = "orchestrator-permission-profiles-v2"`. An old binary with a new registry and a
 new role launcher with an old registry both fail as `blocked_contract` before
 verifier or provider execution. The reviewed launcher, registry, settings,
 instructions, and policies are deployed as one compatible set and apply only to
@@ -302,7 +307,7 @@ changing model, provider, account, root, role, or policy.
 | `not_logged_in` | Use the provider's official operator login path outside this automated workflow, then run fresh admission without account fallback. |
 | `identity_drift` | Verify the intended official stable identity and perform separately authorized explicit enrollment only when appropriate; do not overwrite evidence automatically. |
 | `blocked_verifier` | Repair the reviewed adapter, strict result, enrollment-file type/mode/owner, or stable identity contract without exposing raw output. |
-| `usage_unknown` | Keep Claude blocked until a separately reviewed official machine-readable usage adapter exists; do not infer, scrape, relogin as a presumed fix, or fall back. |
+| `usage_unknown` | Keep the default block, or make the current invocation's explicit dual-consent decision when the account declares `none`; never infer, scrape, or fall back. |
 | `blocked_usage` | Resolve capacity for the already bound account or wait, then start a new session; do not rotate or fall back to another consumer account. |
 | Provider model rejection | Preserve the provider exit, establish the pinned model's availability through an approved operator path, and retry without silent substitution. |
 
@@ -311,6 +316,96 @@ publishes a partial generation. A nonzero legacy process/binding reference or
 an old-path reference stops migration. Public records remain strict one-line
 `account_binding`, `role_startup`, or `launch_failure` JSON without credentials,
 raw verifier output, identity values, digests, or private home paths.
+
+## Read-only account status facade
+
+`ai-session status` reuses selection, Claude home pre-scan, verifier execution,
+and the immutable admission decision without entering provider exec or any
+write path. It emits one compact `profile_status` JSON line with exact fields
+`schema_version`, `event`, `provider`, `account_profile`, `status`,
+`login_status`, `identity_status`, `usage_status`, `cost_limit_status`, and
+`commands`. A selection-time failure uses a null account alias.
+
+Ready exits 0. Recognized non-ready admission states exit 3,
+`blocked_contract` exits 2, and `blocked_binding|blocked_policy` exit 4. Command
+descriptors have only `command_id`, `provider`, and `account_profile`.
+
+| Public status | Command ID |
+| --- | --- |
+| `login_required` | `provider_login_foreground` |
+| `enrollment_required` | `identity_enroll_foreground` |
+| `identity_drift` | `inspect_identity_foreground` |
+| `usage_unknown` with account contract `none` | `retry_with_usage_consent` |
+| `ready`, `blocked_verifier`, `identity_unverifiable`, `duplicate_mapping`, `blocked_usage`, `blocked_contract`, `blocked_binding`, `blocked_policy` | none |
+
+The backend returns instructions for **human-only foreground recovery** and
+does not perform login, enrollment, browser interaction, retries, or account
+switching.
+
+## Status and launch failure mapping
+
+Status preserves capability detail while launch keeps its established public
+failure vocabulary. The mapping is one-to-one at the shared admission decision.
+
+| Status facade `status` | Launch failure record `status` | Exit | Behavior |
+| --- | --- | ---: | --- |
+| `ready` | none | 0 | Status returns JSON; launch alone proceeds to provider exec. |
+| `login_required` | `not_logged_in` | 3 | Foreground login may be considered by the operator. |
+| `enrollment_required` | `blocked_verifier` | 3 | Missing or stale enrollment stays detailed only in status. |
+| `blocked_verifier` | `blocked_verifier` | 3 | Fail closed. |
+| `identity_drift` | `identity_drift` | 3 | Preserve drift. |
+| `identity_unverifiable` | `identity_unverifiable` | 3 | Required official identity fields cannot be verified; commands stay empty. |
+| `duplicate_mapping` | `duplicate_mapping` | 3 | Another active Claude profile has the same organization-context digest; commands stay empty. |
+| `usage_unknown` | `usage_unknown` | 3 | Applies when exact dual consent is absent. |
+| `blocked_usage` | `blocked_usage` | 3 | Fail closed. |
+| `blocked_contract` | `blocked_contract` | 2 | Registry or compatible-set failure. |
+| `blocked_binding` | `blocked_binding` | 4 | Binding failure. |
+| `blocked_policy` | `blocked_policy` | 4 | Policy failure. |
+
+## Profile2 public and private assets
+
+The public deployment allowlist contains regular non-symlink mirrors of
+`agents/quality-reviewer.md` and `skills/quality-goal/**` only. Profile2
+settings, `.claude.json`, credentials, tokens, sessions, projects, history,
+backups, file-history, debug, todos, plans, plugins, identity source, and
+account material stay private. The allowlist does not make account-home input a
+trusted policy source.
+
+`matched` means the enrollment has the same organization context. It does not
+prove personal identity. The canonical input excludes email, so the same email
+with a different `orgId` is allowed, while different emails with the same three
+canonical fields collide. The email HMAC design is discarded; no email digest,
+salt, or key is generated. Registry-derived duplicate comparison uses the same
+identity root for the selected profile and all other active Claude profiles.
+같은 조직의 서로 다른 사용자는 구분할 수 없다.
+
+The rollout retains a **Keychain manual gate** after automated verification. A
+human runs both Claude profiles concurrently in separate foreground panes and
+records only PASS/FAIL and time after read-only organization-context checks.
+The backend does not perform that action.
+
+## #118 one-way status dependency
+
+The integration order is `#118 create-worktree backend -> resolved profile/worktree result -> ai-session status -> foreground operator action`.
+The #118 success result remains authoritative for its own JSON schema.
+This code consumes only its provider, public account alias, and resolved real
+worktree as status selection input. The TUI may consider launch or a recovery
+action only when status is ready일 때만; it does not add a fallback resolver.
+
+After #118 merges, rebase and manually compare these shared files:
+
+- `tests/test_orchestrator_profiles.py`
+- `dot_config/ai-session/accounts.toml`
+- `.chezmoiignore`
+- `docs/session-account-profiles.md`
+
+The create-worktree skills, #118 development artifacts, profile path resolver,
+and workmux creation adapter remain owned by #118.
+
+The installed-contract checker retains Claude `2.1.272` while the measured
+installation is `2.1.273`; this version mismatch is an accepted risk and the
+checker is not a judgment command for this change. Pre-commit runner
+availability is not a judgment command either.
 
 ## Status semantics
 
