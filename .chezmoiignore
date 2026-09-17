@@ -42,6 +42,23 @@ tests/**
 .local/share/ai-account-profiles/claude/profile2/skills/**/__pycache__
 .local/share/ai-account-profiles/claude/profile2/skills/**/*.pyc
 
+# profile1은 public bundle 없이 home만 쓴다. profile2와 같은 account 설정,
+# credential/token, runtime/session/history 및 plugin state를 항상 제외한다.
+.local/share/ai-account-profiles/claude/profile1/settings.json
+.local/share/ai-account-profiles/claude/profile1/.claude.json
+.local/share/ai-account-profiles/claude/profile1/.credentials.json
+.local/share/ai-account-profiles/claude/profile1/credentials*
+.local/share/ai-account-profiles/claude/profile1/tokens*
+.local/share/ai-account-profiles/claude/profile1/sessions/**
+.local/share/ai-account-profiles/claude/profile1/projects/**
+.local/share/ai-account-profiles/claude/profile1/history.jsonl
+.local/share/ai-account-profiles/claude/profile1/backups/**
+.local/share/ai-account-profiles/claude/profile1/file-history/**
+.local/share/ai-account-profiles/claude/profile1/debug/**
+.local/share/ai-account-profiles/claude/profile1/todos/**
+.local/share/ai-account-profiles/claude/profile1/plans/**
+.local/share/ai-account-profiles/claude/profile1/plugins/**
+
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}
 .Brewfile
