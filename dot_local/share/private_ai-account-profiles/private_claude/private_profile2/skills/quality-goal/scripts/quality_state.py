@@ -72,6 +72,7 @@ _REQUESTED_MODES = {"auto", "light", "standard", "strict"}
 _CLASSIFIED_MODES = {"light", "standard", "strict"}
 _ARTIFACT_KEYS = {"spec", "plan", "compact_plan", "report"}
 STATE_DIR_RELATIVE = ".claude/quality-state"
+RUN_RECORDS_ENV = "QUALITY_GOAL_RUNS_PATH"
 _REVIEW_STAGES = {
     "spec": "SPEC_REVIEW",
     "plan": "PLAN_REVIEW",
@@ -1326,6 +1327,104 @@ def select_resume_candidate(state_root, goal, project_root):
     return max(candidates, key=lambda candidate: candidate[:3])[3]
 
 
+def run_records_path():
+    """Return the append-only run record file that outlives every worktree."""
+    override = os.environ.get(RUN_RECORDS_ENV)
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".local" / "share" / "quality-goal" / "runs.jsonl"
+
+
+def _review_findings(state):
+    findings = []
+    reviews = state.get("reviews")
+    if not isinstance(reviews, dict):
+        return findings
+    for artifact in ("spec", "plan", "code"):
+        recorded_reviews = reviews.get(artifact)
+        if not isinstance(recorded_reviews, list):
+            continue
+        for recorded_review in recorded_reviews:
+            if not isinstance(recorded_review, dict) or not isinstance(
+                recorded_review.get("path"), str
+            ):
+                continue
+            try:
+                review = _load_review(recorded_review["path"])
+            except StateError:
+                continue
+            review_findings = review.get("findings")
+            if not isinstance(review_findings, list):
+                continue
+            findings.extend(
+                {
+                    "artifact": artifact,
+                    "round": recorded_review.get("round", review.get("round")),
+                    "id": finding.get("id"),
+                    "severity": finding.get("severity"),
+                    "rubric_item": finding.get("rubric_item"),
+                }
+                for finding in review_findings
+                if isinstance(finding, dict)
+            )
+    return findings
+
+
+def build_run_record(state):
+    """Summarize a terminal state as one run record line."""
+    project_root = state.get("project_root")
+    return {
+        "task_id": state.get("task_id"),
+        "goal": state.get("goal"),
+        "stage": state.get("stage"),
+        "mode": state.get("mode"),
+        "rounds": copy.deepcopy(state.get("rounds")),
+        "artifact_dir": state.get("artifact_dir"),
+        "source_worktree": (
+            Path(project_root).name
+            if isinstance(project_root, str) and project_root
+            else None
+        ),
+        "status_reason": state.get("status_reason"),
+        "started_at": state.get("created_at"),
+        "ended_at": state.get("updated_at"),
+        "findings": _review_findings(state),
+    }
+
+
+def append_run_record(record, path):
+    """Append one JSON line without rewriting earlier records."""
+    destination = Path(path)
+    line = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        if os.write(descriptor, line) != len(line):
+            raise OSError(f"short write to {destination}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _is_terminal(state):
+    stage = state.get("stage")
+    return isinstance(stage, str) and stage in TERMINAL_STATES
+
+
+def _record_terminal_run(state):
+    """Record a terminal run best-effort; a failure only warns and stays in state."""
+    outcome = {"path": None, "recorded": False, "error": None}
+    try:
+        destination = run_records_path()
+        outcome["path"] = str(destination)
+        append_run_record(build_run_record(state), destination)
+        outcome["recorded"] = True
+    except Exception as exc:
+        outcome["error"] = f"{type(exc).__name__}: {exc}"
+        print(f"warning: unable to append run record: {outcome['error']}", file=sys.stderr)
+    state["run_record"] = outcome
+
+
 class _CleanExit(Exception):
     """Argparse completed a successful help action."""
 
@@ -1469,6 +1568,8 @@ def _mutating_result(state_path, operation):
         raise
     except StateError:
         raise
+    if _is_terminal(result) and not _is_terminal(snapshot):
+        _record_terminal_run(result)
     save_state(state_path, result)
     _write_json(result)
 

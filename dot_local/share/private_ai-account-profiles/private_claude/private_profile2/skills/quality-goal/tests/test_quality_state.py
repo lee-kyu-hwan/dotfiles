@@ -1,5 +1,5 @@
 import ast
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -41,6 +41,14 @@ def make_git_repo(testcase):
     run_git(root, "add", "app.txt")
     run_git(root, "commit", "-m", "fixture")
     return root
+
+
+def setUpModule():
+    """Keep CLI terminal transitions in this suite away from the user's run records."""
+    directory = Path(unittest.enterModuleContext(tempfile.TemporaryDirectory()))
+    unittest.enterModuleContext(
+        patch.dict(os.environ, {quality_state.RUN_RECORDS_ENV: str(directory / "runs.jsonl")})
+    )
 
 
 FIXED_NOW = datetime(2026, 8, 25, 12, 34, 56, tzinfo=timezone.utc)
@@ -4896,6 +4904,350 @@ class ReadinessRecordingTests(unittest.TestCase):
             record = state["readiness"]["spec"][0]
             self.assertEqual("schema_invalid", record["outcome"])
             self.assertIsNone(record["verdict"])
+
+
+class RunRecordTests(unittest.TestCase):
+    def setUp(self):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.runs_path = directory / "records" / "runs.jsonl"
+        self.enterContext(
+            patch.dict(os.environ, {quality_state.RUN_RECORDS_ENV: str(self.runs_path)})
+        )
+        self.work = directory / "work"
+        self.work.mkdir()
+        self.project_root = directory / "sample-worktree"
+        self.project_root.mkdir()
+
+    def invoke_main(self, args):
+        output = io.StringIO()
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors):
+            result = quality_state.main([str(arg) for arg in args])
+        return result, output.getvalue(), errors.getvalue()
+
+    def read_records(self):
+        if not self.runs_path.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.runs_path.read_text(encoding="utf-8").splitlines()
+        ]
+
+    def save_state(self, state, name="state.json"):
+        state_path = self.work / name
+        quality_state.save_state(state_path, state)
+        return state_path
+
+    def record_review(self, state_path, review, revision_check=None):
+        review_path = write_json(
+            self.work, f"{review['artifact']}-{review['round']}.json", review
+        )
+        args = [
+            "record-review", "--state", state_path, "--review", review_path,
+            "--artifact-digest", VALID_DIGEST,
+        ]
+        if revision_check is not None:
+            args.extend(["--revision-check", revision_check])
+        result, _, errors = self.invoke_main(args)
+        self.assertEqual(0, result, errors)
+        return review_path
+
+    def test_cli_manual_terminal_transitions_append_one_run_record_each(self):
+        cases = (
+            ("INTAKE", "CANCELLED"),
+            ("IMPLEMENTING", "BLOCKED"),
+            ("CODE_REVIEW", "NEEDS_REDESIGN"),
+        )
+        for index, (source, target) in enumerate(cases, start=1):
+            with self.subTest(target=target):
+                state = state_at(source, project_root=self.project_root)
+                state["task_id"] = f"task-{target.lower()}"
+                state["rounds"] = {"spec": 1, "plan": 2, "code": 3}
+                state_path = self.save_state(state, f"{target}.json")
+
+                result, output, errors = self.invoke_main([
+                    "transition", "--state", state_path, "--to", target,
+                    "--reason", f"{target} reason",
+                ])
+
+                self.assertEqual(0, result, errors)
+                saved = quality_state.load_state(state_path)
+                self.assertEqual(target, saved["stage"])
+                self.assertEqual(saved, json.loads(output))
+                records = self.read_records()
+                self.assertEqual(index, len(records))
+                self.assertEqual(
+                    {
+                        "task_id": f"task-{target.lower()}",
+                        "goal": "Build the quality workflow",
+                        "stage": target,
+                        "mode": "standard",
+                        "rounds": {"spec": 1, "plan": 2, "code": 3},
+                        "artifact_dir": "artifact-output",
+                        "source_worktree": "sample-worktree",
+                        "status_reason": f"{target} reason",
+                        "started_at": "2026-08-25T12:34:56Z",
+                        "ended_at": saved["updated_at"],
+                        "findings": [],
+                    },
+                    records[-1],
+                )
+                self.assertEqual(
+                    {"path": str(self.runs_path), "recorded": True, "error": None},
+                    saved["run_record"],
+                )
+
+    def test_cli_completed_transition_appends_run_record_with_review_findings(self):
+        root = make_git_repo(self)
+        fingerprint = quality_state.compute_workspace_fingerprint(root)
+        review = valid_review(artifact="code", round_number=1, verdict="PASS")
+        review["findings"] = [dict(high_finding("CODE-001"), severity="Low")]
+        review_path = write_json(self.work, "code-1.json", review)
+        state = state_at("CODE_REVIEW", project_root=root)
+        state["rounds"]["code"] = 1
+        state["reviews"]["code"] = [
+            {
+                "round": 1,
+                "path": str(review_path),
+                "artifact_digest": fingerprint,
+                "verdict": "PASS",
+                "blockers": [],
+            }
+        ]
+        state["verification"] = {
+            "path": "verification.json",
+            "workspace_fingerprint": fingerprint,
+            "valid": True,
+        }
+        state_path = self.save_state(state)
+
+        result, _, errors = self.invoke_main(
+            ["transition", "--state", state_path, "--to", "COMPLETED"]
+        )
+
+        self.assertEqual(0, result, errors)
+        self.assertEqual("COMPLETED", quality_state.load_state(state_path)["stage"])
+        [record] = self.read_records()
+        self.assertEqual("COMPLETED", record["stage"])
+        self.assertIsNone(record["status_reason"])
+        self.assertEqual(root.name, record["source_worktree"])
+        self.assertEqual(
+            [
+                {
+                    "artifact": "code",
+                    "round": 1,
+                    "id": "CODE-001",
+                    "severity": "Low",
+                    "rubric_item": "Quality condition completeness",
+                }
+            ],
+            record["findings"],
+        )
+
+    def test_cli_review_limit_exhausted_appends_run_record_with_every_round_finding(self):
+        state_path = self.save_state(
+            state_at("PLAN_REVIEW", project_root=self.project_root)
+        )
+        self.record_review(state_path, valid_review("plan", 1, "REVISE", ["PLAN-001"]))
+        self.assertEqual([], self.read_records())
+
+        self.record_review(
+            state_path,
+            valid_review("plan", 2, "REVISE", ["PLAN-002"]),
+            write_revision_check(self.work, "plan", 2),
+        )
+
+        saved = quality_state.load_state(state_path)
+        self.assertEqual("NEEDS_REDESIGN", saved["stage"])
+        [record] = self.read_records()
+        self.assertEqual("NEEDS_REDESIGN", record["stage"])
+        self.assertEqual("REVIEW_LIMIT_EXHAUSTED:plan", record["status_reason"])
+        self.assertEqual({"spec": 0, "plan": 2, "code": 0}, record["rounds"])
+        self.assertEqual(
+            [
+                ("plan", 1, "PLAN-001", "High", "Quality condition completeness"),
+                ("plan", 2, "PLAN-002", "High", "Quality condition completeness"),
+            ],
+            [
+                (f["artifact"], f["round"], f["id"], f["severity"], f["rubric_item"])
+                for f in record["findings"]
+            ],
+        )
+
+    def test_cli_recurring_blocker_appends_single_run_record_even_after_report_registration(self):
+        state_path = self.save_state(
+            state_at("SPEC_REVIEW", project_root=self.project_root)
+        )
+        self.record_review(state_path, valid_review("spec", 1, "REVISE", ["SPEC-X"]))
+        self.record_review(
+            state_path,
+            valid_review("spec", 2, "REVISE", ["SPEC-X"]),
+            write_revision_check(self.work, "spec", 2),
+        )
+        report_path = self.work / "report.md"
+        report_path.write_text("report\n", encoding="utf-8")
+
+        result, _, errors = self.invoke_main([
+            "set-artifact", "--state", state_path, "--kind", "report",
+            "--path", report_path,
+        ])
+
+        self.assertEqual(0, result, errors)
+        [record] = self.read_records()
+        self.assertEqual("NEEDS_REDESIGN", record["stage"])
+        self.assertEqual("RECURRING_BLOCKING_FINDING:SPEC-X", record["status_reason"])
+        self.assertEqual(
+            [("spec", 1, "SPEC-X"), ("spec", 2, "SPEC-X")],
+            [(f["artifact"], f["round"], f["id"]) for f in record["findings"]],
+        )
+
+    def test_cli_second_review_output_error_appends_blocked_run_record(self):
+        state_path = self.save_state(
+            state_at("PLAN_REVIEW", project_root=self.project_root)
+        )
+        errors_path = write_json(self.work, "errors.json", ["malformed review"])
+        args = [
+            "record-review-error", "--state", state_path, "--artifact", "plan",
+            "--round", "1", "--errors", errors_path,
+        ]
+
+        first, _, first_errors = self.invoke_main(args)
+        self.assertEqual(0, first, first_errors)
+        self.assertEqual([], self.read_records())
+        second, _, second_errors = self.invoke_main(args)
+
+        self.assertEqual(0, second, second_errors)
+        [record] = self.read_records()
+        self.assertEqual("BLOCKED", record["stage"])
+        self.assertEqual("REVIEW_OUTPUT_INVALID", record["status_reason"])
+
+    def test_non_terminal_cli_mutations_do_not_append_run_records(self):
+        state_path = self.save_state(
+            state_at("SPEC_PASSED", project_root=self.project_root)
+        )
+
+        result, _, errors = self.invoke_main(
+            ["transition", "--state", state_path, "--to", "PLAN_REVIEW"]
+        )
+        self.assertEqual(0, result, errors)
+        self.record_review(state_path, valid_review("plan", 1, "REVISE", ["PLAN-001"]))
+
+        self.assertFalse(self.runs_path.exists())
+        self.assertNotIn("run_record", quality_state.load_state(state_path))
+
+    def test_run_record_failure_does_not_block_terminal_transition(self):
+        not_a_directory = self.work / "not-a-directory"
+        not_a_directory.write_text("occupied\n", encoding="utf-8")
+        unwritable = not_a_directory / "runs.jsonl"
+        cases = (
+            ("unwritable-path", unwritable, nullcontext()),
+            (
+                "record-builder-crash",
+                self.runs_path,
+                patch.object(
+                    quality_state,
+                    "build_run_record",
+                    side_effect=RuntimeError("unexpected record failure"),
+                ),
+            ),
+        )
+        for name, runs_path, failure in cases:
+            with self.subTest(case=name):
+                state_path = self.save_state(
+                    state_at("IMPLEMENTING", project_root=self.project_root),
+                    f"{name}.json",
+                )
+                with (
+                    patch.dict(os.environ, {quality_state.RUN_RECORDS_ENV: str(runs_path)}),
+                    failure,
+                ):
+                    result, output, errors = self.invoke_main([
+                        "transition", "--state", state_path, "--to", "CANCELLED",
+                        "--reason", "user cancelled",
+                    ])
+
+                self.assertEqual(0, result, errors)
+                saved = quality_state.load_state(state_path)
+                self.assertEqual("CANCELLED", saved["stage"])
+                self.assertEqual("user cancelled", saved["status_reason"])
+                self.assertEqual("CANCELLED", json.loads(output)["stage"])
+                self.assertEqual(str(runs_path), saved["run_record"]["path"])
+                self.assertFalse(saved["run_record"]["recorded"])
+                self.assertTrue(saved["run_record"]["error"])
+                self.assertIn("warning:", errors)
+                self.assertEqual([], self.read_records())
+
+    def test_run_record_appends_without_rewriting_existing_lines(self):
+        existing = '{"task_id": "earlier-run", "stage": "COMPLETED"}\n'
+        self.runs_path.parent.mkdir(parents=True)
+        self.runs_path.write_text(existing, encoding="utf-8")
+        state_path = self.save_state(
+            state_at("INTAKE", project_root=self.project_root)
+        )
+
+        result, _, errors = self.invoke_main([
+            "transition", "--state", state_path, "--to", "CANCELLED",
+            "--reason", "user cancelled",
+        ])
+
+        self.assertEqual(0, result, errors)
+        contents = self.runs_path.read_text(encoding="utf-8")
+        self.assertTrue(contents.startswith(existing))
+        self.assertTrue(contents.endswith("\n"))
+        self.assertEqual(
+            ["earlier-run", "test-task"],
+            [record["task_id"] for record in self.read_records()],
+        )
+
+    def test_run_records_path_defaults_outside_worktree_and_honors_override(self):
+        with patch.dict(os.environ, clear=False) as environment:
+            environment.pop(quality_state.RUN_RECORDS_ENV, None)
+            self.assertEqual(
+                Path.home() / ".local" / "share" / "quality-goal" / "runs.jsonl",
+                quality_state.run_records_path(),
+            )
+        self.assertEqual(self.runs_path, quality_state.run_records_path())
+
+    def test_run_record_keeps_manual_extract_format(self):
+        repository = next(
+            directory
+            for directory in Path(__file__).resolve().parents
+            if (directory / "dot_claude").is_dir()
+        )
+        reference = [
+            json.loads(line)
+            for line in (repository / "docs" / "quality-goal-runs.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        reference_finding_keys = {
+            frozenset(finding) for line in reference for finding in line["findings"]
+        }
+        state_path = self.save_state(
+            state_at("PLAN_REVIEW", project_root=self.project_root)
+        )
+        self.record_review(state_path, valid_review("plan", 1, "REVISE", ["PLAN-001"]))
+        self.record_review(
+            state_path,
+            valid_review("plan", 2, "REVISE", ["PLAN-002"]),
+            write_revision_check(self.work, "plan", 2),
+        )
+
+        [record] = self.read_records()
+
+        for line in reference:
+            self.assertLessEqual(set(line), set(record))
+            for key in ("rounds", "findings"):
+                self.assertIs(type(line[key]), type(record[key]))
+        self.assertEqual(set(reference[0]["rounds"]), set(record["rounds"]))
+        self.assertEqual(
+            reference_finding_keys,
+            {frozenset(finding) for finding in record["findings"]},
+        )
+        self.assertEqual(
+            json.dumps(record, ensure_ascii=False) + "\n",
+            self.runs_path.read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":
