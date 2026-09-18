@@ -83,10 +83,26 @@ gh api graphql -f query='
 ## 4. PR 상태 조회
 
 ```bash
-gh pr list --head "<브랜치명>" --state all --json number,state,reviewDecision,isDraft
+gh pr list --head "<브랜치명>" --state all --json number,state,reviewDecision,isDraft,author
 ```
 
 `--head`에는 `refs/heads/`를 뗀 브랜치명을 넣는다.
+
+**한 브랜치에 PR이 여럿일 수 있다.** 닫고 다시 연 경우다. 첫 항목(`.[0]`)을 집으면
+틀린다. 다음 순서로 고른다.
+
+1. `OPEN`이 있으면 그것
+2. 없으면 `MERGED`
+3. 둘 다 없고 `CLOSED`만 있으면 그때 폐기 후보로 본다
+
+PR이 2개 이상이면 전부 보고한다. 실측 사례다.
+
+```
+1467-feat/admin-partner-vat-reports     PR#1476 CLOSED · PR#1471 OPEN   ← 살아있음
+fix/partner-rate-tables-asm-only        PR#1421 CLOSED · PR#1419 MERGED ← 머지됨
+```
+
+두 경우 모두 `.[0]`이 `CLOSED`를 집어 "폐기"로 오판했다. 진행 중인 리뷰를 지울 뻔했다.
 
 ## 5. 상태 도출
 
@@ -139,7 +155,11 @@ gh api user --jq .login    # 내 로그인
 ## 7. 중간 worktree 생성
 
 조정자는 코드를 고치지 않으므로 `--detach`로 만든다. 브랜치를 남기지 않아 나중에 정리할
-것이 줄어든다. 의존성은 설치하지 않는다.
+것이 줄어들고, `develop` 같은 공용 브랜치를 점유하지 않는다. git worktree는 같은 브랜치를
+두 곳에 체크아웃할 수 없다. 의존성은 설치하지 않는다.
+
+base는 로컬 브랜치가 아니라 `origin/<base>`를 쓴다. 로컬이 뒤처져 있으면 조정자가
+낡은 상태로 태어난다.
 
 먼저 저장소의 git-crypt 사용 여부를 확인한다.
 
@@ -226,6 +246,23 @@ orca worktree set --worktree "path:<경로>" \
 
 계보 연결 수와 이슈 연결 수를 전체 대비로 보고한다. 미연결로 남은 항목은 이유와 함께
 열거한다. 메인 worktree는 부모가 없는 것이 정상이다.
+
+## 11. 조정자 worktree 갱신
+
+`--detach`로 만든 조정자는 생성 시점에 고정된다. 자동으로 최신을 따라가지 않는다.
+
+```bash
+git -C "$COORD" fetch origin "$BASE" --quiet
+git -C "$COORD" checkout --detach "origin/$BASE"
+```
+
+브랜치를 체크아웃한 worktree도 `git pull` 없이는 똑같이 뒤처지므로 detached라서 생기는
+문제가 아니다. 오히려 `git pull`은 로컬 커밋이 있으면 merge가 일어나지만, detached
+checkout은 항상 origin 상태 그대로다. 조정자는 커밋하지 않으므로 이쪽이 안전하다.
+
+**조정자에서 무언가를 판정하기 전에 먼저 갱신한다.** 실측에서 기준 worktree가 20커밋
+뒤처진 채로 비교해, 이미 머지된 파일 64개를 "없는 기록"으로 집계했다. 실제로 없는 것은
+11개였다. 뒤처진 기준은 판단을 뒤집는다.
 
 ## 주의
 
