@@ -56,6 +56,10 @@ workmux list --json \
 `.gitignore` 대상을 보지 못하고, `workmux list`의 AGENT 열은 고아 state나 등록되지 않은 창
 때문에 비어 보일 수 있어서 둘 다 이 확인을 대신하지 못한다.
 
+Orca로 만든 worktree(`orca worktree create`)는 `workmux list`에 없다. `WT`·`MAIN`은
+`orca worktree list --json`에서 찾고, 삭제도 `workmux remove`가 아니라
+`orca worktree rm --worktree path:<경로> --force`를 쓴다. 아래 세 확인은 그대로 적용한다.
+
 ```bash
 NAME={이름}   # worktree 안에서 인자 없이 지울 때는 WT=$(git rev-parse --show-toplevel)
 WT=$(workmux list --json | jq -r --arg n "$NAME" '.[] | select(.path | endswith("/" + $n)) | .path')
