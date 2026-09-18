@@ -87,16 +87,38 @@ gh pr list --head "<브랜치명>" --state all --json number,state,reviewDecisio
 
 ## 5. 상태 도출
 
+**먼저 PR 작성자가 나인지 본다.** 같은 `CHANGES_REQUESTED`라도 내 PR이면 내가 고칠
+차례이고, 남의 PR이면 상대가 고칠 차례다. 작성자를 보지 않으면 정반대로 판정한다.
+
+```bash
+gh pr view <번호> --json author,reviewDecision,reviewRequests,state
+gh api user --jq .login    # 내 로그인
+```
+
+### 내가 작성자인 PR — 내 작업이다
+
 | PR 상태 | `workspaceStatus` |
 | --- | --- |
 | `MERGED` | `completed` |
-| `OPEN`, `reviewDecision` 없음 | `in-review` |
-| `OPEN` + `CHANGES_REQUESTED` | `in-progress` — 작성자가 고쳐야 하는 단계다 |
+| `OPEN`, 리뷰 결정 없음 | `in-review` — 내가 리뷰를 기다린다 |
+| `OPEN` + `CHANGES_REQUESTED` | `in-progress` — 내가 고쳐야 한다 |
 | `OPEN` + `isDraft` | `in-progress` |
 | PR 없음 | `in-progress` |
 | `CLOSED` | **판단 보류.** 변경하지 않고 보고한다 |
 
-`CLOSED`는 재작업 중일 수도 폐기일 수도 있다. 자동으로 정하지 않는다.
+### 남이 작성자인 PR — 내가 리뷰할 대상이다
+
+| 조건 | `workspaceStatus` |
+| --- | --- |
+| `reviewRequests`에 내가 있다 | `in-review` — 내가 리뷰할 차례다 |
+| 내가 이미 리뷰했고 재요청이 없다 | `completed` — 내 할 일은 끝났다. 정리 후보 |
+| `MERGED` · `CLOSED` | `completed` — 정리 후보 |
+
+`reviewRequests`에 다시 포함되면 과거에 리뷰를 냈더라도 `in-review`로 되돌린다.
+`CHANGES_REQUESTED`를 냈다는 사실만으로 `in-progress`로 두지 않는다. 고칠 사람은 내가
+아니다.
+
+`CLOSED`는 재작업 중일 수도 폐기일 수도 있다. 내가 작성자면 자동으로 정하지 않는다.
 
 `completed`로 판정된 worktree는 정리 후보이기도 하다. 목록을 보고하되 이 스킬에서
 제거하지 않는다. 제거는 `remove-worktree`의 몫이다.
