@@ -371,14 +371,17 @@ failure vocabulary. The mapping is one-to-one at the shared admission decision.
 | `blocked_binding` | `blocked_binding` | 4 | Binding failure. |
 | `blocked_policy` | `blocked_policy` | 4 | Policy failure. |
 
-## Profile2 public and private assets
+## Profile2 private assets
 
-The public deployment allowlist contains regular non-symlink mirrors of
-`agents/quality-reviewer.md` and `skills/quality-goal/**` only. Profile2
-settings, `.claude.json`, credentials, tokens, sessions, projects, history,
-backups, file-history, debug, todos, plans, plugins, identity source, and
-account material stay private. The allowlist does not make account-home input a
-trusted policy source.
+No source asset is deployed into the profile2 home. The former public allowlist
+of regular non-symlink mirrors of `agents/quality-reviewer.md` and
+`skills/quality-goal/**` was removed in #138 because no launch path reads it
+after the role launcher freeze; the canonical skill lives only in
+`dot_claude/skills/quality-goal`. A temporary `.chezmoiremove` deletes the two
+deployed paths by literal name. Profile2 settings, `.claude.json`, credentials,
+tokens, sessions, projects, history, backups, file-history, debug, todos, plans,
+plugins, identity source, and account material stay private. Account-home input
+is never a trusted policy source.
 
 `matched` means the enrollment has the same organization context. It does not
 prove personal identity. The canonical input excludes email, so the same email
