@@ -1,0 +1,489 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {
+    "name": "collecting-curated-contribution-prs",
+    "revision": "sha256:72f3798b39443c9021097bbf0c235b9f39388af892ec52de5851816d286927cb"
+  },
+  "records": [
+    {
+      "identity_status": "resolved",
+      "record_key": "github-pr:PR_SYNTHETIC_synthetic-lab_gadget_22",
+      "pr_id": "PR-001",
+      "pull_request_node_id": "PR_SYNTHETIC_synthetic-lab_gadget_22",
+      "repository": {
+        "full_name": "synthetic-lab/gadget",
+        "node_id": "R_SYNTHETIC_synthetic-lab_gadget",
+        "repository_aliases": []
+      },
+      "pull_request": {
+        "number": 22,
+        "url": "https://github.com/synthetic-lab/gadget/pull/22",
+        "title": "Synthetic authoritative pull request",
+        "normalized_state": "merged",
+        "closure_reason": "merged",
+        "created_at": "2030-01-01T00:00:00Z",
+        "closed_at": "2030-01-08T00:00:00Z",
+        "merged_at": "2030-01-08T00:00:00Z",
+        "updated_at": "2030-01-08T00:00:00Z",
+        "base_sha": "synthetic-base-22",
+        "head_sha": "synthetic-head-22",
+        "merge_sha": "synthetic-merge-sha",
+        "labels": [],
+        "changed_files_count": 0,
+        "commits_count": 0
+      },
+      "author": {
+        "login": "synthetic-upstream-author",
+        "node_id": "U_SYNTHETIC_22",
+        "association": "CONTRIBUTOR",
+        "normalized_role": "contributor"
+      },
+      "license": {
+        "spdx_id": "MIT",
+        "evidence_url": "https://github.com/synthetic-lab/synthetic/blob/main/LICENSE",
+        "observed_via": "GET /repos/synthetic-lab/gadget/license"
+      },
+      "sources": [
+        {
+          "source_key": "tracker-issue:1fbea287df726b58ac86acad",
+          "collection_method": "tracker-issue-comments",
+          "tracker": {
+            "issue_node_id": "I_SYNTHETIC_TRACKER_7",
+            "issue_number": 7,
+            "api_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+            "html_url": "https://github.com/synthetic-lab/tracker/issues/7"
+          },
+          "generated_by": {
+            "name": "collecting-curated-contribution-prs",
+            "revision": "sha256:72f3798b39443c9021097bbf0c235b9f39388af892ec52de5851816d286927cb"
+          },
+          "observations": [
+            {
+              "run_id": "run-acacb885f48a-0001",
+              "origin_kind": "comment",
+              "comment_id": 7102,
+              "comment_node_id": "IC_SYNTHETIC_7102",
+              "comment_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/comments/7102",
+              "comment_html_url": "https://github.com/synthetic-lab/tracker/issues/7#issuecomment-7102",
+              "commenter_login": "synthetic-user-b",
+              "tracker_author_association": "MEMBER",
+              "created_at": "2030-01-04T00:00:00Z",
+              "updated_at": "2030-01-04T00:00:00Z",
+              "body_sha256": "e245718b9c3b4cfa0fa14a4060270e979abe45d544783148cde5bf49f91501a1"
+            }
+          ]
+        }
+      ],
+      "state_history": [
+        {
+          "state": "merged",
+          "observed_at": "2030-01-08T00:00:00Z",
+          "authority": "GitHub pull request",
+          "evidence_url": "https://github.com/synthetic-lab/gadget/pull/22"
+        }
+      ],
+      "hydration_status": "complete",
+      "evidence_snapshot": {
+        "body_excerpt": "Synthetic inert pull request body",
+        "changed_files": [],
+        "commits": [],
+        "issue_comments": [],
+        "reviews": [],
+        "review_comments": [],
+        "timeline_events": [],
+        "linked_issues": [],
+        "partial_categories": [],
+        "completeness": {
+          "pull_request_body": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/pulls/22",
+            "pages_complete": true,
+            "returned_count": 1,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [],
+            "warnings": []
+          },
+          "files": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/pulls/22/files",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": 3000,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "commits": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/pulls/22/commits",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": 250,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "issue_comments": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/issues/22/comments",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "reviews": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/pulls/22/reviews",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "review_comments": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/pulls/22/comments",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "timeline": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/issues/22/timeline",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "license": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/license",
+            "pages_complete": true,
+            "returned_count": 1,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [],
+            "warnings": []
+          },
+          "linked_issues": {
+            "endpoint": "GET /repos/synthetic-lab/gadget/issues/22/timeline (cross-referenced issue observations)",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          }
+        }
+      }
+    },
+    {
+      "identity_status": "resolved",
+      "record_key": "github-pr:PR_SYNTHETIC_synthetic-lab_widget_11",
+      "pr_id": "PR-002",
+      "pull_request_node_id": "PR_SYNTHETIC_synthetic-lab_widget_11",
+      "repository": {
+        "full_name": "synthetic-lab/widget",
+        "node_id": "R_SYNTHETIC_synthetic-lab_widget",
+        "repository_aliases": []
+      },
+      "pull_request": {
+        "number": 11,
+        "url": "https://github.com/synthetic-lab/widget/pull/11",
+        "title": "Synthetic authoritative pull request",
+        "normalized_state": "open",
+        "closure_reason": "unknown",
+        "created_at": "2030-01-01T00:00:00Z",
+        "closed_at": null,
+        "merged_at": null,
+        "updated_at": "2030-01-05T00:00:00Z",
+        "base_sha": "synthetic-base-11",
+        "head_sha": "synthetic-head-11",
+        "merge_sha": null,
+        "labels": [],
+        "changed_files_count": 0,
+        "commits_count": 0
+      },
+      "author": {
+        "login": "synthetic-upstream-author",
+        "node_id": "U_SYNTHETIC_11",
+        "association": "NONE",
+        "normalized_role": "unknown"
+      },
+      "license": {
+        "spdx_id": "MIT",
+        "evidence_url": "https://github.com/synthetic-lab/synthetic/blob/main/LICENSE",
+        "observed_via": "GET /repos/synthetic-lab/widget/license"
+      },
+      "sources": [
+        {
+          "source_key": "tracker-issue:1fbea287df726b58ac86acad",
+          "collection_method": "tracker-issue-comments",
+          "tracker": {
+            "issue_node_id": "I_SYNTHETIC_TRACKER_7",
+            "issue_number": 7,
+            "api_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+            "html_url": "https://github.com/synthetic-lab/tracker/issues/7"
+          },
+          "generated_by": {
+            "name": "collecting-curated-contribution-prs",
+            "revision": "sha256:72f3798b39443c9021097bbf0c235b9f39388af892ec52de5851816d286927cb"
+          },
+          "observations": [
+            {
+              "run_id": "run-acacb885f48a-0001",
+              "origin_kind": "issue-body",
+              "issue_node_id": "I_SYNTHETIC_TRACKER_7",
+              "issue_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+              "api_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+              "html_url": "https://github.com/synthetic-lab/tracker/issues/7",
+              "updated_at": "2030-01-02T00:00:00Z",
+              "body_sha256": "41fccda9d6db4edbe3ee3f5f11dd2f9a7734d653be30f49f6d6ecaea0b71884c"
+            },
+            {
+              "run_id": "run-acacb885f48a-0001",
+              "origin_kind": "comment",
+              "comment_id": 7101,
+              "comment_node_id": "IC_SYNTHETIC_7101",
+              "comment_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/comments/7101",
+              "comment_html_url": "https://github.com/synthetic-lab/tracker/issues/7#issuecomment-7101",
+              "commenter_login": "synthetic-user-a",
+              "tracker_author_association": "NONE",
+              "created_at": "2030-01-03T00:00:00Z",
+              "updated_at": "2030-01-03T00:00:00Z",
+              "body_sha256": "41fccda9d6db4edbe3ee3f5f11dd2f9a7734d653be30f49f6d6ecaea0b71884c"
+            }
+          ]
+        }
+      ],
+      "state_history": [
+        {
+          "state": "open",
+          "observed_at": "2030-01-05T00:00:00Z",
+          "authority": "GitHub pull request",
+          "evidence_url": "https://github.com/synthetic-lab/widget/pull/11"
+        }
+      ],
+      "hydration_status": "complete",
+      "evidence_snapshot": {
+        "body_excerpt": "Synthetic inert pull request body",
+        "changed_files": [],
+        "commits": [],
+        "issue_comments": [],
+        "reviews": [],
+        "review_comments": [],
+        "timeline_events": [],
+        "linked_issues": [],
+        "partial_categories": [],
+        "completeness": {
+          "pull_request_body": {
+            "endpoint": "GET /repos/synthetic-lab/widget/pulls/11",
+            "pages_complete": true,
+            "returned_count": 1,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [],
+            "warnings": []
+          },
+          "files": {
+            "endpoint": "GET /repos/synthetic-lab/widget/pulls/11/files",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": 3000,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "commits": {
+            "endpoint": "GET /repos/synthetic-lab/widget/pulls/11/commits",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": 250,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "issue_comments": {
+            "endpoint": "GET /repos/synthetic-lab/widget/issues/11/comments",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "reviews": {
+            "endpoint": "GET /repos/synthetic-lab/widget/pulls/11/reviews",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "review_comments": {
+            "endpoint": "GET /repos/synthetic-lab/widget/pulls/11/comments",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "timeline": {
+            "endpoint": "GET /repos/synthetic-lab/widget/issues/11/timeline",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          },
+          "license": {
+            "endpoint": "GET /repos/synthetic-lab/widget/license",
+            "pages_complete": true,
+            "returned_count": 1,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [],
+            "warnings": []
+          },
+          "linked_issues": {
+            "endpoint": "GET /repos/synthetic-lab/widget/issues/11/timeline (cross-referenced issue observations)",
+            "pages_complete": true,
+            "returned_count": 0,
+            "known_limit": null,
+            "captured_at": "2030-01-10T00:00:00Z",
+            "page_count": 1,
+            "attempted_pages": 1,
+            "etag": null,
+            "page_etags": [
+              {
+                "page": 1,
+                "etag": null
+              }
+            ],
+            "warnings": []
+          }
+        }
+      }
+    }
+  ]
+}

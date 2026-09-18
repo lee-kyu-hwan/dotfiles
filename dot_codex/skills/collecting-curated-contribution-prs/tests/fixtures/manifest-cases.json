@@ -1,0 +1,6 @@
+{
+  "fixture_kind": "synthetic manifest discriminator cases",
+  "same_tracker": {"repository": "synthetic-lab/tracker", "issue": 7},
+  "foreign_tracker": {"repository": "synthetic-lab/other-tracker", "issue": 8},
+  "foreign_methods": ["github-rest-search-and-hydration", "synthetic-other-method"]
+}

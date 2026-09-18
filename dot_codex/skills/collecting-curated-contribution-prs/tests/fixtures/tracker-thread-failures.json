@@ -1,0 +1,14 @@
+{
+  "fixture_kind": "synthetic tracker pagination failures",
+  "links": {
+    "malformed": "not a synthetic URL",
+    "cursor": "<https://api.github.com/repositories/7001/issues/7/comments?after=synthetic-cursor>; rel=\"next\"",
+    "before": "<https://api.github.com/repositories/7001/issues/7/comments?before=synthetic-cursor>; rel=\"next\"",
+    "page_mismatch": "<https://api.github.com/repositories/7001/issues/7/comments?page=4&per_page=100>; rel=\"next\"",
+    "foreign_host": "<https://synthetic.invalid/repositories/7001/issues/7/comments?page=2>; rel=\"next\""
+  },
+  "comment_id_sequences": {
+    "duplicate": [7101, 7101],
+    "descending": [7102, 7101]
+  }
+}

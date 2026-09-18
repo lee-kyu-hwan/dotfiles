@@ -934,6 +934,7 @@ def merge_corpus(
     existing: Optional[dict[str, object]] = None,
     new_records: object = None,
     *,
+    source_policy: str = "recent-closed",
     existing_corpus: Optional[dict[str, object]] = None,
     records: object = None,
 ) -> dict[str, object]:
@@ -943,6 +944,8 @@ def merge_corpus(
     number is accepted only as corroboration when one side does not have a
     pull-request node ID.  The function never mutates either input.
     """
+    if source_policy not in ("recent-closed", "explicit-only"):
+        raise ValueError("source_policy must be 'recent-closed' or 'explicit-only'")
     if existing_corpus is not None:
         if existing is not None:
             raise ValueError("existing corpus was supplied twice")
@@ -967,7 +970,10 @@ def merge_corpus(
     if not isinstance(incoming, list) or not all(isinstance(item, dict) for item in incoming):
         raise ValueError("new records must be a list of objects")
     copied_incoming = [deepcopy(item) for item in incoming]
-    _validate_incoming_observation_identities(copied_incoming)
+    _validate_incoming_observation_identities(
+        copied_incoming,
+        source_policy=source_policy,
+    )
 
     if existing is None:
         output: dict[str, object] = {
@@ -989,7 +995,10 @@ def merge_corpus(
 
     records = output["records"]
     assert isinstance(records, list)
-    copied_incoming = _coalesce_incoming_records(copied_incoming)
+    copied_incoming = _coalesce_incoming_records(
+        copied_incoming,
+        source_policy=source_policy,
+    )
     max_id = _greatest_pr_id(records)
     matched_indices: set[int] = set()
     pending: list[tuple[dict[str, object], Optional[int]]] = []
@@ -1016,7 +1025,11 @@ def merge_corpus(
                 merged["identity_status"] = "unresolved"
                 merged["record_key"] = None
                 merged["pr_id"] = None
-            _append_recent_observation(merged, record)
+            _append_recent_observation(
+                merged,
+                record,
+                source_policy=source_policy,
+            )
             new_records_to_append.append(merged)
             continue
 
@@ -1025,7 +1038,12 @@ def merge_corpus(
             old.get("identity_status") == "resolved" or _record_pull_node_id(record) is not None
         ):
             max_id += 1
-        records[match] = _merge_existing_record(old, record, max_id)
+        records[match] = _merge_existing_record(
+            old,
+            record,
+            max_id,
+            source_policy=source_policy,
+        )
 
     new_records_to_append.sort(
         key=lambda record: (
@@ -1050,7 +1068,11 @@ def _validate_corpus_envelope(document: dict[str, object], label: str) -> None:
         raise ValueError("{0}.records must be a list of objects".format(label))
 
 
-def _validate_incoming_observation_identities(records: list[dict[str, object]]) -> None:
+def _validate_incoming_observation_identities(
+    records: list[dict[str, object]],
+    *,
+    source_policy: str,
+) -> None:
     for record in records:
         recent_sources = [
             source for source in record.get("sources", [])
@@ -1063,6 +1085,8 @@ def _validate_incoming_observation_identities(records: list[dict[str, object]]) 
             for observation in observations:
                 if not isinstance(observation, dict) or not _complete_observation_identity(observation):
                     raise ValueError("incoming recent-closed observations require run_id, updated_at, and body_sha256")
+        if source_policy == "explicit-only":
+            continue
         if recent_sources and any(
             isinstance(source.get("observations"), list) and source["observations"]
             for source in recent_sources
@@ -1129,7 +1153,11 @@ def _record_run_id(record: dict[str, object]) -> Optional[str]:
     return None
 
 
-def _coalesce_incoming_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+def _coalesce_incoming_records(
+    records: list[dict[str, object]],
+    *,
+    source_policy: str,
+) -> list[dict[str, object]]:
     parent = list(range(len(records)))
 
     def find(index: int) -> int:
@@ -1194,14 +1222,27 @@ def _coalesce_incoming_records(records: list[dict[str, object]]) -> list[dict[st
     result: list[dict[str, object]] = []
     for group in sorted(grouped.values(), key=lambda values: _merge_record_sort_key(values[0])):
         current = deepcopy(sorted(group, key=_merge_record_sort_key)[0])
-        _append_recent_observation(current, current)
+        _append_recent_observation(
+            current,
+            current,
+            source_policy=source_policy,
+        )
         for record in sorted(group, key=_merge_record_sort_key)[1:]:
-            _coalesce_record_into(current, record)
+            _coalesce_record_into(
+                current,
+                record,
+                source_policy=source_policy,
+            )
         result.append(current)
     return result
 
 
-def _coalesce_record_into(current: dict[str, object], record: dict[str, object]) -> None:
+def _coalesce_record_into(
+    current: dict[str, object],
+    record: dict[str, object],
+    *,
+    source_policy: str,
+) -> None:
     incoming_is_newer = _incoming_projection_is_newer(current, record)
     current_node = _record_pull_node_id(current)
     incoming_node = _record_pull_node_id(record)
@@ -1223,7 +1264,11 @@ def _coalesce_record_into(current: dict[str, object], record: dict[str, object])
             if field in record:
                 current[field] = _merge_mapping_preserving_unknown(current.get(field), record[field])
     _append_state_history(current, record.get("state_history"))
-    _append_sources(current, record)
+    _append_sources(
+        current,
+        record,
+        source_policy=source_policy,
+    )
     for field, value in record.items():
         if field not in current:
             current[field] = deepcopy(value)
@@ -1370,7 +1415,13 @@ def _record_updated_datetime(record: dict[str, object]) -> Optional[datetime]:
         return None
 
 
-def _merge_existing_record(old: dict[str, object], incoming: dict[str, object], max_id: int) -> dict[str, object]:
+def _merge_existing_record(
+    old: dict[str, object],
+    incoming: dict[str, object],
+    max_id: int,
+    *,
+    source_policy: str,
+) -> dict[str, object]:
     merged = deepcopy(old)
     incoming_is_newer = _incoming_projection_is_newer(old, incoming)
     old_node = _record_pull_node_id(old)
@@ -1409,7 +1460,11 @@ def _merge_existing_record(old: dict[str, object], incoming: dict[str, object], 
     if incoming_is_newer and isinstance(incoming.get("pull_request"), dict):
         merged["pull_request"] = _merge_mapping_preserving_unknown(merged.get("pull_request"), incoming["pull_request"])
     _append_state_history(merged, incoming.get("state_history"))
-    _append_sources(merged, incoming)
+    _append_sources(
+        merged,
+        incoming,
+        source_policy=source_policy,
+    )
     return merged
 
 
@@ -1427,7 +1482,12 @@ def _append_state_history(record: dict[str, object], incoming: object) -> None:
             history.append(deepcopy(item))
 
 
-def _append_sources(record: dict[str, object], incoming: dict[str, object]) -> None:
+def _append_sources(
+    record: dict[str, object],
+    incoming: dict[str, object],
+    *,
+    source_policy: str,
+) -> None:
     sources = record.get("sources")
     if not isinstance(sources, list):
         sources = []
@@ -1436,11 +1496,24 @@ def _append_sources(record: dict[str, object], incoming: dict[str, object]) -> N
     if isinstance(incoming_sources, list):
         for source in incoming_sources:
             if isinstance(source, dict) and isinstance(source.get("source_key"), str):
-                _append_source(sources, source)
-    _append_recent_observation(record, incoming)
+                _append_source(
+                    sources,
+                    source,
+                    source_policy=source_policy,
+                )
+    _append_recent_observation(
+        record,
+        incoming,
+        source_policy=source_policy,
+    )
 
 
-def _append_source(sources: list[object], incoming: dict[str, object]) -> None:
+def _append_source(
+    sources: list[object],
+    incoming: dict[str, object],
+    *,
+    source_policy: str,
+) -> None:
     source_key = incoming.get("source_key")
     if not isinstance(source_key, str) or not source_key:
         return
@@ -1459,7 +1532,14 @@ def _append_source(sources: list[object], incoming: dict[str, object]) -> None:
                 old_observations.append(deepcopy(observation))
 
 
-def _append_recent_observation(record: dict[str, object], incoming: dict[str, object]) -> None:
+def _append_recent_observation(
+    record: dict[str, object],
+    incoming: dict[str, object],
+    *,
+    source_policy: str,
+) -> None:
+    if source_policy == "explicit-only":
+        return
     sources = record.get("sources")
     if not isinstance(sources, list):
         sources = []
@@ -1473,7 +1553,11 @@ def _append_recent_observation(record: dict[str, object], incoming: dict[str, ob
         and isinstance(incoming_recent.get("observations"), list)
         and incoming_recent["observations"]
     ):
-        _append_source(sources, incoming_recent)
+        _append_source(
+            sources,
+            incoming_recent,
+            source_policy=source_policy,
+        )
         return
     observation: dict[str, object] = {
         "run_id": _record_run_id(incoming),

@@ -1476,6 +1476,179 @@ class MergeCorpusTests(unittest.TestCase):
             record.update(deepcopy(extra))
         return record
 
+    def test_merge_corpus_default_source_policy_preserves_recent_closed_behavior(self):
+        incoming = self.record(
+            node_id="pr-default-policy",
+            repository_node_id="repo-default-policy",
+            repository="owner/default-policy",
+            number=20,
+            run_id="run-default-policy",
+            body_sha256="d" * 64,
+        )
+
+        merged = self.collector.merge_corpus(None, [incoming])
+
+        self.assertEqual(
+            merged["records"][0]["sources"],
+            [
+                {
+                    "source_key": "recent-closed",
+                    "kind": "search-api",
+                    "observations": [
+                        {
+                            "run_id": "run-default-policy",
+                            "updated_at": "2026-09-05T00:00:00Z",
+                            "body_sha256": "d" * 64,
+                            "observed_at": "2026-09-05T00:00:00Z",
+                            "pull_request_url": "https://github.com/owner/default-policy/pull/20",
+                            "repository": "owner/default-policy",
+                        }
+                    ],
+                }
+            ],
+        )
+
+    def test_merge_corpus_explicit_recent_closed_matches_default(self):
+        incoming = self.record(
+            node_id="pr-explicit-default",
+            repository_node_id="repo-explicit-default",
+            number=21,
+            run_id="run-explicit-default",
+            body_sha256="e" * 64,
+        )
+
+        default = self.collector.merge_corpus(None, [incoming])
+        explicit = self.collector.merge_corpus(
+            None,
+            [incoming],
+            source_policy="recent-closed",
+        )
+
+        self.assertEqual(explicit, default)
+
+    def test_merge_corpus_explicit_only_does_not_synthesize_recent_closed(self):
+        incoming = self.record(
+            node_id="pr-explicit-only",
+            repository_node_id="repo-explicit-only",
+            number=22,
+        )
+        incoming["pull_request"]["updated_at"] = None
+
+        merged = self.collector.merge_corpus(
+            None,
+            [incoming],
+            source_policy="explicit-only",
+        )
+
+        self.assertEqual(merged["records"][0]["sources"], [])
+
+    def test_merge_corpus_explicit_only_propagates_through_coalesced_matched_and_new_records(self):
+        existing_record = self.record(
+            node_id="pr-matched-policy",
+            repository_node_id="repo-matched-policy",
+            number=23,
+            pr_id="PR-007",
+            sources=[
+                {
+                    "source_key": "existing-source",
+                    "observations": [{"run_id": "existing-observation"}],
+                }
+            ],
+        )
+        existing = {
+            "schema_version": "1.0.0",
+            "generated_by": {"name": "collector", "revision": "old"},
+            "records": [existing_record],
+        }
+        matched_first = self.record(
+            node_id="pr-matched-policy",
+            repository_node_id="repo-matched-policy",
+            number=23,
+            sources=[
+                {
+                    "source_key": "tracker:issue",
+                    "observations": [
+                        {
+                            "comment_node_id": "comment-one",
+                            "updated_at": "2026-09-05T01:00:00Z",
+                            "body_sha256": "1" * 64,
+                        }
+                    ],
+                }
+            ],
+        )
+        matched_second = self.record(
+            node_id="pr-matched-policy",
+            repository_node_id="repo-matched-policy",
+            number=23,
+            updated_at="2026-09-05T02:00:00Z",
+            sources=[
+                {
+                    "source_key": "tracker:issue",
+                    "observations": [
+                        {
+                            "comment_node_id": "comment-two",
+                            "updated_at": "2026-09-05T02:00:00Z",
+                            "body_sha256": "2" * 64,
+                        }
+                    ],
+                }
+            ],
+        )
+        new_record = self.record(
+            node_id="pr-new-policy",
+            repository_node_id="repo-new-policy",
+            number=24,
+            sources=[
+                {
+                    "source_key": "tracker:new-issue",
+                    "observations": [
+                        {
+                            "issue_node_id": "issue-new",
+                            "updated_at": "2026-09-05T03:00:00Z",
+                            "body_sha256": "3" * 64,
+                        }
+                    ],
+                }
+            ],
+        )
+
+        merged = self.collector.merge_corpus(
+            existing,
+            [matched_first, matched_second, new_record],
+            source_policy="explicit-only",
+        )
+
+        by_node = {record["pull_request_node_id"]: record for record in merged["records"]}
+        matched_sources = by_node["pr-matched-policy"]["sources"]
+        self.assertEqual(
+            [source["source_key"] for source in matched_sources],
+            ["existing-source", "tracker:issue"],
+        )
+        tracker = next(source for source in matched_sources if source["source_key"] == "tracker:issue")
+        self.assertEqual(
+            [observation["comment_node_id"] for observation in tracker["observations"]],
+            ["comment-one", "comment-two"],
+        )
+        self.assertEqual(
+            by_node["pr-new-policy"]["sources"],
+            new_record["sources"],
+        )
+        self.assertFalse(
+            any(
+                source["source_key"] == "recent-closed"
+                for record in merged["records"]
+                for source in record["sources"]
+            )
+        )
+
+    def test_merge_corpus_rejects_unknown_source_policy(self):
+        with self.assertRaisesRegex(ValueError, "source_policy"):
+            self.collector.merge_corpus(
+                "not a corpus",
+                source_policy="unknown",
+            )
+
     def test_merge_preserves_ids_uses_corroboration_aliases_sparse_allocation_and_unresolved_null(self):
         existing = {
             "schema_version": "1.0.0",

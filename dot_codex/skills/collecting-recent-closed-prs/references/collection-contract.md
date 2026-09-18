@@ -31,6 +31,13 @@ unknown JSON fields/types and existing history/source prefixes are preserved.
 `recent-closed` is one stable source key; observations append by complete
 `run_id + updated_at + body_sha256` identity. Existing legacy observations
 remain intact. Do not synthesize these facts when core evidence is unavailable.
+The merger's keyword-only `source_policy` accepts `recent-closed` and
+`explicit-only`. The default `recent-closed` policy preserves the existing
+behavior, including recent-closed source and observation synthesis;
+`explicit-only` appends only sources and observations actually present in the
+incoming records and never synthesizes recent-closed provenance. Unknown
+policy values raise `ValueError` immediately. Curated collection callers must
+pass `source_policy="explicit-only"`.
 
 The latest authoritative timestamp controls the materialized PR state and
 evidence. Earlier observations remain in append-only history. Missing core

@@ -1,0 +1,9 @@
+{
+  "fixture_kind": "synthetic pull request hydration outcomes",
+  "roles": [
+    {"upstream_association": "OWNER", "resolved_role": "upstream-maintainer"},
+    {"upstream_association": "CONTRIBUTOR", "resolved_role": "contributor"},
+    {"upstream_association": "NONE", "resolved_role": "unknown"}
+  ],
+  "outcomes": ["resolved-open", "resolved-merged", "not-found-or-inaccessible", "hydration-failed"]
+}
