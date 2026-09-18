@@ -489,7 +489,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertTrue(all((ROOT / path).is_file() for path in expected_files))
         inspect_only = {
             "docs/claude-settings-reference.json",
-            "dot_codex/hooks.json",
+            "dot_codex/hooks.json.tmpl",
             "dot_codex/private_full_auto.config.toml",
             "docs/development/2026-09-15-103-orchestrator-permission-profiles-2/authoritative-inputs.md",
         }
