@@ -101,6 +101,31 @@ export PATH="$HOME/.local/bin:$PATH"
 export PATH="$PATH:$HOME/.pub-cache/bin"
 export PATH="$PATH:$HOME/.maestro/bin"
 
+# Orca CLI 를 앱 번들 경로로 고정한다.
+#
+# Orca 가 깐 /usr/local/bin/orca 심링크는 lrwx------ root:wheel 이라 일반 사용자가
+# readlink 할 수 없다. orca 는 시작할 때 자기가 실행된 심링크를 되짚어 앱 번들 위치를
+# 찾으므로, 그 심링크로 실행하면 첫 단계에서
+# "Unable to determine Orca.app path from symlink" 로 죽는다. 실행 디렉터리와 무관하다
+# (실측: ~/orca, ~, /tmp 모두 동일). 같은 자리에 Docker 가 깐 심링크는 lrwxr-xr-x 라
+# 정상 동작하므로 Orca 설치본의 권한 결함이다.
+#
+# 앱 번들의 bin 을 앞에 두면 심링크를 거치지 않아 문제가 사라진다. Orca pane 안에서는
+# Orca 가 이 경로를 PATH 맨 끝에 주입해 두지만 /usr/local/bin 이 앞서 이기므로 그 항목을
+# 앞으로 옮기고, pane 밖 일반 터미널에서는 새로 더한다. 기존 항목을 먼저 지우므로 셸을
+# 여러 번 거쳐도 중복되지 않는다.
+#
+# sudo chmod 로 심링크 권한을 고치는 방법도 있으나 Orca 업데이트가 심링크를 다시 깔면
+# 원상복귀하므로 사용자 설정에서 잡는다. orca-cli·orchestration 스킬이 명령을 `orca`
+# 이름으로 실행하도록 지정하고 있어(다른 실행파일로 대체하지 말라고 명시), 이 경로가
+# 뚫려야 두 스킬을 쓸 수 있다.
+_orca_bin="/Applications/Orca.app/Contents/Resources/bin"
+if [[ -x "$_orca_bin/orca" ]]; then
+    path=("$_orca_bin" "${(@)path:#$_orca_bin}")
+    export PATH
+fi
+unset _orca_bin
+
 # nvm 경로를 PATH 맨 앞으로 끌어온다.
 #
 # nvm.sh 를 source 하는 것만으로는 `node` 가 nvm 판으로 잡히지 않는다. nvm 은 PATH 에
