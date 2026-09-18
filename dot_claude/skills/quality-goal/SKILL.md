@@ -352,6 +352,14 @@ state is already terminal; register the report there when the terminal
 transition has already happened. No other artifact kind may be registered once
 the state is terminal.
 
+When a quality_state.py command first moves the state into COMPLETED, BLOCKED,
+NEEDS_REDESIGN, or CANCELLED, it appends one JSON line for the run to
+`~/.local/share/quality-goal/runs.jsonl` (override with `QUALITY_GOAL_RUNS_PATH`),
+outside every worktree, and stores the outcome in the state's `run_record`. The
+record is best-effort: a write failure is warned on stderr and kept in
+`run_record.error`, but never changes the transition or its exit code. Do not
+write, edit, or re-append run records by hand.
+
 ## Review invocation contract
 
 Every review round launches a NEW quality-reviewer agent invocation in a
