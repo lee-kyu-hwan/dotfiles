@@ -1,7 +1,10 @@
 import pathlib
+import hashlib
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -12,6 +15,14 @@ import review_state
 
 
 class ExecutionTests(unittest.TestCase):
+    def test_live_adapters_use_phase_specific_timeouts(self):
+        reviewers, critique, synthesis = review_state.live_adapters(pathlib.Path("/tmp/repository"))
+
+        self.assertEqual(reviewers["codex"].timeout_seconds, review_state.REVIEWER_TIMEOUT_SECONDS)
+        self.assertEqual(critique.timeout_seconds, review_state.CRITIQUE_TIMEOUT_SECONDS)
+        self.assertEqual(synthesis.timeout_seconds, review_state.CRITIQUE_TIMEOUT_SECONDS)
+        self.assertGreater(review_state.CRITIQUE_TIMEOUT_SECONDS, review_state.REVIEWER_TIMEOUT_SECONDS)
+
     def test_round_zero_starts_every_adapter_before_any_result_is_read(self):
         """A read before every start is a real independence violation, not an event-label issue."""
         class BlockingAdapter:
@@ -102,13 +113,200 @@ class ExecutionTests(unittest.TestCase):
                 if len([event for event in events if event[0] == "start"]) != 6:
                     raise AssertionError("read happened before every production process started")
                 events.append(("read", source))
-                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": []}}
+                if source in review_state.CLAUDE_PRODUCERS:
+                    return {"status": "ok", "payload": None, "raw": "NO_FINDINGS\n", "stderr": "", "exit_code": 0}
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": []}, "raw": "", "stderr": "", "exit_code": 0}
         with tempfile.TemporaryDirectory() as temporary_directory:
             adapters = {name: Adapter() for name in review_state.CLAUDE_PRODUCERS}
             adapters["codex"] = Adapter()
             result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"]}, adapters)
         self.assertEqual(result["termination_reason"], "requested_round_limit")
         self.assertEqual([source for kind, source in events if kind == "start"], list(review_state.CLAUDE_PRODUCERS) + ["codex"])
+
+    def test_explicit_no_findings_and_structured_empty_findings_are_valid(self):
+        class Adapter:
+            def start(self, source, prompt): return source
+            def read(self, source):
+                if source in review_state.CLAUDE_PRODUCERS:
+                    return {"status": "ok", "payload": None, "raw": "\n NO_FINDINGS \n", "stderr": "", "exit_code": 0}
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": []}, "raw": "{}", "stderr": "", "exit_code": 0}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = pathlib.Path(temporary_directory)
+            reviewers = {producer: Adapter() for producer in review_state.CLAUDE_PRODUCERS}
+            reviewers["codex"] = Adapter()
+            _, statuses, payloads = review_state._round_zero(run_dir, {"files": ["x.py"], "diff": ""}, reviewers)
+        self.assertEqual(set(payloads), {"claude", "codex"})
+        self.assertEqual(len(payloads["claude"]), 5)
+        self.assertTrue(all(record["explicit_no_findings"] for record in statuses["claude"]["raw"]))
+        self.assertTrue(all(record["attempts"] == 0 for record in statuses["claude"]["raw"]))
+
+    def test_legacy_claude_bare_no_findings_never_enters_valid_payloads_as_none(self):
+        class Adapter:
+            def start(self, source, prompt): return source
+            def read(self, source):
+                if source == "claude":
+                    return {"status": "ok", "payload": None, "raw": "NO_FINDINGS", "stderr": "", "exit_code": 0}
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": []}, "raw": "{}", "stderr": "", "exit_code": 0}
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            round_zero_dir = root / "round-zero"
+            round_zero_dir.mkdir()
+            _, _, payloads = review_state._round_zero(
+                round_zero_dir, {"files": ["x.py"], "diff": ""},
+                {"claude": Adapter(), "codex": Adapter()},
+            )
+            self.assertTrue(all(payload is not None for items in payloads.values() for _, payload in items))
+
+            result = review_state.run_dual_review(
+                root, {"base_sha": "a", "head_sha": "b", "files": ["x.py"]},
+                {"claude": Adapter(), "codex": Adapter()},
+            )
+            run_dir = pathlib.Path(result["run_dir"])
+            raw_claude = json.loads((run_dir / "raw-claude.json").read_text())
+            self.assertIsNotNone(raw_claude["raw"][0]["payload"])
+            self.assertTrue((run_dir / "provenance.json").is_file())
+            self.assertTrue((run_dir / "report.md").is_file())
+
+    def test_all_six_producers_must_return_valid_reviews(self):
+        calls = []
+        class Adapter:
+            def start(self, source, prompt): calls.append(source); return source
+            def read(self, source):
+                if source == "comment-analyzer":
+                    return {"status": "ok", "payload": None, "raw": "free prose", "stderr": "", "exit_code": 0}
+                if source in review_state.CLAUDE_PRODUCERS:
+                    return {"status": "ok", "payload": None, "raw": "NO_FINDINGS", "stderr": "", "exit_code": 0}
+                return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [], "next_steps": []}, "raw": "{}", "stderr": "", "exit_code": 0}
+        class NeverCalled:
+            def start(self, source, prompt): raise AssertionError("downstream must be skipped")
+            def read(self, handle): raise AssertionError("downstream must be skipped")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            reviewers = {producer: Adapter() for producer in review_state.CLAUDE_PRODUCERS}
+            reviewers["codex"] = Adapter()
+            result = review_state.run_dual_review(pathlib.Path(temporary_directory), {"base_sha": "a", "head_sha": "b", "files": ["x.py"]}, reviewers, NeverCalled(), NeverCalled())
+        self.assertEqual(result["termination_reason"], "reviewer_failure")
+        self.assertEqual((result["cross_critique_calls"], result["synthesis_calls"]), (0, 0))
+        self.assertEqual(calls.count("comment-analyzer"), 2)
+
+    def test_all_rejected_findings_are_incomplete(self):
+        invalid = {"severity": "unknown", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "bad", "body": "bad", "recommendation": "fix"}
+        class Adapter:
+            def __init__(self): self.calls = 0
+            def start(self, source, prompt): self.calls += 1; return source
+            def read(self, source): return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [invalid], "next_steps": []}, "raw": "bad", "stderr": "", "exit_code": 0}
+        adapters = {source: Adapter() for source in ("claude", "codex")}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.execute_round_zero(pathlib.Path(temporary_directory), {"files": ["x.py"]}, adapters)
+            sidecar = json.loads((pathlib.Path(result["run_dir"]) / "provenance.json").read_text())
+        self.assertEqual(result["termination_reason"], "reviewer_failure")
+        self.assertTrue(all(item["reason"] == "all_findings_rejected" for item in sidecar["reviewers"].values()))
+        self.assertTrue(all(adapter.calls == 2 for adapter in adapters.values()))
+
+    def test_validation_only_normalization_needs_no_group_or_line_ranges(self):
+        finding = {"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 900, "line_end": 901, "title": "valid", "body": "detail", "recommendation": "fix"}
+        response = {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [finding], "next_steps": []}, "raw": "structured", "stderr": "", "exit_code": 0}
+        valid, reason, explicit = review_state._producer_response_validity("codex", response)
+        self.assertTrue(valid)
+        self.assertEqual((reason, explicit), ("", False))
+
+    def test_actual_pr_test_analyzer_word_confidence_fixture_is_normalized(self):
+        failed_producer_fixture = """Title: robots.txt가 /landing을 Disallow해도 어떤 테스트도 실패하지 않는다
+Severity: high
+Confidence: high
+File: apps/web/user/src/app/(routes)/landing/page.test.tsx
+Line: 9
+Body: meta noindex를 읽으려면 크롤링은 허용되어야 한다.
+Recommendation: robots.test.ts에 차단하면 안 되는 경로 축을 추가한다.
+"""
+        accepted, rejected = review_state.normalize_reviewer_findings(
+            "pr-test-analyzer", failed_producer_fixture, "A"
+        )
+        self.assertEqual(rejected, [])
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(accepted[0]["finding_confidence"], review_state.CONFIDENCE_BY_WORD["high"])
+
+    def test_word_confidence_vocabulary_is_accepted_but_unknown_words_are_rejected(self):
+        fixture = {"severity": "high", "file": "x.py", "line_start": 1, "line_end": 1,
+                   "title": "finding", "body": "detail", "recommendation": "fix"}
+        for word in ("high", "medium", "low"):
+            with self.subTest(word=word):
+                accepted, rejected = review_state.normalize_reviewer_findings(
+                    "pr-test-analyzer", [{**fixture, "confidence": word}], "A"
+                )
+                self.assertEqual(rejected, [])
+                self.assertEqual(accepted[0]["finding_confidence"], review_state.CONFIDENCE_BY_WORD[word])
+        accepted, rejected = review_state.normalize_reviewer_findings(
+            "pr-test-analyzer", [{**fixture, "confidence": "certain"}], "A"
+        )
+        self.assertEqual(accepted, [])
+        self.assertEqual(len(rejected), 1)
+
+    def test_numeric_confidence_normalization_paths_are_preserved(self):
+        fixture = {"severity": "high", "file": "x.py", "line_start": 1, "line_end": 1,
+                   "title": "finding", "body": "detail", "recommendation": "fix"}
+        for raw_confidence, expected in ((0.9, 0.9), (90, 0.9)):
+            with self.subTest(raw_confidence=raw_confidence):
+                accepted, rejected = review_state.normalize_reviewer_findings(
+                    "pr-test-analyzer", [{**fixture, "confidence": raw_confidence}], "A"
+                )
+                self.assertEqual(rejected, [])
+                self.assertEqual(accepted[0]["finding_confidence"], expected)
+
+    def test_failure_reports_keep_termination_and_reviewer_status(self):
+        class Adapter:
+            def start(self, source, prompt): return source
+            def read(self, source): return {"status": "ok", "payload": None, "raw": "no marker", "stderr": "diagnostic", "exit_code": 0}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.execute_round_zero(pathlib.Path(temporary_directory), {"files": ["x.py"]}, {"claude": Adapter(), "codex": Adapter()})
+            run_dir = pathlib.Path(result["run_dir"])
+            provenance = json.loads((run_dir / "provenance.json").read_text())
+            report = (run_dir / "report.md").read_text()
+        self.assertEqual(provenance["termination_reason"], "reviewer_failure")
+        self.assertEqual(provenance["reviewers"]["claude"]["reason"], "missing_no_findings_marker")
+        self.assertIn("reviewer_failure", report)
+        self.assertIn("missing_no_findings_marker", report)
+
+    def test_main_exit_code_distinguishes_incomplete_runs(self):
+        terminal = {"reviewer_failure": 1, "single_reviewer": 1, "pipeline_failure": 1, "no_changes": 0, "requested_round_limit": 0}
+        for reason, expected in terminal.items():
+            with self.subTest(reason=reason), mock.patch.object(review_state, "snapshot_from_repository", return_value=({"files": []}, {"rounds": 1})), mock.patch.object(review_state, "live_adapters", return_value=({}, None, None)), mock.patch.object(review_state, "run_dual_review", return_value={"termination_reason": reason, "run_dir": "/tmp/run"}):
+                self.assertEqual(review_state.main([]), expected)
+
+    def test_no_findings_marker_requires_exact_stdout_and_preserves_diagnostics(self):
+        cases = {
+            "prefix\nNO_FINDINGS": "nonexclusive_no_findings_marker",
+            "NO_FINDINGS\nTitle: issue\nSeverity: High\nConfidence: 90\nFile: x.py\nLine: 1\nBody: detail\nRecommendation: fix": "nonexclusive_no_findings_marker",
+            "free prose": "missing_no_findings_marker",
+        }
+        for stdout, reason in cases.items():
+            class Adapter:
+                def start(self, source, prompt): return source
+                def read(self, source): return {"status": "ok", "payload": None, "raw": stdout, "stderr": "diagnostic", "exit_code": 0}
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as temporary_directory:
+                run_dir = pathlib.Path(temporary_directory)
+                reviewers = {producer: Adapter() for producer in review_state.CLAUDE_PRODUCERS}
+                reviewers["codex"] = Adapter()
+                review_state._round_zero(run_dir, {"files": ["x.py"], "diff": ""}, reviewers)
+                record = json.loads((run_dir / "raw-pr-test-analyzer.json").read_text())
+            self.assertEqual(record["reason"], reason)
+            self.assertEqual(record["attempts"], 1)
+            self.assertEqual(record["raw"], [stdout, stdout])
+            self.assertEqual(record["stderr"], "diagnostic")
+            self.assertEqual(record["exit_code"], 0)
+        class TransportFailure:
+            def start(self, source, prompt): return source
+            def read(self, source): return {"status": "error", "payload": None, "raw": "partial stdout", "stderr": "transport down", "exit_code": 9}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            run_dir = pathlib.Path(temporary_directory)
+            reviewers = {producer: TransportFailure() for producer in review_state.CLAUDE_PRODUCERS}
+            reviewers["codex"] = TransportFailure()
+            review_state._round_zero(run_dir, {"files": ["x.py"], "diff": ""}, reviewers)
+            record = json.loads((run_dir / "raw-pr-test-analyzer.json").read_text())
+        self.assertEqual(record["reason"], "error")
+        self.assertEqual(record["attempts"], 1)
+        self.assertEqual(record["raw"], ["partial stdout", "partial stdout"])
+        self.assertEqual((record["stderr"], record["exit_code"]), ("transport down", 9))
 
     def test_invalid_finding_is_rejected_without_retrying_its_valid_source(self):
         calls = []
@@ -267,7 +465,7 @@ print('I reviewed the diff and have no structured output to offer.')
                           "line_ranges": {"x.py": [(1, 9)]}}, reviewers)
         self.assertEqual(statuses["claude"]["status"], "excluded")
         self.assertNotIn("claude", payloads)
-        self.assertIn("codex", payloads)
+        self.assertEqual(payloads, {})
 
     def test_subprocess_adapter_success_cleans_temporary_output(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -290,16 +488,204 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({'verdict': 'ok', 'summary': 'fi
             self.assertIsNotNone(outputs[0])
             self.assertFalse(outputs[0].exists())
 
+    def test_subprocess_adapter_delivers_prompt_before_read_after_delay(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            receipt = root / "receipt.txt"
+            script = root / "read_before_result.py"
+            script.write_text("""import json, pathlib, sys
+prompt = sys.stdin.read()
+pathlib.Path(sys.argv[1]).write_text(prompt)
+pathlib.Path(sys.argv[2]).write_text(json.dumps({'verdict': 'ok', 'summary': 'received', 'findings': [], 'next_steps': []}))
+""")
+            adapter = review_state.SubprocessAdapter(
+                lambda source, output: (sys.executable, str(script), str(receipt), str(output))
+            )
+            handle = adapter.start("codex", "prompt-before-read")
+            try:
+                deadline = time.monotonic() + 3
+                while not receipt.exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(receipt.exists(), "child did not receive stdin before read()")
+                self.assertEqual(receipt.read_text(), "prompt-before-read")
+                response = adapter.read(handle)
+            finally:
+                if handle[0].poll() is None:
+                    handle[0].kill()
+                    handle[0].communicate()
+            self.assertEqual(response["status"], "ok")
+
+    def test_subprocess_adapter_large_prompt_does_not_block_start(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            script = root / "large_prompt.py"
+            script.write_text("""import hashlib, json, pathlib, sys, time
+time.sleep(.2)
+data = sys.stdin.buffer.read()
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'verdict': 'ok', 'summary': json.dumps({'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}), 'findings': [], 'next_steps': []}))
+""")
+            prompt = "x" * 262145
+            adapter = review_state.SubprocessAdapter(
+                lambda source, output: (sys.executable, str(script), str(output)), root, timeout_seconds=3
+            )
+            started = time.monotonic()
+            handle = adapter.start("codex", prompt)
+            elapsed = time.monotonic() - started
+            try:
+                self.assertLess(elapsed, 1)
+                self.assertEqual(len(handle), 5)
+                self.assertEqual(handle[1], "codex")
+                self.assertNotEqual(handle[2], prompt)
+                response = adapter.read(handle)
+            finally:
+                if handle[0].poll() is None:
+                    handle[0].kill()
+                    handle[0].communicate()
+            summary = json.loads(response["payload"]["summary"])
+            self.assertEqual(summary["bytes"], len(prompt.encode()))
+            self.assertEqual(summary["sha256"], hashlib.sha256(prompt.encode()).hexdigest())
+
+    def test_subprocess_adapter_unextractable_exit_zero_cleans_temp_files(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            script = root / "unextractable.py"
+            script.write_text("import sys\nsys.stdin.read()\nprint('not structured')\n")
+            temporary_paths = []
+            original = review_state.tempfile.NamedTemporaryFile
+            def named_temporary_file(*args, **kwargs):
+                temporary = original(*args, dir=root, **kwargs)
+                temporary_paths.append(pathlib.Path(temporary.name))
+                return temporary
+            adapter = review_state.SubprocessAdapter(lambda source, output: (sys.executable, str(script)), root)
+            with mock.patch.object(review_state.tempfile, "NamedTemporaryFile", side_effect=named_temporary_file):
+                response = adapter.read(adapter.start("codex", "prompt"))
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(response["exit_code"], 0)
+            self.assertEqual(len(temporary_paths), 2)
+            self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_subprocess_adapter_invalid_output_last_message_json_cleans_temp_files(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            script = root / "invalid_output.py"
+            script.write_text("import pathlib, sys\nsys.stdin.read()\npathlib.Path(sys.argv[1]).write_text('{invalid')\n")
+            temporary_paths = []
+            original = review_state.tempfile.NamedTemporaryFile
+            def named_temporary_file(*args, **kwargs):
+                temporary = original(*args, dir=root, **kwargs)
+                temporary_paths.append(pathlib.Path(temporary.name))
+                return temporary
+            adapter = review_state.SubprocessAdapter(
+                lambda source, output: (sys.executable, str(script), str(output)), root
+            )
+            with mock.patch.object(review_state.tempfile, "NamedTemporaryFile", side_effect=named_temporary_file):
+                response = adapter.read(adapter.start("codex", "prompt"))
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(response["exit_code"], 0)
+            self.assertEqual(len(temporary_paths), 2)
+            self.assertTrue(all(not path.exists() for path in temporary_paths))
+
+    def test_subprocess_adapter_timeout_kills_without_resending_and_cleans_prompt(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            receipt = root / "receipt.json"
+            script = root / "read_then_hang.py"
+            script.write_text("""import hashlib, json, pathlib, sys, time
+data = sys.stdin.buffer.read()
+pathlib.Path(sys.argv[1]).write_text(json.dumps({'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()}))
+time.sleep(10)
+""")
+            prompt = "send-once"
+            adapter = review_state.SubprocessAdapter(
+                lambda source, output: (sys.executable, str(script), str(receipt)), timeout_seconds=.2
+            )
+            handle = adapter.start("codex", prompt)
+            prompt_path, output_path = handle[2], handle[3]
+            try:
+                self.assertIsInstance(prompt_path, pathlib.Path)
+                self.assertFalse(prompt_path.exists())
+                response = adapter.read(handle)
+            finally:
+                if handle[0].poll() is None:
+                    handle[0].kill()
+                    handle[0].communicate()
+            delivered = json.loads(receipt.read_text())
+            self.assertEqual(response["status"], "timeout")
+            self.assertEqual(response["exit_code"], 124)
+            self.assertEqual(delivered, {
+                "bytes": len(prompt.encode()), "sha256": hashlib.sha256(prompt.encode()).hexdigest()
+            })
+            self.assertFalse(prompt_path.exists())
+            self.assertFalse(output_path.exists())
+
     def test_subprocess_adapter_detects_target_tree_mutation(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = pathlib.Path(temporary_directory)
             target = root / "target.py"; target.write_text("before\n")
             script = root / "mutate.py"
             script.write_text("import json, pathlib, sys\npathlib.Path(sys.argv[1]).write_text('after\\n')\nprint(json.dumps({'verdict':'ok','summary':'bad','findings':[],'next_steps':[]}))\n")
+            subprocess.run(("git", "-C", str(root), "init", "-q"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "target.py", "mutate.py"), check=True)
             adapter = review_state.SubprocessAdapter(lambda source: (sys.executable, str(script), str(target)), root)
             response = adapter.read(adapter.start("codex", "prompt"))
         self.assertEqual(response["status"], "error")
         self.assertIn("target tree changed", response["stderr"])
+
+    def test_subprocess_adapter_ignores_git_ignored_tree_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            ignored_target = root / "node_modules" / ".vite" / "results.json"
+            ignored_target.parent.mkdir(parents=True)
+            ignored_target.write_text('{"state":"before"}\n')
+            (root / ".gitignore").write_text("/node_modules/\n")
+            script = root / "mutate_ignored.py"
+            script.write_text("import json, pathlib, sys\npathlib.Path(sys.argv[1]).write_text('{\\\"state\\\":\\\"after\\\"}\\n')\nprint(json.dumps({'verdict':'ok','summary':'ignored mutation','findings':[],'next_steps':[]}))\n")
+            subprocess.run(("git", "-C", str(root), "init", "-q"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", ".gitignore", "mutate_ignored.py"), check=True)
+            ignored = subprocess.run(
+                ("git", "-C", str(root), "check-ignore", str(ignored_target.relative_to(root))),
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(ignored.returncode, 0, ignored.stderr)
+            adapter = review_state.SubprocessAdapter(
+                lambda source: (sys.executable, str(script), str(ignored_target)), root
+            )
+            response = adapter.read(adapter.start("codex", "prompt"))
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["payload"]["summary"], "ignored mutation")
+        self.assertNotIn("target tree changed", response["stderr"])
+
+    def test_tree_fingerprint_changes_when_tracked_file_is_deleted(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            target = root / "tracked.py"
+            target.write_text("present\n")
+            subprocess.run(("git", "-C", str(root), "init", "-q"), check=True)
+            subprocess.run(("git", "-C", str(root), "add", "tracked.py"), check=True)
+            before = review_state.tree_fingerprint(root)
+            target.unlink()
+            after = review_state.tree_fingerprint(root)
+        self.assertNotEqual(after, before)
+
+    def test_tree_fingerprint_falls_back_to_full_tree_when_git_tracks_nothing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            subprocess.run(("git", "-C", str(root), "init", "-q"), check=True)
+            before = review_state.tree_fingerprint(root)
+            (root / "untracked.py").write_text("created\n")
+            after = review_state.tree_fingerprint(root)
+        self.assertNotEqual(after, before)
+
+    def test_tree_fingerprint_falls_back_to_rglob_outside_git_repository(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            cache = root / "node_modules" / ".vite" / "results.json"
+            cache.parent.mkdir(parents=True)
+            cache.write_text("before\n")
+            before = review_state.tree_fingerprint(root)
+            cache.write_text("after\n")
+            after = review_state.tree_fingerprint(root)
+        self.assertNotEqual(after, before)
 
     def test_structured_claude_output_round_trips_when_result_is_empty_or_explanatory(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -374,8 +760,8 @@ print(json.dumps(wrapper))
             with mock.patch.object(review_state.tempfile, "NamedTemporaryFile", side_effect=named_temporary_file):
                 with self.assertRaises(FileNotFoundError):
                     adapter.start("codex", "prompt")
-            self.assertEqual(len(outputs), 1)
-            self.assertFalse(outputs[0].exists())
+            self.assertEqual(len(outputs), 2)
+            self.assertTrue(all(not output.exists() for output in outputs))
 
     def test_synthesis_transport_failure_after_successful_critiques_is_not_empty_success(self):
         finding = {"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "bug", "body": "detail", "recommendation": "fix"}
@@ -589,6 +975,99 @@ print(json.dumps(wrapper))
         self.assertIsNotNone(sidecar["synthesis_status"])
         self.assertEqual(sidecar["synthesis_status"]["status"], "skipped")
         self.assertIn("synthesis: skipped", report)
+
+    def test_critique_and_synthesis_calls_preserve_raw_output(self):
+        finding = {"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "bug", "body": "detail", "recommendation": "fix"}
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [finding], "next_steps": []}}
+        class Critique:
+            def start(self, source, prompt): return source, prompt
+            def read(self, handle):
+                source, prompt = handle
+                return {"status": "ok", "payload": {"critiques": [{"finding_id": item["finding_id"], "verdict": "유지", "evidence": [{"file": "x.py", "line_start": 1, "line_end": 1}], "new_findings": []} for item in json.loads(prompt)["opposing_findings"]]}, "raw": f"{source} critique stdout"}
+        class Synthesis:
+            def start(self, source, prompt): return source, prompt
+            def read(self, handle):
+                source, prompt = handle
+                view = json.loads(prompt)["anonymous_view"]
+                groups = {item["group"]: item["finding_id"] for item in view["findings"]}
+                return {"status": "ok", "payload": {"decisions": [{"classification": "합의", "decision_confidence": .9, "rationale": "same", "group_a_finding_ids": [groups["A"]], "group_b_finding_ids": [groups["B"]], "claims": {"A": "same", "B": "same"}}]}, "raw": f"{source} synthesis stdout"}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(
+                pathlib.Path(temporary_directory),
+                {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}},
+                {"claude": Reviewer(), "codex": Reviewer()}, Critique(), Synthesis(), requested_rounds=1,
+            )
+            run_dir = pathlib.Path(result["run_dir"])
+            raw_critiques = json.loads((run_dir / "raw-critiques.json").read_text())
+            raw_synthesis = json.loads((run_dir / "raw-synthesis.json").read_text())
+        critique_keys = {"phase", "source", "round", "status", "reason", "attempts", "stderr", "exit_code", "raw"}
+        synthesis_keys = {"phase", "source", "status", "reason", "attempts", "stderr", "exit_code", "raw"}
+        self.assertEqual([set(item) for item in raw_critiques], [critique_keys, critique_keys])
+        self.assertEqual([(item["phase"], item["source"], item["round"], item["raw"]) for item in raw_critiques], [
+            ("critique", "claude", 1, ["claude critique stdout"]),
+            ("critique", "codex", 1, ["codex critique stdout"]),
+        ])
+        self.assertEqual(set(raw_synthesis), synthesis_keys)
+        self.assertEqual((raw_synthesis["phase"], raw_synthesis["source"], raw_synthesis["status"], raw_synthesis["raw"]),
+                         ("synthesis", "fresh-claude", "ok", ["fresh-claude synthesis stdout"]))
+
+    def test_synthesis_transport_failure_preserves_raw_stdout(self):
+        raw_stdout = "You've hit your weekly limit · resets Sep 15 at 4am (Asia/Seoul)"
+        finding = {"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "bug", "body": "detail", "recommendation": "fix"}
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [finding], "next_steps": []}}
+        class Critique:
+            def start(self, source, prompt): return prompt
+            def read(self, prompt): return {"status": "ok", "payload": {"critiques": [{"finding_id": item["finding_id"], "verdict": "유지", "evidence": [{"file": "x.py", "line_start": 1, "line_end": 1}], "new_findings": []} for item in json.loads(prompt)["opposing_findings"]]}}
+        class SynthesisFailure:
+            def start(self, source, prompt): return prompt
+            def read(self, handle): return {"status": "error", "exit_code": 1, "stderr": "", "payload": None, "raw": raw_stdout}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(
+                pathlib.Path(temporary_directory),
+                {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}},
+                {"claude": Reviewer(), "codex": Reviewer()}, Critique(), SynthesisFailure(), requested_rounds=1,
+            )
+            run_dir = pathlib.Path(result["run_dir"])
+            raw_synthesis = json.loads((run_dir / "raw-synthesis.json").read_text())
+            synthesis = json.loads((run_dir / "synthesis.json").read_text())
+        self.assertEqual(raw_synthesis["raw"], [raw_stdout])
+        self.assertEqual(raw_synthesis["exit_code"], 1)
+        self.assertEqual(raw_synthesis["status"], "error")
+        self.assertEqual(raw_synthesis["stderr"], "")
+        self.assertEqual(result["termination_reason"], "pipeline_failure")
+        self.assertEqual(synthesis, [])
+
+    def test_critique_transport_failure_preserves_raw_stdout(self):
+        raw_stdout = "You've hit your weekly limit · resets Sep 15 at 4am (Asia/Seoul)"
+        finding = {"severity": "high", "finding_confidence": .8, "file": "x.py", "line_start": 1, "line_end": 1, "title": "bug", "body": "detail", "recommendation": "fix"}
+        class Reviewer:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "ok", "payload": {"verdict": "ok", "summary": "", "findings": [finding], "next_steps": []}}
+        class CritiqueFailure:
+            def start(self, source, prompt): return source
+            def read(self, handle): return {"status": "error", "exit_code": 1, "stderr": "", "payload": None, "raw": raw_stdout}
+        class Synthesis:
+            def start(self, source, prompt): raise AssertionError("synthesis must be skipped")
+            def read(self, handle): raise AssertionError("synthesis must be skipped")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = review_state.run_dual_review(
+                pathlib.Path(temporary_directory),
+                {"base_sha": "a", "head_sha": "b", "files": ["x.py"], "line_ranges": {"x.py": [[1, 1]]}},
+                {"claude": Reviewer(), "codex": Reviewer()}, CritiqueFailure(), Synthesis(), requested_rounds=1,
+            )
+            run_dir = pathlib.Path(result["run_dir"])
+            raw_critiques = json.loads((run_dir / "raw-critiques.json").read_text())
+            raw_synthesis = json.loads((run_dir / "raw-synthesis.json").read_text())
+        self.assertEqual(raw_critiques[0]["raw"], [raw_stdout])
+        self.assertEqual(raw_critiques[0]["exit_code"], 1)
+        self.assertEqual(raw_critiques[0]["status"], "error")
+        self.assertEqual(raw_synthesis["status"], "skipped")
+        self.assertEqual(raw_synthesis["raw"], [])
+        self.assertEqual(raw_synthesis["exit_code"], None)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ tests/**
 .aws/cli/cache
 
 .claude/skills/quality-goal/**/__pycache__
+.claude/skills/dual-review/**/__pycache__
 
 # Codex가 런타임에 계속 다시 쓰는 파일. 값이 같아도 표현을 자기 포맷으로
 # 정규화하고(`20` → `20.0`, 여러 줄 배열 → 한 줄), trust_level·hooks.state·
@@ -17,13 +18,47 @@ tests/**
 # 제외한다. 사람이 정한 설정만 docs/codex-config-reference.toml에 기록해 둔다.
 .codex/config.toml
 
-# 이 저장소는 public이고, 홈의 settings.json에는 autoMode.environment가 들어 있다.
-# 그 안에 조직명·비공개 저장소 경로·시크릿 환경변수 이름·k8s 네임스페이스·민감 데이터
-# 위치가 담기므로 소스로 편입하면 그대로 공개된다. 반대로 관리하면 apply 때마다 그
-# 블록(과 modelSettings의 effortLevel)이 삭제된다. 양쪽 다 안 되므로 제외한다.
-# 사람이 정한 공통 설정(hooks·permissions 등)은 docs/claude-settings-reference.json에
-# 남겨 두었다 — 새 머신에서는 그것을 보고 직접 넣는다.
+# dot_claude/settings.json은 검토된 composed role settings를 만드는 공통 composition
+# 입력일 뿐 account home 배포 대상이 아니다. permissions·sandbox·hooks가 있는 파일을
+# Claude account home에 배포하면 R4.5의 untrusted input이 되어 반드시 fail closed한다.
 .claude/settings.json
+
+# profile2에는 검토된 agents/skills public bundle만 배포한다. Account 설정,
+# credential/token, runtime/session/history 및 plugin state는 항상 제외한다.
+.local/share/ai-account-profiles/claude/profile2/settings.json
+.local/share/ai-account-profiles/claude/profile2/.claude.json
+.local/share/ai-account-profiles/claude/profile2/.credentials.json
+.local/share/ai-account-profiles/claude/profile2/credentials*
+.local/share/ai-account-profiles/claude/profile2/tokens*
+.local/share/ai-account-profiles/claude/profile2/sessions/**
+.local/share/ai-account-profiles/claude/profile2/projects/**
+.local/share/ai-account-profiles/claude/profile2/history.jsonl
+.local/share/ai-account-profiles/claude/profile2/backups/**
+.local/share/ai-account-profiles/claude/profile2/file-history/**
+.local/share/ai-account-profiles/claude/profile2/debug/**
+.local/share/ai-account-profiles/claude/profile2/todos/**
+.local/share/ai-account-profiles/claude/profile2/plans/**
+.local/share/ai-account-profiles/claude/profile2/plugins/**
+.local/share/ai-account-profiles/claude/profile2/skills/**/__pycache__
+.local/share/ai-account-profiles/claude/profile2/skills/**/*.pyc
+
+# profile1은 public bundle 없이 home만 쓴다. profile2와 같은 account 설정,
+# credential/token, runtime/session/history 및 plugin state를 항상 제외한다.
+.local/share/ai-account-profiles/claude/profile1/settings.json
+.local/share/ai-account-profiles/claude/profile1/.claude.json
+.local/share/ai-account-profiles/claude/profile1/.credentials.json
+.local/share/ai-account-profiles/claude/profile1/credentials*
+.local/share/ai-account-profiles/claude/profile1/tokens*
+.local/share/ai-account-profiles/claude/profile1/sessions/**
+.local/share/ai-account-profiles/claude/profile1/projects/**
+.local/share/ai-account-profiles/claude/profile1/history.jsonl
+.local/share/ai-account-profiles/claude/profile1/backups/**
+.local/share/ai-account-profiles/claude/profile1/file-history/**
+.local/share/ai-account-profiles/claude/profile1/debug/**
+.local/share/ai-account-profiles/claude/profile1/todos/**
+.local/share/ai-account-profiles/claude/profile1/plans/**
+.local/share/ai-account-profiles/claude/profile1/plugins/**
+.local/share/ai-account-profiles/claude/profile1/.shared-mcp.json
 
 # server: macOS 전용 항목만 제외
 {{ if eq .machine_type "server" }}

@@ -1,0 +1,2224 @@
+#!/usr/bin/env python3
+"""비밀을 저장하지 않는 AI account profile 선택기와 process launcher."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from typing import Any
+
+
+PROVIDERS = {"claude", "codex"}
+AUTH_KINDS = {"consumer", "organization", "api_payg"}
+ALIAS_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+ACCOUNT_FIELDS = {
+    "provider",
+    "auth_kind",
+    "config_home",
+    "allowed_scopes",
+    "enabled",
+    "max_cost_usd",
+}
+SCOPE_BINDING_FIELDS = {"kind", "value", "provider", "account_profile"}
+BINDING_FIELDS = {"kind", "id", "provider", "account_profile"}
+STRICT_REGISTRY_FIELDS = {
+    "schema_version",
+    "contract_id",
+    "accounts",
+    "workspace_directory_mappings",
+    "task_bindings",
+    "session_bindings",
+    "legacy_records",
+}
+STRICT_ACCOUNT_FIELDS = {
+    "alias",
+    "provider",
+    "auth_kind",
+    "config_home",
+    "config_home_mode",
+    "allowed_scopes",
+    "identity_enrollment_policy",
+    "identity_contract",
+    "usage_contract",
+    "enabled",
+    "max_cost_usd",
+}
+WORKSPACE_MAPPING_FIELDS = {"root", "provider", "account_profile", "priority"}
+STORED_BINDING_FIELDS = {
+    "id",
+    "provider",
+    "account_profile",
+    "workspace_root",
+    "binding_generation",
+}
+RESERVED_SELECTABLE_ALIASES = {"default", "dotfiles", "work", "personal"}
+ROLE_CONTRACT_ID = "orchestrator-permission-profiles-v2"
+IDENTITY_CONTRACTS = {
+    "claude": "claude_auth_status_v1",
+    "codex": "unavailable",
+}
+USAGE_CONTRACTS = {"none", "provider_status"}
+WRITE_NEEDS = {"none", "git"}
+PERMISSION_ENVIRONMENT_VARIABLES = (
+    "AI_SESSION_GIT_COMMON_DIR_RELATION",
+    "AI_SESSION_WRITE_ALLOW_SET",
+)
+CREDENTIAL_ENVIRONMENT_VARIABLES = (
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "CLOUD_ML_REGION",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "ANTHROPIC_FOUNDRY_RESOURCE",
+    "ANTHROPIC_FOUNDRY_API_KEY",
+    "AI_COST_LIMIT_USD",
+)
+VERIFIER_ONLY_ENVIRONMENT_VARIABLES = (
+    "AI_AUTH_KIND",
+    "AI_IDENTITY_CONTRACT",
+    "AI_USAGE_CONTRACT",
+    "AI_IDENTITY_DIGEST_FILE",
+    "AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES",
+)
+BENIGN_CLAUDE_SETTING_TYPES = {
+    "$schema": str,
+    "spinnerTipsEnabled": bool,
+    "theme": str,
+}
+
+
+class ContractError(Exception):
+    """사용자에게 비밀 없이 보고할 수 있는 계약 위반."""
+
+
+class VerificationError(Exception):
+    """인증/identity/usage 검증의 fail-closed 결과."""
+
+    def __init__(self, status: str, message: str) -> None:
+        if status not in {
+            "not_logged_in",
+            "identity_drift",
+            "identity_unverifiable",
+            "duplicate_mapping",
+            "blocked_verifier",
+            "usage_unknown",
+            "blocked_usage",
+        }:
+            raise ValueError("invalid verifier status")
+        super().__init__(message)
+        self.status = status
+
+
+@dataclass(frozen=True)
+class Account:
+    name: str
+    provider: str
+    auth_kind: str
+    config_home: Path | None
+    config_home_mode: str
+    allowed_scopes: tuple[str, ...]
+    enabled: bool
+    max_cost_usd: float | None
+    identity_contract: str
+    usage_contract: str
+
+
+@dataclass(frozen=True)
+class Registry:
+    accounts: dict[str, Account]
+    defaults: dict[str, str]
+    scope_bindings: tuple[dict[str, str], ...]
+    workspace_directory_mappings: tuple[dict[str, Any], ...] = ()
+    task_bindings: tuple[dict[str, Any], ...] = ()
+    session_bindings: tuple[dict[str, Any], ...] = ()
+    legacy_aliases: frozenset[str] = frozenset()
+    strict: bool = False
+
+
+@dataclass(frozen=True)
+class SelectionContext:
+    provider: str
+    role_profile: str
+    account_profile: str | None
+    task_id: str | None
+    session_id: str | None
+    epic_id: str | None
+    repository: str | None
+    organization: str | None
+    directory: Path | None
+    cost_limit_usd: float | None
+
+
+@dataclass(frozen=True)
+class Binding:
+    provider: str
+    role_profile: str
+    account_profile: str
+    account_scope: str
+    selection_source: str
+    selection_reason: str
+    config_home: Path | None
+    auth_kind: str
+    identity_contract: str
+    usage_contract: str
+    binding_generation: int = 1
+
+    def public_dict(self) -> dict[str, str | int]:
+        return {
+            "schema_version": 1,
+            "provider": self.provider,
+            "role_profile": self.role_profile,
+            "account_profile": self.account_profile,
+            "account_scope": self.account_scope,
+            "selection_source": self.selection_source,
+            "selection_reason": self.selection_reason,
+            "binding_generation": self.binding_generation,
+        }
+
+
+@dataclass(frozen=True)
+class AdmissionDecision:
+    login_status: str
+    identity_status: str
+    usage_status: str
+    cost_limit_status: str
+    public_status: str
+    exit_code: int
+    admitted: bool
+    failure_reason: str | None = None
+
+
+def require_alias(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not ALIAS_PATTERN.fullmatch(value):
+        raise ContractError(f"{field}은 비밀이 아닌 안전한 별칭이어야 합니다")
+    return value
+
+
+def require_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractError(f"{field}은 비어 있지 않은 문자열이어야 합니다")
+    return value
+
+
+def reject_unknown_fields(value: dict[str, Any], allowed: set[str], field: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ContractError(f"{field}에 허용되지 않은 필드가 있습니다: {', '.join(unknown)}")
+
+
+def normalize_repository(value: str) -> str:
+    repository = value.strip().lower()
+    if repository.count("/") != 1 or any(not part for part in repository.split("/")):
+        raise ContractError("repository는 owner/name 형식이어야 합니다")
+    return repository
+
+
+def normalize_organization(value: str) -> str:
+    organization = value.strip().lower()
+    if not organization or "/" in organization:
+        raise ContractError("organization 형식이 올바르지 않습니다")
+    return organization
+
+
+def normalized_directory(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ContractError("directory scope와 config_home은 절대경로 또는 ~ 경로여야 합니다")
+    return path.resolve(strict=False)
+
+
+def normalized_config_home(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ContractError("config_home은 절대경로 또는 ~ 경로여야 합니다")
+    if path.is_symlink():
+        raise ContractError("config_home은 symlink일 수 없습니다")
+    return path.resolve(strict=False)
+
+
+def parse_scope(scope: str) -> tuple[str, str]:
+    if ":" not in scope:
+        raise ContractError(f"scope 형식이 올바르지 않습니다: {scope}")
+    kind, raw_value = scope.split(":", 1)
+    if kind == "repository":
+        return kind, normalize_repository(raw_value)
+    if kind == "organization":
+        return kind, normalize_organization(raw_value)
+    if kind == "directory":
+        return kind, str(normalized_directory(raw_value))
+    raise ContractError(f"지원하지 않는 scope 종류입니다: {kind}")
+
+
+def normalized_declared_config_home(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise ContractError("blocked_contract: config_home은 절대경로 또는 ~ 경로여야 합니다")
+    if path.is_symlink():
+        raise ContractError("blocked_contract: config_home은 symlink일 수 없습니다")
+    return Path(os.path.abspath(path))
+
+
+def parse_strict_scope(raw_scope: Any, field: str) -> str:
+    if not isinstance(raw_scope, dict):
+        raise ContractError(f"blocked_contract: {field}는 table이어야 합니다")
+    reject_unknown_fields(raw_scope, {"kind", "value"}, field)
+    kind = require_string(raw_scope.get("kind"), f"{field}.kind")
+    if kind != "directory":
+        raise ContractError("blocked_contract: active allowed_scopes kind는 directory만 허용됩니다")
+    value = normalized_directory(require_string(raw_scope.get("value"), f"{field}.value"))
+    return f"directory:{value}"
+
+
+def parse_stored_bindings(raw: Any, field: str, accounts: dict[str, Account]) -> tuple[dict[str, Any], ...]:
+    if not isinstance(raw, list):
+        raise ContractError(f"blocked_contract: {field}는 array여야 합니다")
+    bindings: list[dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        item_field = f"{field}[{index}]"
+        if not isinstance(item, dict):
+            raise ContractError(f"blocked_contract: {item_field}는 table이어야 합니다")
+        reject_unknown_fields(item, STORED_BINDING_FIELDS, item_field)
+        binding_id = require_string(item.get("id"), f"{item_field}.id")
+        provider = require_string(item.get("provider"), f"{item_field}.provider")
+        profile = require_alias(item.get("account_profile"), f"{item_field}.account_profile")
+        generation = item.get("binding_generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise ContractError(f"blocked_contract: {item_field}.binding_generation은 양의 정수여야 합니다")
+        account = accounts.get(profile)
+        if account is None or account.provider != provider:
+            raise ContractError(f"blocked_binding: {item_field}가 active account를 가리키지 않습니다")
+        bindings.append(
+            {
+                "id": binding_id,
+                "provider": provider,
+                "account_profile": profile,
+                "workspace_root": str(
+                    normalized_directory(
+                        require_string(item.get("workspace_root"), f"{item_field}.workspace_root")
+                    )
+                ),
+                "binding_generation": generation,
+            }
+        )
+    return tuple(bindings)
+
+
+def load_strict_registry(raw: dict[str, Any]) -> Registry:
+    reject_unknown_fields(raw, STRICT_REGISTRY_FIELDS, "strict registry")
+    if raw.get("schema_version") != 2:
+        raise ContractError("blocked_contract: account registry schema_version은 2여야 합니다")
+    if raw.get("contract_id") != ROLE_CONTRACT_ID:
+        raise ContractError("blocked_contract: account registry contract_id가 일치하지 않습니다")
+
+    raw_accounts = raw.get("accounts")
+    if not isinstance(raw_accounts, list) or not raw_accounts:
+        raise ContractError("blocked_contract: accounts는 비어 있지 않은 table array여야 합니다")
+    accounts: dict[str, Account] = {}
+    config_homes: dict[Path, str] = {}
+    for index, raw_account in enumerate(raw_accounts):
+        field = f"accounts[{index}]"
+        if not isinstance(raw_account, dict):
+            raise ContractError(f"blocked_contract: {field}는 table이어야 합니다")
+        reject_unknown_fields(raw_account, STRICT_ACCOUNT_FIELDS, field)
+        name = require_alias(raw_account.get("alias"), f"{field}.alias")
+        if name in RESERVED_SELECTABLE_ALIASES:
+            raise ContractError(f"blocked_contract: reserved selectable alias는 사용할 수 없습니다: {name}")
+        if name in accounts:
+            raise ContractError(f"blocked_contract: active account alias가 중복됩니다: {name}")
+        provider = require_string(raw_account.get("provider"), f"{field}.provider")
+        if provider not in PROVIDERS:
+            raise ContractError(f"blocked_contract: 지원하지 않는 provider입니다: {provider}")
+        auth_kind = require_string(raw_account.get("auth_kind"), f"{field}.auth_kind")
+        if auth_kind not in AUTH_KINDS:
+            raise ContractError(f"blocked_contract: 지원하지 않는 auth_kind입니다: {auth_kind}")
+        if raw_account.get("identity_enrollment_policy") != "explicit_only":
+            raise ContractError(f"blocked_contract: {field}.identity_enrollment_policy가 유효하지 않습니다")
+        identity_contract = require_string(
+            raw_account.get("identity_contract"), f"{field}.identity_contract"
+        )
+        if identity_contract != IDENTITY_CONTRACTS[provider]:
+            raise ContractError(
+                f"blocked_contract: {field}.identity_contract가 provider와 일치하지 않습니다"
+            )
+        usage_contract = require_string(
+            raw_account.get("usage_contract"), f"{field}.usage_contract"
+        )
+        if usage_contract not in USAGE_CONTRACTS:
+            raise ContractError(f"blocked_contract: {field}.usage_contract가 유효하지 않습니다")
+
+        raw_scopes = raw_account.get("allowed_scopes")
+        if not isinstance(raw_scopes, list) or not raw_scopes:
+            raise ContractError(f"blocked_contract: {field}.allowed_scopes는 비어 있을 수 없습니다")
+        scopes = tuple(
+            parse_strict_scope(item, f"{field}.allowed_scopes[{scope_index}]")
+            for scope_index, item in enumerate(raw_scopes)
+        )
+
+        raw_mode = raw_account.get("config_home_mode")
+        raw_home = raw_account.get("config_home")
+        if provider == "claude":
+            if raw_mode not in {"provider_default", "explicit"}:
+                raise ContractError(f"blocked_contract: {field}.config_home_mode가 유효하지 않습니다")
+            if raw_mode == "provider_default":
+                if raw_home is not None:
+                    raise ContractError("blocked_contract: provider_default Claude account에는 config_home이 없어야 합니다")
+                config_home = None
+            else:
+                config_home = normalized_declared_config_home(
+                    require_string(raw_home, f"{field}.config_home")
+                )
+        else:
+            if raw_mode is not None:
+                raise ContractError("blocked_contract: Codex account에는 config_home_mode를 둘 수 없습니다")
+            config_home = normalized_declared_config_home(
+                require_string(raw_home, f"{field}.config_home")
+            )
+            raw_mode = "explicit"
+        if config_home is not None:
+            if config_home in config_homes:
+                raise ContractError("blocked_contract: active account config_home이 중복됩니다")
+            config_homes[config_home] = name
+
+        enabled = raw_account.get("enabled", auth_kind != "api_payg")
+        if not isinstance(enabled, bool):
+            raise ContractError(f"blocked_contract: {field}.enabled는 boolean이어야 합니다")
+        raw_max_cost = raw_account.get("max_cost_usd")
+        if raw_max_cost is not None and (
+            isinstance(raw_max_cost, bool) or not isinstance(raw_max_cost, (int, float))
+        ):
+            raise ContractError(f"blocked_contract: {field}.max_cost_usd는 숫자여야 합니다")
+        max_cost = float(raw_max_cost) if raw_max_cost is not None else None
+        if auth_kind == "api_payg" and (
+            max_cost is None or not math.isfinite(max_cost) or max_cost <= 0
+        ):
+            raise ContractError(f"blocked_contract: PAYG account {name}에는 양수 max_cost_usd가 필요합니다")
+        if auth_kind != "api_payg" and raw_max_cost is not None:
+            raise ContractError("blocked_contract: consumer/organization account에는 max_cost_usd를 둘 수 없습니다")
+        accounts[name] = Account(
+            name=name,
+            provider=provider,
+            auth_kind=auth_kind,
+            config_home=config_home,
+            config_home_mode=raw_mode,
+            allowed_scopes=scopes,
+            enabled=enabled,
+            max_cost_usd=max_cost,
+            identity_contract=identity_contract,
+            usage_contract=usage_contract,
+        )
+
+    raw_mappings = raw.get("workspace_directory_mappings")
+    if not isinstance(raw_mappings, list) or not raw_mappings:
+        raise ContractError("blocked_contract: workspace_directory_mappings는 비어 있을 수 없습니다")
+    mappings: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_mappings):
+        field = f"workspace_directory_mappings[{index}]"
+        if not isinstance(item, dict):
+            raise ContractError(f"blocked_contract: {field}는 table이어야 합니다")
+        reject_unknown_fields(item, WORKSPACE_MAPPING_FIELDS, field)
+        provider = require_string(item.get("provider"), f"{field}.provider")
+        profile = require_alias(item.get("account_profile"), f"{field}.account_profile")
+        priority = item.get("priority")
+        if isinstance(priority, bool) or not isinstance(priority, int) or priority <= 0:
+            raise ContractError(f"blocked_contract: {field}.priority는 양의 정수여야 합니다")
+        account = accounts.get(profile)
+        if provider not in PROVIDERS or account is None or account.provider != provider:
+            raise ContractError(f"blocked_contract: {field}의 provider/account 연결이 유효하지 않습니다")
+        mappings.append(
+            {
+                "root": str(normalized_directory(require_string(item.get("root"), f"{field}.root"))),
+                "provider": provider,
+                "account_profile": profile,
+                "priority": priority,
+            }
+        )
+
+    legacy_records = raw.get("legacy_records")
+    if not isinstance(legacy_records, dict):
+        raise ContractError("blocked_contract: legacy_records는 table이어야 합니다")
+    legacy_aliases: set[str] = set()
+    for alias, record in legacy_records.items():
+        legacy_aliases.add(require_alias(alias, "legacy alias"))
+        if not isinstance(record, str) or not record:
+            raise ContractError("blocked_contract: legacy record는 opaque non-empty string이어야 합니다")
+    if set(accounts) & legacy_aliases:
+        raise ContractError("blocked_contract: legacy records must remain outside active accounts")
+
+    task_bindings = parse_stored_bindings(raw.get("task_bindings"), "task_bindings", accounts)
+    session_bindings = parse_stored_bindings(raw.get("session_bindings"), "session_bindings", accounts)
+    return Registry(
+        accounts=accounts,
+        defaults={},
+        scope_bindings=(),
+        workspace_directory_mappings=tuple(mappings),
+        task_bindings=task_bindings,
+        session_bindings=session_bindings,
+        legacy_aliases=frozenset(legacy_aliases),
+        strict=True,
+    )
+
+
+def load_registry(path: Path) -> Registry:
+    try:
+        with path.open("rb") as stream:
+            raw = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ContractError(f"account registry를 읽을 수 없습니다: {path}") from error
+
+    if not isinstance(raw, dict):
+        raise ContractError("account registry 최상위 값은 table이어야 합니다")
+    if "schema_version" in raw:
+        try:
+            return load_strict_registry(raw)
+        except ContractError as error:
+            if str(error).startswith(("blocked_contract:", "blocked_binding:")):
+                raise
+            raise ContractError(f"blocked_contract: {error}") from error
+    reject_unknown_fields(raw, {"version", "accounts", "defaults", "scope_bindings"}, "registry")
+    if raw.get("version") != 1:
+        raise ContractError("account registry version은 1이어야 합니다")
+
+    raw_accounts = raw.get("accounts")
+    if not isinstance(raw_accounts, dict) or not raw_accounts:
+        raise ContractError("accounts table은 비어 있을 수 없습니다")
+
+    accounts: dict[str, Account] = {}
+    config_homes: dict[Path, str] = {}
+    for raw_name, raw_account in raw_accounts.items():
+        name = require_alias(raw_name, "account profile")
+        if not isinstance(raw_account, dict):
+            raise ContractError(f"account profile {name}은 table이어야 합니다")
+        reject_unknown_fields(raw_account, ACCOUNT_FIELDS, f"account profile {name}")
+        provider = require_string(raw_account.get("provider"), f"{name}.provider")
+        if provider not in PROVIDERS:
+            raise ContractError(f"지원하지 않는 provider입니다: {provider}")
+        auth_kind = require_string(raw_account.get("auth_kind"), f"{name}.auth_kind")
+        if auth_kind not in AUTH_KINDS:
+            raise ContractError(f"지원하지 않는 auth_kind입니다: {auth_kind}")
+        config_home = normalized_config_home(
+            require_string(raw_account.get("config_home"), f"{name}.config_home")
+        )
+        if config_home in config_homes:
+            raise ContractError(
+                f"account profile config_home 충돌: {config_homes[config_home]}, {name}"
+            )
+        config_homes[config_home] = name
+
+        raw_scopes = raw_account.get("allowed_scopes")
+        if not isinstance(raw_scopes, list) or not raw_scopes:
+            raise ContractError(f"{name}.allowed_scopes는 비어 있지 않은 배열이어야 합니다")
+        scopes = tuple(
+            f"{kind}:{value}"
+            for kind, value in (parse_scope(require_string(item, "allowed scope")) for item in raw_scopes)
+        )
+        enabled = raw_account.get("enabled", auth_kind != "api_payg")
+        if not isinstance(enabled, bool):
+            raise ContractError(f"{name}.enabled는 boolean이어야 합니다")
+        raw_max_cost = raw_account.get("max_cost_usd")
+        if raw_max_cost is not None and (
+            isinstance(raw_max_cost, bool) or not isinstance(raw_max_cost, (int, float))
+        ):
+            raise ContractError(f"{name}.max_cost_usd는 숫자여야 합니다")
+        max_cost = float(raw_max_cost) if raw_max_cost is not None else None
+        if auth_kind == "api_payg" and (
+            max_cost is None or not math.isfinite(max_cost) or max_cost <= 0
+        ):
+            raise ContractError(f"PAYG profile {name}에는 양수 max_cost_usd가 필요합니다")
+        if auth_kind != "api_payg" and raw_max_cost is not None:
+            raise ContractError(f"consumer/organization profile에는 max_cost_usd를 둘 수 없습니다: {name}")
+        accounts[name] = Account(
+            name=name,
+            provider=provider,
+            auth_kind=auth_kind,
+            config_home=config_home,
+            config_home_mode="explicit",
+            allowed_scopes=scopes,
+            enabled=enabled,
+            max_cost_usd=max_cost,
+            identity_contract="legacy_v1",
+            usage_contract="provider_status",
+        )
+
+    raw_defaults = raw.get("defaults", {})
+    if not isinstance(raw_defaults, dict):
+        raise ContractError("defaults는 table이어야 합니다")
+    defaults: dict[str, str] = {}
+    for provider, raw_profile in raw_defaults.items():
+        if provider not in PROVIDERS:
+            raise ContractError(f"지원하지 않는 default provider입니다: {provider}")
+        profile = require_alias(raw_profile, f"{provider} default")
+        account = accounts.get(profile)
+        if account is None or account.provider != provider:
+            raise ContractError(f"{provider} default가 유효한 같은-provider profile을 가리키지 않습니다")
+        if account.auth_kind == "api_payg":
+            raise ContractError("PAYG profile은 provider 기본값일 수 없습니다")
+        defaults[provider] = profile
+
+    raw_scope_bindings = raw.get("scope_bindings", [])
+    if not isinstance(raw_scope_bindings, list):
+        raise ContractError("scope_bindings는 table 배열이어야 합니다")
+    scope_bindings: list[dict[str, str]] = []
+    for index, item in enumerate(raw_scope_bindings):
+        if not isinstance(item, dict):
+            raise ContractError(f"scope_bindings[{index}]는 table이어야 합니다")
+        reject_unknown_fields(item, SCOPE_BINDING_FIELDS, f"scope_bindings[{index}]")
+        kind = require_string(item.get("kind"), "scope binding kind")
+        value = require_string(item.get("value"), "scope binding value")
+        normalized_kind, normalized_value = parse_scope(f"{kind}:{value}")
+        provider = require_string(item.get("provider"), "scope binding provider")
+        profile = require_alias(item.get("account_profile"), "scope binding account_profile")
+        account = accounts.get(profile)
+        if provider not in PROVIDERS or account is None or account.provider != provider:
+            raise ContractError(f"scope binding {index}의 provider/profile 연결이 유효하지 않습니다")
+        if account.auth_kind == "api_payg":
+            raise ContractError("PAYG profile은 scope mapping으로 자동 선택할 수 없습니다")
+        scope_bindings.append(
+            {
+                "kind": normalized_kind,
+                "value": normalized_value,
+                "provider": provider,
+                "account_profile": profile,
+            }
+        )
+    return Registry(accounts, defaults, tuple(scope_bindings))
+
+
+def load_task_bindings(path: Path | None, registry: Registry) -> tuple[dict[str, str], ...]:
+    if path is None:
+        return ()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractError(f"task binding adapter 입력을 읽을 수 없습니다: {path}") from error
+    if not isinstance(raw, dict):
+        raise ContractError("task binding adapter 입력은 object여야 합니다")
+    reject_unknown_fields(raw, {"version", "bindings"}, "task binding adapter")
+    if raw.get("version") != 1 or not isinstance(raw.get("bindings"), list):
+        raise ContractError("task binding adapter version/bindings 계약이 유효하지 않습니다")
+    bindings: list[dict[str, str]] = []
+    for index, item in enumerate(raw["bindings"]):
+        if not isinstance(item, dict):
+            raise ContractError(f"task binding {index}는 object여야 합니다")
+        reject_unknown_fields(item, BINDING_FIELDS, f"task binding {index}")
+        kind = require_string(item.get("kind"), "task binding kind")
+        if kind not in {"task", "epic"}:
+            raise ContractError(f"지원하지 않는 task binding kind입니다: {kind}")
+        binding_id = require_string(item.get("id"), "task binding id")
+        provider = require_string(item.get("provider"), "task binding provider")
+        profile = require_alias(item.get("account_profile"), "task binding account_profile")
+        account = registry.accounts.get(profile)
+        if provider not in PROVIDERS or account is None or account.provider != provider:
+            raise ContractError(f"task binding {index}의 provider/profile 연결이 유효하지 않습니다")
+        bindings.append(
+            {"kind": kind, "id": binding_id, "provider": provider, "account_profile": profile}
+        )
+    return tuple(bindings)
+
+
+def directory_contains(parent: str | Path, child: Path) -> bool:
+    parent_path = normalized_directory(parent)
+    try:
+        child.relative_to(parent_path)
+        return True
+    except ValueError:
+        return False
+
+
+def scope_matches(kind: str, value: str, context: SelectionContext) -> bool:
+    if kind == "repository":
+        return context.repository == value
+    if kind == "organization":
+        return context.organization == value
+    return context.directory is not None and directory_contains(value, context.directory)
+
+
+def scope_specificity(kind: str, value: str) -> int:
+    if kind == "repository":
+        return 300_000
+    if kind == "organization":
+        return 200_000
+    return 100_000 + len(Path(value).parts)
+
+
+def resolve_same_priority(candidates: list[tuple[str, str]], tier: str) -> tuple[str, str] | None:
+    if not candidates:
+        return None
+    profiles = {profile for profile, _reason in candidates}
+    if len(profiles) != 1:
+        raise ContractError(f"{tier}의 같은 우선순위 후보가 충돌하여 자동 선택하지 않습니다")
+    return candidates[0]
+
+
+def matching_allowed_scope(account: Account, context: SelectionContext) -> str:
+    matches: list[tuple[int, str]] = []
+    for raw_scope in account.allowed_scopes:
+        kind, value = parse_scope(raw_scope)
+        if scope_matches(kind, value, context):
+            matches.append((scope_specificity(kind, value), f"{kind}:{value}"))
+    if not matches:
+        raise ContractError(
+            f"account profile {account.name}은 현재 repository/organization/directory scope를 허용하지 않습니다"
+        )
+    return max(matches, key=lambda item: item[0])[1]
+
+
+def select_legacy_account(
+    registry: Registry,
+    context: SelectionContext,
+    task_bindings: tuple[dict[str, str], ...],
+) -> Binding:
+    if context.provider not in PROVIDERS:
+        raise ContractError(f"지원하지 않는 provider입니다: {context.provider}")
+    require_alias(context.role_profile, "role_profile")
+
+    selected: tuple[str, str, str] | None = None
+    if context.account_profile:
+        selected = (context.account_profile, "explicit", "명시적 --account-profile")
+
+    if selected is None:
+        ids = {"task": context.task_id, "epic": context.epic_id}
+        candidates = [
+            (
+                item["account_profile"],
+                f"{item['kind']}:{item['id']}",
+            )
+            for item in task_bindings
+            if item["provider"] == context.provider and ids[item["kind"]] == item["id"]
+        ]
+        resolved = resolve_same_priority(candidates, "task/epic binding")
+        if resolved:
+            selected = (resolved[0], "task_binding", resolved[1])
+
+    if selected is None:
+        scope_candidates: list[tuple[int, str, str, str]] = []
+        for item in registry.scope_bindings:
+            if item["provider"] != context.provider:
+                continue
+            if scope_matches(item["kind"], item["value"], context):
+                scope_candidates.append(
+                    (
+                        scope_specificity(item["kind"], item["value"]),
+                        item["account_profile"],
+                        item["kind"],
+                        f"{item['kind']}:{item['value']}",
+                    )
+                )
+        if scope_candidates:
+            highest = max(item[0] for item in scope_candidates)
+            top = [item for item in scope_candidates if item[0] == highest]
+            resolved = resolve_same_priority(
+                [(item[1], item[3]) for item in top], "scope mapping"
+            )
+            assert resolved is not None
+            kind = top[0][2]
+            selected = (resolved[0], f"scope:{kind}", resolved[1])
+
+    if selected is None:
+        default = registry.defaults.get(context.provider)
+        if default:
+            selected = (default, "default", f"provider:{context.provider}")
+    if selected is None:
+        raise ContractError("선택 가능한 account profile이 없습니다")
+
+    profile, source, reason = selected
+    account = registry.accounts.get(profile)
+    if account is None:
+        raise ContractError(f"등록되지 않은 account profile입니다: {profile}")
+    if account.provider != context.provider:
+        raise ContractError(
+            f"account profile provider 불일치: 요청={context.provider}, profile={account.provider}"
+        )
+    account_scope = matching_allowed_scope(account, context)
+
+    if account.auth_kind == "api_payg":
+        if source != "explicit":
+            raise ContractError("PAYG profile은 명시적 --account-profile로만 선택할 수 있습니다")
+        if not account.enabled:
+            raise ContractError("PAYG profile이 registry에서 활성화되지 않았습니다")
+        if (
+            context.cost_limit_usd is None
+            or not math.isfinite(context.cost_limit_usd)
+            or context.cost_limit_usd <= 0
+        ):
+            raise ContractError("PAYG profile에는 양수 --cost-limit-usd가 필요합니다")
+        assert account.max_cost_usd is not None
+        if context.cost_limit_usd > account.max_cost_usd:
+            raise ContractError("PAYG 요청 비용 한도가 profile 최대 비용 한도를 초과합니다")
+
+    return Binding(
+        provider=context.provider,
+        role_profile=context.role_profile,
+        account_profile=account.name,
+        account_scope=account_scope,
+        selection_source=source,
+        selection_reason=reason,
+        config_home=account.config_home,
+        auth_kind=account.auth_kind,
+        identity_contract=account.identity_contract,
+        usage_contract=account.usage_contract,
+    )
+
+
+def select_workspace_mapping(registry: Registry, context: SelectionContext) -> dict[str, Any] | None:
+    if context.directory is None:
+        raise ContractError("blocked_contract: current real directory를 확인할 수 없습니다")
+    matches = [
+        item
+        for item in registry.workspace_directory_mappings
+        if item["provider"] == context.provider
+        and directory_contains(item["root"], context.directory)
+    ]
+    if not matches:
+        return None
+    longest = max(len(Path(item["root"]).parts) for item in matches)
+    longest_matches = [item for item in matches if len(Path(item["root"]).parts) == longest]
+    highest_priority = max(item["priority"] for item in longest_matches)
+    top = [item for item in longest_matches if item["priority"] == highest_priority]
+    if len(top) != 1:
+        raise ContractError("blocked_contract: workspace directory mapping이 ambiguous합니다")
+    return top[0]
+
+
+def matching_stored_binding(
+    registry: Registry,
+    context: SelectionContext,
+    derived_mapping: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    requested = (
+        ("task", context.task_id, registry.task_bindings),
+        ("session", context.session_id, registry.session_bindings),
+    )
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for kind, binding_id, bindings in requested:
+        if binding_id is None:
+            continue
+        candidates.extend(
+            (kind, item)
+            for item in bindings
+            if item["id"] == binding_id and item["provider"] == context.provider
+        )
+    if not candidates:
+        return None
+    assert context.directory is not None
+    if any(Path(item["workspace_root"]) != context.directory for _kind, item in candidates):
+        raise ContractError("blocked_binding: stored binding workspace path가 current real path와 다릅니다")
+    identities = {
+        (item["account_profile"], item["binding_generation"])
+        for _kind, item in candidates
+    }
+    if len(identities) != 1:
+        raise ContractError("blocked_binding: stored task/session binding이 충돌합니다")
+    selected = candidates[0][1]
+    if derived_mapping is None or derived_mapping["account_profile"] != selected["account_profile"]:
+        raise ContractError("blocked_binding: stored binding과 current directory mapping이 일치하지 않습니다")
+    return selected
+
+
+def select_strict_account(registry: Registry, context: SelectionContext) -> Binding:
+    if context.provider not in PROVIDERS:
+        raise ContractError(f"blocked_contract: 지원하지 않는 provider입니다: {context.provider}")
+    require_alias(context.role_profile, "role_profile")
+    profile: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    generation = 1
+    derived_mapping: dict[str, Any] | None = None
+    if context.account_profile:
+        requested = require_alias(context.account_profile, "account_profile")
+        if requested in registry.legacy_aliases or requested not in registry.accounts:
+            raise ContractError("blocked_binding: explicit account profile은 selectable active alias가 아닙니다")
+        profile = requested
+        source = "explicit"
+        reason = "explicit_account_profile"
+
+    if profile is None:
+        derived_mapping = select_workspace_mapping(registry, context)
+        stored = matching_stored_binding(registry, context, derived_mapping)
+        if stored is not None:
+            profile = stored["account_profile"]
+            source = "stored_binding"
+            reason = "stored_task_or_session_binding"
+            generation = stored["binding_generation"]
+
+    if profile is None and derived_mapping is not None:
+        profile = derived_mapping["account_profile"]
+        source = "workspace_directory_mapping"
+        reason = "matched_current_real_directory"
+
+    if profile is None and context.provider == "codex":
+        default = registry.accounts.get("codex-default")
+        if default is not None:
+            try:
+                matching_allowed_scope(default, context)
+            except ContractError:
+                default = None
+        if default is not None:
+            profile = default.name
+            source = "provider_default"
+            reason = "codex_provider_default"
+
+    if profile is None:
+        raise ContractError("blocked_contract: current real path에 선택 가능한 account가 없습니다")
+    account = registry.accounts.get(profile)
+    if account is None or account.provider != context.provider:
+        raise ContractError("blocked_binding: 선택 account의 provider가 요청과 일치하지 않습니다")
+    if not account.enabled:
+        raise ContractError("blocked_binding: 선택 account가 활성화되지 않았습니다")
+    try:
+        account_scope = matching_allowed_scope(account, context)
+    except ContractError as error:
+        status = "blocked_binding" if source in {"explicit", "stored_binding"} else "blocked_contract"
+        raise ContractError(f"{status}: current real path가 선택 account scope 밖입니다") from error
+
+    if account.auth_kind == "api_payg":
+        if source != "explicit":
+            raise ContractError("blocked_binding: PAYG account는 explicit selection만 허용됩니다")
+        if (
+            context.cost_limit_usd is None
+            or not math.isfinite(context.cost_limit_usd)
+            or context.cost_limit_usd <= 0
+        ):
+            raise ContractError("blocked_binding: PAYG account에는 양수 cost limit이 필요합니다")
+        assert account.max_cost_usd is not None
+        if context.cost_limit_usd > account.max_cost_usd:
+            raise ContractError("blocked_binding: PAYG cost limit이 account 최대값을 초과합니다")
+
+    assert source is not None and reason is not None
+    return Binding(
+        provider=context.provider,
+        role_profile=context.role_profile,
+        account_profile=account.name,
+        account_scope=account_scope,
+        selection_source=source,
+        selection_reason=reason,
+        config_home=account.config_home,
+        auth_kind=account.auth_kind,
+        identity_contract=account.identity_contract,
+        usage_contract=account.usage_contract,
+        binding_generation=generation,
+    )
+
+
+def select_account(
+    registry: Registry,
+    context: SelectionContext,
+    task_bindings: tuple[dict[str, str], ...],
+) -> Binding:
+    if registry.strict:
+        return select_strict_account(registry, context)
+    return select_legacy_account(registry, context, task_bindings)
+
+
+def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--provider", choices=sorted(PROVIDERS), required=True)
+    parser.add_argument("--role-profile", required=True)
+    parser.add_argument("--account-profile")
+    parser.add_argument("--task-id")
+    parser.add_argument("--epic-id")
+    parser.add_argument("--session-id")
+    parser.add_argument("--binding-file", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--organization")
+    parser.add_argument("--directory")
+    parser.add_argument("--cost-limit-usd", type=float)
+
+
+def child_environment(binding: Binding, cost_limit_usd: float | None) -> dict[str, str]:
+    environment = os.environ.copy()
+    for variable in (
+        *CREDENTIAL_ENVIRONMENT_VARIABLES,
+        *PERMISSION_ENVIRONMENT_VARIABLES,
+        *VERIFIER_ONLY_ENVIRONMENT_VARIABLES,
+    ):
+        environment.pop(variable, None)
+    credential_variable = "CODEX_HOME" if binding.provider == "codex" else "CLAUDE_CONFIG_DIR"
+    if binding.config_home is not None:
+        environment[credential_variable] = str(binding.config_home)
+    environment.update(
+        {
+            "AI_PROVIDER": binding.provider,
+            "AI_ROLE_PROFILE": binding.role_profile,
+            "AI_ACCOUNT_PROFILE": binding.account_profile,
+            "AI_ACCOUNT_SCOPE": binding.account_scope,
+            "AI_SELECTION_SOURCE": binding.selection_source,
+            "AI_SELECTION_REASON": binding.selection_reason,
+            "AI_BINDING_GENERATION": str(binding.binding_generation),
+        }
+    )
+    if cost_limit_usd is not None:
+        environment["AI_COST_LIMIT_USD"] = format(cost_limit_usd, "g")
+    else:
+        environment.pop("AI_COST_LIMIT_USD", None)
+    return environment
+
+
+def parse_untrusted_claude_settings(data: bytes) -> dict[str, object]:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    except (UnicodeError, ValueError) as error:
+        raise ContractError("blocked_policy: untrusted Claude settings are invalid JSON") from error
+    if not isinstance(value, dict):
+        raise ContractError("blocked_policy: untrusted Claude settings must be a JSON object")
+    return value
+
+
+def validate_untrusted_claude_settings(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise ContractError("blocked_policy: untrusted Claude settings cannot be inspected") from error
+    if path.is_symlink() or not stat.S_ISREG(mode):
+        raise ContractError(
+            "blocked_policy: untrusted Claude settings must be a regular non-symlink file"
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ContractError("blocked_policy: untrusted Claude settings cannot be inspected") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ContractError(
+                "blocked_policy: untrusted Claude settings must be a regular non-symlink file"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            settings = parse_untrusted_claude_settings(stream.read())
+    finally:
+        os.close(descriptor)
+    for key, setting in settings.items():
+        expected_type = BENIGN_CLAUDE_SETTING_TYPES.get(key)
+        if expected_type is None or not isinstance(setting, expected_type):
+            raise ContractError(
+                f"blocked_policy: untrusted Claude settings key is not allowed: {key}"
+            )
+
+
+def prescan_selected_claude_home(environment: dict[str, str]) -> None:
+    encoded_home = environment.get("CLAUDE_CONFIG_DIR")
+    if encoded_home:
+        home_path = Path(encoded_home)
+    else:
+        encoded_account_home = environment.get("HOME")
+        if not encoded_account_home:
+            raise ContractError("blocked_policy: selected Claude account home is unavailable")
+        home_path = Path(encoded_account_home) / ".claude"
+    if not home_path.is_absolute():
+        raise ContractError("blocked_policy: selected Claude config home must be absolute")
+    for candidate in (home_path / "settings.json", home_path / "settings.local.json"):
+        validate_untrusted_claude_settings(candidate)
+
+
+def git_path(worktree: Path, option: str) -> Path:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(worktree),
+                "rev-parse",
+                "--path-format=absolute",
+                option,
+            ],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError("blocked_permission: Git integrity check failed") from error
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value or "\n" in value or "\x00" in value:
+        raise ContractError("blocked_permission: Git integrity check failed")
+    try:
+        path = Path(value).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ContractError("blocked_permission: Git permission path cannot be resolved") from error
+    if not path.is_dir():
+        raise ContractError("blocked_permission: Git permission path must be a directory")
+    return path
+
+
+def exact_git_permission_paths(
+    registry: Registry,
+    binding: Binding,
+    current_directory: Path,
+) -> tuple[tuple[Path, Path], str]:
+    worktree = git_path(current_directory, "--show-toplevel")
+    common_dir = git_path(current_directory, "--git-common-dir")
+    git_dir = git_path(current_directory, "--git-dir")
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(current_directory), "rev-parse", "--is-inside-work-tree"],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError("blocked_permission: Git worktree integrity check failed") from error
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        raise ContractError("blocked_permission: Git worktree integrity check failed")
+    if not directory_contains(worktree, current_directory):
+        raise ContractError("blocked_permission: current directory is outside the resolved worktree")
+    if not directory_contains(common_dir, git_dir):
+        raise ContractError("blocked_permission: Git dir is outside the verified common-dir")
+    if worktree == common_dir:
+        raise ContractError("blocked_permission: worktree and common-dir must be distinct")
+
+    for permission_path in (worktree, common_dir):
+        if any(character in str(permission_path) for character in "*?[]{}"):
+            raise ContractError("blocked_permission: wildcard Git permission paths are forbidden")
+
+    account_root_text = binding.account_scope.removeprefix("directory:")
+    account_root = Path(account_root_text)
+    relation = "internal" if directory_contains(account_root, common_dir) else "external"
+    for mapping in registry.workspace_directory_mappings:
+        mapping_root = Path(mapping["root"])
+        if directory_contains(common_dir, mapping_root):
+            raise ContractError(
+                "blocked_permission: exact common-dir would grant an account root; "
+                "use a destination-root separate clone and handoff"
+            )
+    return (worktree, common_dir), relation
+
+
+def command_with_exact_common_dir_grant(
+    command: list[str],
+    provider: str,
+    worktree: Path,
+    common_dir: Path,
+) -> list[str]:
+    provider_markers = [
+        index
+        for index, argument in enumerate(command[:-1])
+        if argument == "--" and command[index + 1] == provider
+    ]
+    if len(provider_markers) != 1:
+        raise ContractError("blocked_permission: admitted provider command is invalid")
+    provider_index = provider_markers[0] + 1
+    provider_arguments = command[provider_index + 1 :]
+    if "--add-dir" in provider_arguments:
+        raise ContractError("blocked_permission: untrusted add-dir grant is forbidden")
+    if provider == "codex":
+        try:
+            worktree_argument = provider_arguments[provider_arguments.index("-C") + 1]
+            declared_worktree = Path(worktree_argument).resolve(strict=True)
+        except (IndexError, OSError, RuntimeError, ValueError) as error:
+            raise ContractError("blocked_permission: Codex worktree grant is invalid") from error
+        if declared_worktree != worktree:
+            raise ContractError("blocked_permission: Codex worktree grant does not match Git")
+    return [
+        *command[: provider_index + 1],
+        "--add-dir",
+        str(common_dir),
+        *provider_arguments,
+    ]
+
+
+def apply_permission_boundary(
+    arguments: argparse.Namespace,
+    registry: Registry,
+    binding: Binding,
+    environment: dict[str, str],
+    command: list[str],
+) -> list[str]:
+    if arguments.write_need == "none":
+        return command
+    if arguments.write_need not in WRITE_NEEDS:
+        raise ContractError("blocked_permission: unsupported write need")
+    try:
+        current_directory = Path(os.getcwd()).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ContractError("blocked_permission: current worktree cannot be resolved") from error
+    permission_paths, relation = exact_git_permission_paths(
+        registry, binding, current_directory
+    )
+    environment["AI_SESSION_WRITE_ALLOW_SET"] = json.dumps(
+        [str(path) for path in permission_paths], separators=(",", ":")
+    )
+    environment["AI_SESSION_GIT_COMMON_DIR_RELATION"] = relation
+    return command_with_exact_common_dir_grant(
+        command,
+        binding.provider,
+        permission_paths[0],
+        permission_paths[1],
+    )
+
+
+def active_claude_identity_digest_paths(
+    registry: Registry, binding: Binding
+) -> tuple[Path, tuple[Path, ...]]:
+    raw_root = (
+        os.environ.get("AI_SESSION_IDENTITY_ROOT")
+        if os.environ.get("AI_SESSION_SYNTHETIC_TEST") == "1"
+        else None
+    )
+    root = (
+        Path(raw_root)
+        if raw_root is not None
+        else Path.home() / ".local/share/ai-account-profiles/identities"
+    )
+    if not root.is_absolute():
+        raise VerificationError("blocked_verifier", "identity root는 절대경로여야 합니다")
+    provider_root = root / "claude"
+    selected = provider_root / f"{binding.account_profile}.sha256"
+    other_paths = tuple(
+        sorted(
+            (
+                provider_root / f"{account.name}.sha256"
+                for account in registry.accounts.values()
+                if account.name != binding.account_profile
+                and account.enabled
+                and account.provider == "claude"
+                and account.identity_contract == "claude_auth_status_v1"
+            ),
+            key=str,
+        )
+    )
+    return selected, other_paths
+
+
+def verify_admission(
+    verifier: Path,
+    registry: Registry,
+    binding: Binding,
+    environment: dict[str, str],
+    accept_usage_unknown: bool,
+) -> AdmissionDecision:
+    if not verifier.is_absolute() or not verifier.is_file() or not os.access(verifier, os.X_OK):
+        raise VerificationError("blocked_verifier", "verifier는 실행 가능한 절대경로 파일이어야 합니다")
+    if verifier.is_symlink():
+        raise VerificationError("blocked_verifier", "verifier는 regular non-symlink 파일이어야 합니다")
+    if binding.config_home is not None and (
+        not binding.config_home.is_dir() or binding.config_home.is_symlink()
+    ):
+        raise VerificationError(
+            "blocked_verifier",
+            "선택한 account profile의 config_home이 안전한 기존 디렉터리가 아닙니다",
+        )
+    verifier_environment = environment.copy()
+    verifier_environment["AI_AUTH_KIND"] = binding.auth_kind
+    verifier_environment["AI_IDENTITY_CONTRACT"] = binding.identity_contract
+    verifier_environment["AI_USAGE_CONTRACT"] = binding.usage_contract
+    if binding.identity_contract == "claude_auth_status_v1":
+        selected_digest, other_digests = active_claude_identity_digest_paths(
+            registry, binding
+        )
+        verifier_environment["AI_IDENTITY_DIGEST_FILE"] = str(selected_digest)
+        verifier_environment["AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES"] = json.dumps(
+            [str(path) for path in other_digests], separators=(",", ":")
+        )
+    else:
+        verifier_environment.pop("AI_IDENTITY_DIGEST_FILE", None)
+        verifier_environment.pop(
+            "AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES", None
+        )
+    try:
+        result = subprocess.run(
+            [str(verifier)],
+            env=verifier_environment,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise VerificationError("blocked_verifier", "verifier 실행에 실패했습니다") from error
+    if result.returncode != 0:
+        raise VerificationError(
+            "blocked_verifier", f"verifier가 실패했습니다 (exit {result.returncode})"
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise VerificationError(
+            "blocked_verifier", "verifier가 유효한 JSON을 반환하지 않았습니다"
+        ) from error
+    if not isinstance(payload, dict):
+        raise VerificationError("blocked_verifier", "verifier 결과는 JSON object여야 합니다")
+    return classify_verifier_payload(payload, binding, accept_usage_unknown)
+
+
+def classify_verifier_payload(
+    payload: dict[str, object],
+    binding: Binding,
+    accept_usage_unknown: bool = False,
+) -> AdmissionDecision:
+    required = {
+        "provider",
+        "account_profile",
+        "login_status",
+        "identity_status",
+        "usage_status",
+        "cost_limit_status",
+    }
+    if set(payload) != required:
+        raise VerificationError(
+            "blocked_verifier", "verifier 결과 필드가 strict 계약과 일치하지 않습니다"
+        )
+    if payload["provider"] != binding.provider or payload["account_profile"] != binding.account_profile:
+        raise VerificationError(
+            "blocked_verifier",
+            "verifier 결과가 선택된 provider/account profile binding과 일치하지 않습니다",
+        )
+    login_status = payload["login_status"]
+    identity_status = payload["identity_status"]
+    usage_status = payload["usage_status"]
+    cost_limit_status = payload["cost_limit_status"]
+    if login_status not in {"logged_in", "not_logged_in", "unknown"}:
+        raise VerificationError("blocked_verifier", "verifier login status를 확인할 수 없습니다")
+    if identity_status not in {
+        "matched",
+        "not_enrolled",
+        "stale_enrollment",
+        "identity_drift",
+        "identity_unverifiable",
+        "duplicate_mapping",
+        "unavailable",
+        "unknown",
+    }:
+        raise VerificationError("blocked_verifier", "verifier identity 상태를 확인할 수 없습니다")
+    if usage_status not in {"sufficient", "usage_unknown", "blocked_usage"}:
+        raise VerificationError("blocked_verifier", "verifier usage status를 확인할 수 없습니다")
+    if cost_limit_status not in {"not_applicable", "enforced", "unknown"}:
+        raise VerificationError("blocked_verifier", "verifier 비용 상태를 확인할 수 없습니다")
+
+    def decision(
+        public_status: str,
+        admitted: bool = False,
+        failure_reason: str | None = None,
+    ) -> AdmissionDecision:
+        return AdmissionDecision(
+            login_status=login_status,
+            identity_status=identity_status,
+            usage_status=usage_status,
+            cost_limit_status=cost_limit_status,
+            public_status=public_status,
+            exit_code=0 if admitted else 3,
+            admitted=admitted,
+            failure_reason=failure_reason,
+        )
+
+    if login_status == "not_logged_in":
+        return decision("login_required")
+    if login_status != "logged_in":
+        return decision("blocked_verifier", failure_reason="login_contract")
+    if identity_status == "identity_drift":
+        return decision("identity_drift")
+    if identity_status in {"not_enrolled", "stale_enrollment"}:
+        return decision("enrollment_required")
+    if identity_status == "identity_unverifiable":
+        return decision("identity_unverifiable")
+    if identity_status == "duplicate_mapping":
+        return decision("duplicate_mapping")
+    if binding.identity_contract == "unavailable":
+        identity_admitted = binding.provider == "codex" and identity_status == "unavailable"
+    elif binding.identity_contract in {"claude_auth_status_v1", "legacy_v1"}:
+        identity_admitted = identity_status == "matched"
+    else:
+        identity_admitted = False
+    if not identity_admitted:
+        return decision("blocked_verifier", failure_reason="identity_contract")
+    if binding.auth_kind == "api_payg":
+        if cost_limit_status != "enforced":
+            return decision("blocked_verifier", failure_reason="cost_enforcement")
+    elif cost_limit_status != "not_applicable":
+        return decision("blocked_verifier", failure_reason="cost_contract")
+    if usage_status == "blocked_usage":
+        return decision("blocked_usage")
+    if usage_status == "usage_unknown":
+        if binding.usage_contract == "none" and accept_usage_unknown:
+            return decision("ready", admitted=True)
+        return decision("usage_unknown")
+    return decision("ready", admitted=True)
+
+
+def decision_to_launch_error(decision: AdmissionDecision) -> VerificationError:
+    if decision.public_status == "blocked_verifier":
+        reasons = {
+            "login_contract": "verifier login 상태 계약이 일치하지 않습니다",
+            "identity_contract": "verifier identity 상태 계약이 일치하지 않습니다",
+            "cost_enforcement": "비용 한도가 실제로 강제되었는지 확인할 수 없습니다",
+            "cost_contract": "verifier 비용 상태 계약이 일치하지 않습니다",
+        }
+        if decision.failure_reason in reasons:
+            return VerificationError("blocked_verifier", reasons[decision.failure_reason])
+    mapping = {
+        "login_required": ("not_logged_in", "선택한 account profile은 미로그인 상태입니다"),
+        "enrollment_required": ("blocked_verifier", "identity enrollment가 필요합니다"),
+        "blocked_verifier": ("blocked_verifier", "verifier 상태를 확인할 수 없습니다"),
+        "identity_drift": ("identity_drift", "선택한 account profile에서 identity drift가 감지되었습니다"),
+        "identity_unverifiable": (
+            "identity_unverifiable",
+            "선택한 account profile의 identity를 검증할 수 없습니다",
+        ),
+        "duplicate_mapping": (
+            "duplicate_mapping",
+            "선택한 account profile의 identity mapping이 중복됩니다",
+        ),
+        "usage_unknown": ("usage_unknown", "usage_unknown: 사용량 admission을 확인할 수 없습니다"),
+        "blocked_usage": ("blocked_usage", "blocked_usage: 배정 계정의 사용량이 부족합니다"),
+    }
+    try:
+        status, message = mapping[decision.public_status]
+    except KeyError as error:
+        raise VerificationError("blocked_verifier", "admission decision이 유효하지 않습니다") from error
+    return VerificationError(status, message)
+
+
+def status_commands(decision: AdmissionDecision, binding: Binding) -> list[dict[str, str]]:
+    command_id = {
+        "login_required": "provider_login_foreground",
+        "enrollment_required": "identity_enroll_foreground",
+        "identity_drift": "inspect_identity_foreground",
+        "usage_unknown": (
+            "retry_with_usage_consent" if binding.usage_contract == "none" else None
+        ),
+    }.get(decision.public_status)
+    if command_id is None:
+        return []
+    return [{
+        "command_id": command_id,
+        "provider": binding.provider,
+        "account_profile": binding.account_profile,
+    }]
+
+
+def status_record(
+    arguments: argparse.Namespace,
+    binding: Binding | None,
+    status: str,
+    *,
+    login_status: str = "unknown",
+    identity_status: str = "unknown",
+    usage_status: str = "usage_unknown",
+    cost_limit_status: str = "unknown",
+    commands: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "event": "profile_status",
+        "provider": arguments.provider,
+        "account_profile": binding.account_profile if binding else None,
+        "status": status,
+        "login_status": login_status,
+        "identity_status": identity_status,
+        "usage_status": usage_status,
+        "cost_limit_status": cost_limit_status,
+        "commands": [] if commands is None else commands,
+    }
+
+
+def write_status_record(record: dict[str, object]) -> None:
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+
+
+def write_public_record(record: dict[str, object]) -> None:
+    encoded = json.dumps(
+        record, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8") + b"\n"
+    os.write(2, encoded)
+
+
+def error_status(error: Exception) -> tuple[str, int]:
+    message = str(error)
+    if isinstance(error, ContractError):
+        match = re.search(
+            r"\b(blocked_contract|blocked_binding|blocked_permission|blocked_policy)\b",
+            message,
+        )
+        status = match.group(1) if match else "blocked_contract"
+        return status, 2 if status == "blocked_contract" else 4
+    if isinstance(error, VerificationError):
+        return error.status, 3
+    return "blocked_verifier", 3
+
+
+def failure_record(
+    arguments: argparse.Namespace | None,
+    binding: Binding | None,
+    status: str,
+    exit_code: int,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "event": "launch_failure",
+        "status": status,
+        "exit_code": exit_code,
+        "provider": getattr(arguments, "provider", None),
+        "role_profile": getattr(arguments, "role_profile", None),
+        "account_profile": binding.account_profile if binding else None,
+        "account_scope": binding.account_scope if binding else None,
+        "selection_source": binding.selection_source if binding else None,
+        "selection_reason": binding.selection_reason if binding else None,
+        "usage_admission_status": status if exit_code == 3 else None,
+    }
+
+
+def launch(
+    arguments: argparse.Namespace,
+    registry: Registry,
+    binding: Binding,
+    *,
+    strict_records: bool,
+) -> int:
+    command = arguments.program
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise ContractError("launch할 명령은 -- 뒤에 지정해야 합니다")
+    environment = child_environment(binding, arguments.cost_limit_usd)
+    command = apply_permission_boundary(
+        arguments, registry, binding, environment, command
+    )
+    if binding.provider == "claude":
+        prescan_selected_claude_home(environment)
+    decision = verify_admission(
+        arguments.verifier,
+        registry,
+        binding,
+        environment,
+        arguments.accept_usage_unknown,
+    )
+    if not decision.admitted:
+        raise decision_to_launch_error(decision)
+    environment["AI_USAGE_ADMISSION_STATUS"] = decision.usage_status
+    if strict_records:
+        write_public_record(
+            {
+                **binding.public_dict(),
+                "event": "account_binding",
+                "usage_admission_status": decision.usage_status,
+            }
+        )
+    else:
+        print(
+            "ai-session binding: "
+            f"provider={binding.provider} "
+            f"role_profile={binding.role_profile} "
+            f"account_profile={binding.account_profile} "
+            f"config_home={binding.config_home} "
+            f"selection_source={binding.selection_source} "
+            f"usage_admission_status={decision.usage_status}",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        os.execvpe(command[0], command, environment)
+    except OSError as error:
+        raise ContractError(f"launcher process를 시작할 수 없습니다: {command[0]}") from error
+    return 0
+
+
+def status(arguments: argparse.Namespace, registry: Registry, binding: Binding) -> int:
+    environment = child_environment(binding, arguments.cost_limit_usd)
+    try:
+        if binding.provider == "claude":
+            prescan_selected_claude_home(environment)
+        decision = verify_admission(
+            arguments.verifier,
+            registry,
+            binding,
+            environment,
+            arguments.accept_usage_unknown,
+        )
+    except (ContractError, VerificationError) as error:
+        public_status, exit_code = error_status(error)
+        write_status_record(status_record(arguments, binding, public_status))
+        return exit_code
+    write_status_record(
+        status_record(
+            arguments,
+            binding,
+            decision.public_status,
+            login_status=decision.login_status,
+            identity_status=decision.identity_status,
+            usage_status=decision.usage_status,
+            cost_limit_status=decision.cost_limit_status,
+            commands=status_commands(decision, binding),
+        )
+    )
+    return decision.exit_code
+
+
+def context_from_arguments(arguments: argparse.Namespace, registry: Registry) -> SelectionContext:
+    if registry.strict:
+        if arguments.command == "launch" and arguments.role_contract != ROLE_CONTRACT_ID:
+            raise ContractError("blocked_contract: role launcher contract token is missing or invalid")
+        try:
+            directory = Path(os.getcwd()).resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ContractError("blocked_contract: current working directory를 resolve할 수 없습니다") from error
+        if arguments.command == "launch" and os.environ.get("AI_ROLE_ADMITTED") == "1":
+            inherited_pwd = os.environ.get("PWD")
+            try:
+                inherited_directory = (
+                    Path(inherited_pwd).resolve(strict=True)
+                    if inherited_pwd is not None
+                    else None
+                )
+            except (OSError, RuntimeError):
+                inherited_directory = None
+            if inherited_directory != directory:
+                raise ContractError(
+                    "blocked_binding: inherited PWD is stale; selection and registry update are forbidden"
+                )
+        if arguments.directory:
+            surface_directory = normalized_directory(arguments.directory)
+            if surface_directory != directory:
+                raise ContractError("blocked_binding: supplied directory surface가 current real path와 다릅니다")
+        return SelectionContext(
+            provider=arguments.provider,
+            role_profile=arguments.role_profile,
+            account_profile=arguments.account_profile,
+            task_id=arguments.task_id,
+            session_id=arguments.session_id,
+            epic_id=arguments.epic_id,
+            repository=arguments.repository,
+            organization=arguments.organization,
+            directory=directory,
+            cost_limit_usd=arguments.cost_limit_usd,
+        )
+
+    if arguments.command == "launch" and arguments.role_contract is not None:
+        raise ContractError(
+            "blocked_contract: role launcher contract token requires the strict registry"
+        )
+    repository = normalize_repository(arguments.repository) if arguments.repository else None
+    organization = normalize_organization(arguments.organization) if arguments.organization else None
+    if repository:
+        repository_organization = repository.split("/", 1)[0]
+        if organization and organization != repository_organization:
+            raise ContractError("repository와 organization context가 서로 일치하지 않습니다")
+        organization = organization or repository_organization
+    return SelectionContext(
+        provider=arguments.provider,
+        role_profile=arguments.role_profile,
+        account_profile=arguments.account_profile,
+        task_id=arguments.task_id,
+        session_id=arguments.session_id,
+        epic_id=arguments.epic_id,
+        repository=repository,
+        organization=organization,
+        directory=normalized_directory(arguments.directory) if arguments.directory else None,
+        cost_limit_usd=arguments.cost_limit_usd,
+    )
+
+
+def run_git_contract(worktree: Path, arguments: list[str], label: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *arguments],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError(f"blocked_binding: {label} failed") from error
+    if result.returncode != 0:
+        raise ContractError(f"blocked_binding: {label} failed")
+    return result.stdout
+
+
+def read_move_proof(path: Path | None, label: str) -> dict[str, Any]:
+    if path is None:
+        raise ContractError(f"blocked_binding: {label} is required before rebind")
+    try:
+        resolved = path.resolve(strict=True)
+        if path.is_symlink() or not resolved.is_file():
+            raise OSError("not a regular proof")
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractError(f"blocked_binding: {label} is invalid") from error
+    if not isinstance(payload, dict):
+        raise ContractError(f"blocked_binding: {label} is invalid")
+    return payload
+
+
+def atomic_write(path: Path, data: bytes, mode: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            dir=path.parent,
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            os.fchmod(stream.fileno(), mode)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+        temporary_name = None
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if temporary_name is not None:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+
+
+def updated_binding_registry_bytes(
+    registry_bytes: bytes,
+    binding_kind: str,
+    binding_id: str,
+    old_worktree: Path,
+    old_account: str,
+    old_generation: int,
+    new_worktree: Path,
+    new_account: str,
+) -> bytes:
+    try:
+        source = registry_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ContractError("blocked_binding: registry bytes are invalid") from error
+    field = "task_bindings" if binding_kind == "task" else "session_bindings"
+    match = re.search(rf"(?m)^(\s*{field}\s*=\s*\[)(.*)(\])$", source)
+    if match is None:
+        raise ContractError("blocked_binding: stored binding record is unavailable")
+    record = match.group(2)
+    if f'id = {json.dumps(binding_id)}' not in record:
+        raise ContractError("blocked_binding: stored binding ID disagrees")
+    if f'account_profile = {json.dumps(old_account)}' not in record:
+        raise ContractError("blocked_binding: stored account and source directory mapping disagree")
+    if f'workspace_root = {json.dumps(str(old_worktree))}' not in record:
+        raise ContractError("blocked_binding: stored worktree path is stale")
+    if f'binding_generation = {old_generation}' not in record:
+        raise ContractError("blocked_binding: stored binding generation is stale")
+    updated = record
+    replacements = (
+        (
+            f'account_profile = {json.dumps(old_account)}',
+            f'account_profile = {json.dumps(new_account)}',
+        ),
+        (
+            f'workspace_root = {json.dumps(str(old_worktree))}',
+            f'workspace_root = {json.dumps(str(new_worktree))}',
+        ),
+        (
+            f'binding_generation = {old_generation}',
+            f'binding_generation = {old_generation + 1}',
+        ),
+    )
+    for before, after in replacements:
+        if updated.count(before) != 1:
+            raise ContractError("blocked_binding: stored binding cannot be updated atomically")
+        updated = updated.replace(before, after, 1)
+    return (source[: match.start(2)] + updated + source[match.end(2) :]).encode("utf-8")
+
+
+def move_rebind(arguments: argparse.Namespace) -> int:
+    if arguments.role_contract != ROLE_CONTRACT_ID:
+        raise ContractError("blocked_contract: role launcher contract token is missing or invalid")
+    try:
+        old_worktree = arguments.old_worktree.resolve(strict=True)
+        new_worktree = arguments.new_worktree.resolve(strict=False)
+    except (OSError, RuntimeError) as error:
+        raise ContractError("blocked_binding: worktree path cannot be resolved") from error
+    if arguments.old_worktree.is_symlink() or not old_worktree.is_dir():
+        raise ContractError("blocked_binding: source worktree must be a real directory")
+    if new_worktree.exists() or old_worktree == new_worktree:
+        raise ContractError("blocked_binding: destination worktree must be a new path")
+
+    top_level = Path(
+        run_git_contract(old_worktree, ["rev-parse", "--show-toplevel"], "Git top-level check").strip()
+    ).resolve(strict=True)
+    common_dir = Path(
+        run_git_contract(
+            old_worktree,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            "Git common-dir check",
+        ).strip()
+    ).resolve(strict=True)
+    git_dir = Path(
+        run_git_contract(
+            old_worktree,
+            ["rev-parse", "--path-format=absolute", "--git-dir"],
+            "Git dir check",
+        ).strip()
+    ).resolve(strict=True)
+    if top_level != old_worktree:
+        raise ContractError("blocked_binding: source path is not a worktree top level")
+    if git_dir == common_dir:
+        raise ContractError(
+            "blocked_binding: main worktree cannot be moved; use a destination-root separate clone and handoff"
+        )
+    staged = run_git_contract(old_worktree, ["ls-files", "--stage"], "submodule check")
+    if any(line.startswith("160000 ") for line in staged.splitlines()):
+        raise ContractError(
+            "blocked_binding: a submodule-containing linked worktree requires a destination-root separate clone and handoff"
+        )
+    if arguments.common_dir_policy != "allow-exact":
+        raise ContractError(
+            "blocked_binding: cross-root Git metadata is denied; use a destination-root separate clone and handoff"
+        )
+
+    registry_bytes = arguments.registry.read_bytes()
+    registry_mode = arguments.registry.stat().st_mode & 0o777
+    registry = load_registry(arguments.registry)
+    if not registry.strict:
+        raise ContractError("blocked_contract: move-rebind requires the strict registry")
+    bindings = (
+        registry.task_bindings
+        if arguments.binding_kind == "task"
+        else registry.session_bindings
+    )
+    matches = [
+        item
+        for item in bindings
+        if item["id"] == arguments.binding_id and item["provider"] == arguments.provider
+    ]
+    if len(matches) != 1:
+        raise ContractError("blocked_binding: exactly one stored binding is required")
+    stored = matches[0]
+    old_mapping = select_workspace_mapping(
+        registry,
+        SelectionContext(
+            arguments.provider, "move-rebind", None, None, None, None, None, None,
+            old_worktree, None,
+        ),
+    )
+    new_mapping = select_workspace_mapping(
+        registry,
+        SelectionContext(
+            arguments.provider, "move-rebind", None, None, None, None, None, None,
+            new_worktree, None,
+        ),
+    )
+    if old_mapping is None or new_mapping is None:
+        raise ContractError("blocked_binding: source or destination directory mapping is unavailable")
+    if (
+        stored["workspace_root"] != str(old_worktree)
+        or stored["account_profile"] != old_mapping["account_profile"]
+    ):
+        raise ContractError("blocked_binding: stored account and source directory mapping disagree")
+    if new_mapping["account_profile"] != arguments.account_profile:
+        raise ContractError("blocked_binding: requested account and destination directory mapping disagree")
+    if old_mapping["account_profile"] == arguments.account_profile:
+        raise ContractError("blocked_binding: move-rebind requires a cross-profile destination")
+
+    shutdown = read_move_proof(arguments.shutdown_proof, "shutdown proof")
+    if (
+        shutdown.get("schema_version") != 1
+        or shutdown.get("worktree") != str(old_worktree)
+        or shutdown.get("active_processes") != 0
+        or set(shutdown.get("stopped", ()))
+        != {"launcher", "provider", "watchers", "workers", "writers"}
+    ):
+        raise ContractError("blocked_binding: shutdown proof is incomplete")
+
+    handoff_path = arguments.handoff.resolve(strict=True)
+    try:
+        handoff_relative = handoff_path.relative_to(old_worktree)
+    except ValueError as error:
+        raise ContractError("blocked_binding: handoff must be inside the source worktree") from error
+    handoff = read_move_proof(arguments.handoff, "in-repository handoff")
+    quality_state = handoff.get("quality_goal_state")
+    required_git_paths = handoff.get("required_git_paths")
+    if (
+        handoff.get("schema_version") != 1
+        or handoff.get("worktree") != str(old_worktree)
+        or handoff.get("account_profile") != stored["account_profile"]
+        or handoff.get("binding_generation") != stored["binding_generation"]
+        or handoff.get("resume_unit") != "verified_git_state_and_in_repository_handoff"
+        or handoff.get("forbidden_state_operations") != []
+        or not isinstance(quality_state, str)
+        or not isinstance(required_git_paths, list)
+        or not required_git_paths
+    ):
+        raise ContractError("blocked_binding: in-repository handoff is incomplete")
+    state_path = (old_worktree / quality_state).resolve(strict=True)
+    try:
+        state_path.relative_to(old_worktree)
+    except ValueError as error:
+        raise ContractError("blocked_binding: quality-goal state must remain in-repository") from error
+    if not state_path.is_file() or state_path.is_symlink():
+        raise ContractError("blocked_binding: quality-goal state is unavailable")
+
+    status_before = run_git_contract(old_worktree, ["status", "--short"], "pre-move Git status")
+    status_lines = status_before.splitlines()
+    if not any(line[:2].strip() and not line.startswith("??") for line in status_lines):
+        raise ContractError("blocked_binding: dirty tracked state is missing from handoff")
+    if not any(line.startswith("??") for line in status_lines):
+        raise ContractError("blocked_binding: untracked state is missing from handoff")
+    for value in required_git_paths:
+        if (
+            not isinstance(value, str)
+            or Path(value).is_absolute()
+            or ".." in Path(value).parts
+            or not any(line.endswith(value) for line in status_lines)
+        ):
+            raise ContractError("blocked_binding: handoff Git state does not match the worktree")
+
+    replacement_registry = updated_binding_registry_bytes(
+        registry_bytes,
+        arguments.binding_kind,
+        arguments.binding_id,
+        old_worktree,
+        stored["account_profile"],
+        stored["binding_generation"],
+        new_worktree,
+        arguments.account_profile,
+    )
+    try:
+        move_result = subprocess.run(
+            ["git", "-C", str(old_worktree), "worktree", "move", str(old_worktree), str(new_worktree)],
+            stdin=subprocess.DEVNULL,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+            close_fds=True,
+            pass_fds=(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ContractError("blocked_binding: git worktree move failed") from error
+    if move_result.returncode != 0:
+        raise ContractError("blocked_binding: git worktree move failed")
+
+    worktree_list = run_git_contract(new_worktree, ["worktree", "list", "--porcelain"], "post-move worktree list")
+    top_after = Path(
+        run_git_contract(new_worktree, ["rev-parse", "--show-toplevel"], "post-move top-level").strip()
+    ).resolve(strict=True)
+    common_after = Path(
+        run_git_contract(
+            new_worktree,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            "post-move common-dir",
+        ).strip()
+    ).resolve(strict=True)
+    status_after = run_git_contract(new_worktree, ["status", "--short"], "post-move Git status")
+    if (
+        f"worktree {new_worktree}" not in worktree_list
+        or top_after != new_worktree
+        or common_after != common_dir
+        or status_after != status_before
+        or not (new_worktree / handoff_relative).is_file()
+    ):
+        raise ContractError("blocked_binding: post-move Git verification disagrees")
+    if arguments.registry.read_bytes() != registry_bytes:
+        raise ContractError("blocked_binding: registry changed during move verification")
+
+    payload = {
+        "schema_version": 1,
+        "account_profile": arguments.account_profile,
+        "binding_generation": stored["binding_generation"] + 1,
+        "git_common_dir": str(common_after),
+        "git_status_short": status_after,
+        "git_verification": {
+            "git worktree list --porcelain": True,
+            "git rev-parse --show-toplevel": True,
+            "git rev-parse --path-format=absolute --git-common-dir": True,
+            "git status --short": True,
+        },
+        "new_process_only": True,
+        "recomputed_targets": {
+            "write_root": str(new_worktree),
+            "sandbox_cwd": str(new_worktree),
+            "workmux_cwd": str(new_worktree),
+            "tmux_cwd": str(new_worktree),
+            "watcher_target": str(new_worktree),
+        },
+        "resume_unit": "verified_git_state_and_in_repository_handoff",
+        "state_operations": [],
+    }
+    encoded_payload = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+    atomic_write(arguments.result, encoded_payload, 0o600)
+    atomic_write(arguments.registry, replacement_registry, registry_mode)
+    print(encoded_payload.decode("utf-8"), end="")
+    return 0
+
+
+def legacy_migration_gate(arguments: argparse.Namespace) -> int:
+    registry = load_registry(arguments.registry)
+    if not registry.strict:
+        raise ContractError("blocked_contract: legacy migration requires the strict registry")
+    legacy_alias = require_alias(arguments.legacy_alias, "legacy alias")
+    if (
+        legacy_alias != f"{arguments.provider}-dotfiles"
+        or legacy_alias not in registry.legacy_aliases
+        or legacy_alias in registry.accounts
+    ):
+        raise ContractError("blocked_binding: legacy alias is not opaque migration evidence")
+
+    proof = read_move_proof(arguments.proof, "legacy migration proof")
+    common_fields = {
+        "schema_version",
+        "legacy_alias",
+        "operation",
+        "implementation_verified",
+        "separate_generation",
+        "current_binding_generation",
+        "migration_generation",
+        "shutdown",
+        "handoff",
+        "state_operations",
+    }
+    operation_fields = (
+        {"official_admission", "binding_switch"}
+        if arguments.operation == "rebind"
+        else {"reference_counts"}
+    )
+    if set(proof) != common_fields | operation_fields:
+        raise ContractError("blocked_binding: legacy migration proof fields are incomplete")
+    current_generation = proof.get("current_binding_generation")
+    migration_generation = proof.get("migration_generation")
+    if (
+        proof.get("schema_version") != 1
+        or proof.get("legacy_alias") != legacy_alias
+        or proof.get("operation") != arguments.operation
+        or proof.get("implementation_verified") is not True
+        or proof.get("separate_generation") is not True
+        or isinstance(current_generation, bool)
+        or not isinstance(current_generation, int)
+        or current_generation <= 0
+        or isinstance(migration_generation, bool)
+        or not isinstance(migration_generation, int)
+        or migration_generation != current_generation + 1
+        or proof.get("state_operations") != []
+    ):
+        raise ContractError("blocked_binding: separate migration generation proof is invalid")
+
+    shutdown = proof.get("shutdown")
+    stopped = shutdown.get("stopped") if isinstance(shutdown, dict) else None
+    active_processes = (
+        shutdown.get("active_processes") if isinstance(shutdown, dict) else None
+    )
+    if (
+        not isinstance(shutdown, dict)
+        or set(shutdown) != {"active_processes", "stopped"}
+        or isinstance(active_processes, bool)
+        or not isinstance(active_processes, int)
+        or active_processes != 0
+        or not isinstance(stopped, list)
+        or set(stopped)
+        != {"launcher", "provider", "watchers", "workers", "writers"}
+    ):
+        raise ContractError("blocked_binding: legacy migration shutdown proof is incomplete")
+    handoff = proof.get("handoff")
+    if (
+        not isinstance(handoff, dict)
+        or set(handoff) != {"present", "new_process_only"}
+        or handoff.get("present") is not True
+        or handoff.get("new_process_only") is not True
+    ):
+        raise ContractError("blocked_binding: legacy migration handoff is incomplete")
+
+    decision: dict[str, Any] = {
+        "schema_version": 1,
+        "gate_passed": True,
+        "operation": arguments.operation,
+        "provider": arguments.provider,
+        "legacy_alias": legacy_alias,
+        "migration_generation": migration_generation,
+        "mutation_performed": False,
+        "new_process_only": True,
+        "state_operations": [],
+    }
+    if arguments.operation == "rebind":
+        target_account = require_alias(arguments.target_account, "target account")
+        account = registry.accounts.get(target_account)
+        admission = proof.get("official_admission")
+        binding_switch = proof.get("binding_switch")
+        if account is None or account.provider != arguments.provider:
+            raise ContractError("blocked_binding: migration target is not an active same-provider account")
+        if (
+            not isinstance(admission, dict)
+            or set(admission) != {"synthetic", "login_status", "identity_status"}
+            or admission.get("synthetic") is not True
+            or admission.get("login_status") != "logged_in"
+            or admission.get("identity_status") != "matched"
+        ):
+            raise ContractError("blocked_binding: synthetic official admission proof is incomplete")
+        if (
+            not isinstance(binding_switch, dict)
+            or set(binding_switch)
+            != {"atomic", "account_profile", "binding_generation"}
+            or binding_switch.get("atomic") is not True
+            or binding_switch.get("account_profile") != target_account
+            or binding_switch.get("binding_generation") != migration_generation
+        ):
+            raise ContractError("blocked_binding: atomic new binding proof is incomplete")
+        decision["target_account"] = target_account
+        decision["zero_references_verified"] = False
+    else:
+        if arguments.target_account is not None:
+            raise ContractError("blocked_binding: removal gate cannot select a replacement account")
+        references = proof.get("reference_counts")
+        process_references = (
+            references.get("processes") if isinstance(references, dict) else None
+        )
+        binding_references = (
+            references.get("bindings") if isinstance(references, dict) else None
+        )
+        if (
+            not isinstance(references, dict)
+            or set(references) != {"processes", "bindings"}
+            or isinstance(process_references, bool)
+            or not isinstance(process_references, int)
+            or process_references != 0
+            or isinstance(binding_references, bool)
+            or not isinstance(binding_references, int)
+            or binding_references != 0
+        ):
+            raise ContractError("blocked_binding: legacy removal requires zero process and binding references")
+        decision["zero_references_verified"] = True
+
+    print(json.dumps(decision, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="ai-session")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    select_parser = subparsers.add_parser("select", help="인증 조회 없이 account binding 선택")
+    add_selection_arguments(select_parser)
+    launch_parser = subparsers.add_parser("launch", help="검증 뒤 고정 account 환경으로 process 시작")
+    add_selection_arguments(launch_parser)
+    launch_parser.add_argument("--role-contract")
+    launch_parser.add_argument("--write-need", choices=sorted(WRITE_NEEDS), default="none")
+    launch_parser.add_argument("--verifier", type=Path, required=True)
+    launch_parser.add_argument("--accept-usage-unknown", action="store_true")
+    launch_parser.add_argument("program", nargs=argparse.REMAINDER)
+    status_parser = subparsers.add_parser("status", help="account admission 상태를 읽기 전용으로 확인")
+    add_selection_arguments(status_parser)
+    status_parser.add_argument("--verifier", type=Path, required=True)
+    status_parser.add_argument("--accept-usage-unknown", action="store_true")
+    move_parser = subparsers.add_parser(
+        "move-rebind",
+        help="shutdown과 handoff 뒤 temp-safe linked worktree를 atomic binding으로 이동",
+    )
+    move_parser.add_argument("--registry", type=Path, required=True)
+    move_parser.add_argument("--provider", choices=sorted(PROVIDERS), required=True)
+    move_parser.add_argument("--role-contract", required=True)
+    move_parser.add_argument("--binding-kind", choices=("session", "task"), required=True)
+    move_parser.add_argument("--binding-id", required=True)
+    move_parser.add_argument("--old-worktree", type=Path, required=True)
+    move_parser.add_argument("--new-worktree", type=Path, required=True)
+    move_parser.add_argument("--account-profile", required=True)
+    move_parser.add_argument("--shutdown-proof", type=Path)
+    move_parser.add_argument("--handoff", type=Path, required=True)
+    move_parser.add_argument(
+        "--common-dir-policy",
+        choices=("allow-exact", "separate-clone"),
+        required=True,
+    )
+    move_parser.add_argument("--result", type=Path, required=True)
+    migration_parser = subparsers.add_parser(
+        "legacy-migration-gate",
+        help="separate-generation legacy rebind/removal proof를 mutation 없이 검증",
+    )
+    migration_parser.add_argument("--registry", type=Path, required=True)
+    migration_parser.add_argument("--provider", choices=sorted(PROVIDERS), required=True)
+    migration_parser.add_argument("--legacy-alias", required=True)
+    migration_parser.add_argument("--operation", choices=("rebind", "remove"), required=True)
+    migration_parser.add_argument("--target-account")
+    migration_parser.add_argument("--proof", type=Path, required=True)
+    return parser
+
+
+def run(arguments: argparse.Namespace) -> int:
+    if arguments.command == "move-rebind":
+        return move_rebind(arguments)
+    if arguments.command == "legacy-migration-gate":
+        return legacy_migration_gate(arguments)
+    registry = load_registry(arguments.registry)
+    context = context_from_arguments(arguments, registry)
+    task_bindings = () if registry.strict else load_task_bindings(arguments.binding_file, registry)
+    binding = select_account(registry, context, task_bindings)
+    if arguments.command == "select":
+        print(json.dumps(binding.public_dict(), ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "status":
+        return status(arguments, registry, binding)
+    strict_records = registry.strict or os.environ.get("AI_ROLE_ADMITTED") == "1"
+    try:
+        return launch(arguments, registry, binding, strict_records=strict_records)
+    except (ContractError, VerificationError) as error:
+        if not strict_records:
+            raise
+        public_status, exit_code = error_status(error)
+        write_public_record(failure_record(arguments, binding, public_status, exit_code))
+        return exit_code
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    arguments = None
+    try:
+        arguments = parser.parse_args(argv)
+        return run(arguments)
+    except (ContractError, VerificationError) as error:
+        status, exit_code = error_status(error)
+        if arguments is not None and arguments.command == "status":
+            write_status_record(status_record(arguments, None, status))
+            return exit_code
+        if (
+            arguments is not None
+            and arguments.command == "launch"
+            and os.environ.get("AI_ROLE_ADMITTED") == "1"
+        ):
+            write_public_record(failure_record(arguments, None, status, exit_code))
+        else:
+            print(f"ai-session: {error}", file=sys.stderr)
+        return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

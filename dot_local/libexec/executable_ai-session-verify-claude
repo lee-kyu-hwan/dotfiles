@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Redacted adapter for Claude's reviewed auth-status JSON surface."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+from ai_session_identity import (
+    compare_enrolled_identity,
+    digest_line,
+    find_duplicate_enrollment,
+)
+
+
+FIELDS = {
+    "provider", "account_profile", "login_status", "identity_status",
+    "usage_status", "cost_limit_status",
+}
+OTHER_DIGEST_NAME = re.compile(r"[a-z0-9][a-z0-9._-]*\.sha256\Z")
+
+
+def _cost_status() -> str:
+    auth_kind = os.environ.get("AI_AUTH_KIND")
+    if auth_kind in {"consumer", "organization"}:
+        return "not_applicable"
+    return "unknown"
+
+
+def _base_result() -> dict[str, str]:
+    return {
+        "provider": "claude",
+        "account_profile": os.environ.get("AI_ACCOUNT_PROFILE", ""),
+        "login_status": "unknown",
+        "identity_status": "unknown",
+        "usage_status": "usage_unknown",
+        "cost_limit_status": _cost_status(),
+    }
+
+
+def _official_status() -> object:
+    completed = subprocess.run(
+        ["claude", "auth", "status", "--json"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+        close_fds=True,
+        pass_fds=(),
+    )
+    if completed.returncode != 0:
+        raise ValueError("official status failed")
+    return json.loads(completed.stdout)
+
+
+def _other_active_digest_paths(selected: Path) -> list[Path]:
+    if (
+        not selected.is_absolute()
+        or OTHER_DIGEST_NAME.fullmatch(selected.name) is None
+    ):
+        raise ValueError("selected digest path is invalid")
+    encoded = os.environ.get("AI_OTHER_ACTIVE_CLAUDE_IDENTITY_DIGEST_FILES")
+    if encoded is None:
+        raise ValueError("other-profile digest paths are missing")
+    raw_paths = json.loads(encoded)
+    if not isinstance(raw_paths, list) or any(
+        not isinstance(item, str) for item in raw_paths
+    ):
+        raise ValueError("other-profile digest paths are invalid")
+    paths = [Path(item) for item in raw_paths]
+    if raw_paths != sorted(raw_paths) or len(set(raw_paths)) != len(raw_paths):
+        raise ValueError("other-profile digest paths are not canonical")
+    if any(
+        not path.is_absolute()
+        or path == selected
+        or path.parent != selected.parent
+        or OTHER_DIGEST_NAME.fullmatch(path.name) is None
+        for path in paths
+    ):
+        raise ValueError("other-profile digest path is outside the reviewed set")
+    return paths
+
+
+def verify() -> dict[str, str]:
+    result = _base_result()
+    try:
+        raw = _official_status()
+        if not isinstance(raw, dict):
+            return result
+        logged_in = raw.get("loggedIn")
+        if logged_in is False:
+            result["login_status"] = "not_logged_in"
+            return result
+        if logged_in is not True:
+            return result
+        result["login_status"] = "logged_in"
+        if os.environ.get("AI_IDENTITY_CONTRACT") != "claude_auth_status_v1":
+            return result
+        digest_path = os.environ.get("AI_IDENTITY_DIGEST_FILE")
+        if not digest_path:
+            return result
+        try:
+            current = digest_line(raw, "claude_auth_status_v1")
+        except ValueError:
+            result["identity_status"] = "identity_unverifiable"
+            return result
+        selected = Path(digest_path)
+        result["identity_status"] = compare_enrolled_identity(
+            raw, selected, "claude_auth_status_v1"
+        )
+        if result["identity_status"] == "matched":
+            result["identity_status"] = "unknown"
+            if find_duplicate_enrollment(
+                current, _other_active_digest_paths(selected)
+            ):
+                result["identity_status"] = "duplicate_mapping"
+            else:
+                result["identity_status"] = "matched"
+    except (OSError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        pass
+    return result
+
+
+def main() -> int:
+    payload = verify()
+    if set(payload) != FIELDS:
+        payload = _base_result()
+    print(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

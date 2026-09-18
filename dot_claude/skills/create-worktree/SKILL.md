@@ -1,7 +1,7 @@
 ---
 name: create-worktree
 description: Use when creating a git worktree for a branch or a pull request (PR) review, optionally opening it in a named tmux session
-argument-hint: <branch-name|pr-ref> [target-session]
+argument-hint: <branch-name|pr-ref> [target-session] [--epic <이슈번호> | --standalone]
 user-invocable: true
 allowed-tools: Bash
 ---
@@ -19,8 +19,10 @@ workmux 윈도우로 연결한다. 창과 세션 상태를 추측하지 말고 �
 4. 창이 있으면 창 탐지(`is_open` → 저장 세션 → `target-window` → pane 경로)
 5. 세션 선택(명시값 > 유효·생존 저장값 > 모드 기본값 > 전역 기본값)
 6. 세션 검증
+   - Orca 계보의 부모 사전 확인도 여기서 한다(Orca 계보 설정 절).
 7. 이름 파생
 8. 분기: 기존 worktree면 창 처리, 없으면 생성·오픈 경로
+   - worktree를 새로 만들었으면 직후 Orca 계보를 설정한다(Orca 계보 설정 절).
 9. 사후 검증과 보고
 
 아래 절은 주제별로 묶여 있어 이 순서와 배열이 다르다. 실행은 이 순서를 따른다.
@@ -42,6 +44,13 @@ workmux 윈도우로 연결한다. 창과 세션 상태를 추측하지 말고 �
   둘 이상이거나 세션명이 둘 이상이면 중단하고 확인한다. 자연어가 2-튜플로 환원됐으면
   positional 인자 수 제한을 적용하지 않는다.
 - 세션명에 접두사를 붙이거나 현재 세션 목록에서 비슷한 이름을 추측하지 않는다.
+- Orca 계보 플래그 `--epic <이슈번호>`와 `--standalone`은 선택 사항이다. positional
+  인자 수에 세지 않는다. 전체 사용법은
+  `<branch-name|pr-ref> [target-session] [--epic <이슈번호> | --standalone]`다.
+- 두 플래그를 함께 주거나 `--epic` 값이 숫자가 아니면 추측하지 말고 중단한다. 둘 다
+  없으면 기본값(`active`)이다. 의미는 "Orca 계보 설정" 절에 있다.
+- 자연어 호출에서 에픽 이슈 번호나 최상위(독립) 배치가 명시됐을 때만 해당 플래그로
+  환원한다. 어느 쪽인지 모호하면 기본값으로 가정하지 말고 확인한다.
 
 ## 워크트리 식별자
 
@@ -233,6 +242,80 @@ workmux add --pr {PR번호} --target-name {PR번호}-{짧은이름} --parent-ses
 stdin을 통한 여러 worktree 생성에서는 지원되지 않으므로 그 조합에서는 생략한다.
 PR worktree 생성 뒤에는 `git -C "{worktree경로}" rev-parse HEAD`가 `headRefOid`와 같은지
 검증한다. 다르면 성공으로 보고하지 않는다.
+
+## Orca 계보 설정
+
+workmux는 Orca를 모른다. `workmux add`로 만든 worktree는 git·Orca 목록에는 뜨지만 Orca
+계보(parent/child) 밖에 생긴다. 이번 호출이 worktree를 새로 만들었으면 생성 직후 계보를
+설정한다. 래퍼(`scripts/create-worktree.sh`)로 만든 경우도 같다.
+
+기존 worktree를 재사용한 호출에서는 계보를 바꾸지 않는다. 그때 `--epic`이나
+`--standalone`이 주어졌으면 현재 부모를 보여 주고 바꿀지 확인받는다.
+
+| 인자 | `orca worktree set` 옵션 | 부모 |
+| --- | --- | --- |
+| 없음 (기본) | `--parent-worktree active` | 이 스킬을 실행하는 셸 cwd의 Orca worktree |
+| `--epic {이슈번호}` | `--parent-worktree issue:{이슈번호}` | 그 이슈가 연결된 worktree |
+| `--standalone` | `--no-parent` | 없음 (최상위. main 밑이 아니라 main과 형제) |
+
+기본값이 `active`인 것이 핵심이다. 오케스트레이터 worktree에서 실행하면 인자 없이도 그
+밑에 붙는다. `active`는 셸 cwd로 해석되므로 새 worktree 경로로 `cd`한 뒤 부르면 새
+worktree 자신을 가리킨다. cwd를 바꾸지 말고 이 스킬을 시작한 셸에서 호출한다.
+
+`--standalone`은 에픽 조정자 worktree처럼 새 뿌리를 만들 때 쓴다. 하위 작업이
+`issue:{이슈번호}`로 이 worktree를 지목하려면 이슈가 연결돼 있어야 한다. 생성 뒤
+`orca worktree show`의 `linkedIssue`가 비어 있으면 그 사실을 결과에 알린다.
+
+### 실행
+
+`orca`는 PATH 심링크 권한 결함이 있어 절대경로로 부른다(#140). PATH의 `orca`로
+폴백하지 않는다.
+
+```bash
+ORCA=/Applications/Orca.app/Contents/Resources/bin/orca
+if [ -x "$ORCA" ]; then
+    "$ORCA" worktree set --worktree "path:$WORKTREE_PATH" --parent-worktree "$PARENT" --json
+fi
+```
+
+`$WORKTREE_PATH`는 생성 뒤 `workmux list --json`에서 확보한 절대경로다. `$PARENT`는 위
+표의 `active` 또는 `issue:{이슈번호}`다. `--standalone`이면 `--parent-worktree "$PARENT"`
+대신 `--no-parent`를 넘긴다.
+
+- `[ -x ]`가 거짓이면 Orca가 없는 머신이다. 계보 설정을 건너뛰고 결과에 그 사실을
+  기록한다. 실패로 보고하지 않는다.
+- 부모는 영속 명령 전에(세션 검증 단계) 해석되는지 확인한다. `--epic`이면
+  `"$ORCA" worktree show --worktree "issue:{이슈번호}" --json`, 기본값이면
+  `"$ORCA" worktree current --json`을 쓴다.
+  - `--epic`에서 해석되지 않거나(연결된 worktree가 없음 등) 오류가 나면 worktree를
+    만들지 말고 오류 원문을 알린 뒤 확인받는다.
+  - 기본값에서 실패하면(Orca에 등록되지 않은 저장소 등) 계보 없이 진행하되 결과에
+    알린다.
+- 생성 뒤 `set`이 실패해도 worktree를 되돌리지 않는다. 오류 원문과 위 수동 명령을
+  보고한다.
+- 성공하면 `"$ORCA" worktree show --worktree "path:$WORKTREE_PATH" --json`의
+  `parentWorktreeId`가 기대한 부모인지 확인한다. `--standalone`이면 비어 있어야 한다.
+- 결과 보고에 부모 셀렉터와 확인한 `parentWorktreeId`(또는 건너뛴 이유)를 포함한다.
+
+### 계보와 git base는 별개다
+
+계보는 Orca에서 worktree를 보기 좋게 묶는 용도일 뿐 코드 흐름과 무관하다. Orca 가이드도
+*"`--no-parent` only controls Orca lineage; it does not choose the Git base."*라고
+경고한다. `--epic`으로 에픽 worktree 밑에 붙여도 git base는 에픽 브랜치가 아니라
+workmux의 base 규칙을 따른다. 그래서 에픽 밑 하위 작업도 각자 독립적으로 PR을 낼 수
+있다.
+
+- 이 dotfiles의 workmux 설정은 `base_branch: auto`라서 원격 기본 브랜치(예:
+  `origin/main`)에서 갈라진다.
+- `base_branch` 설정이 없으면 workmux는 현재 체크아웃된 브랜치를 base로 쓴다. 에픽이나
+  feature worktree 안에서 실행하면 계보와 무관하게 stacked branch가 되므로
+  `--base {기본브랜치}`를 명시해 현재 브랜치가 base로 잡히는 것을 막는다.
+- 계보에 맞추려고 `--base`를 바꾸거나 base에 맞추려고 계보를 바꾸지 않는다. stacked
+  branch는 사용자가 명시적으로 요청할 때만 만든다.
+
+계정 프로필(`claude`/`claude-profile1`)은 이 스킬이 고르지 않는다. 에이전트를 자동
+실행하지 않으므로 필요 없고, 그 선택은 에이전트를 띄우는 `orca-worktree` 스킬(#141)의
+몫이다.
 
 ## 기존 worktree 처리
 
