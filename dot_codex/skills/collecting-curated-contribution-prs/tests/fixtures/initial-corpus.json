@@ -1,0 +1,116 @@
+{
+  "schema_version": "1.0.0",
+  "generated_by": {
+    "name": "collecting-recent-closed-prs",
+    "revision": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "records": [
+    {
+      "identity_status": "resolved",
+      "record_key": "github-pr:PR_SYNTHETIC_synthetic-lab_widget_11",
+      "pr_id": "PR-041",
+      "pull_request_node_id": "PR_SYNTHETIC_synthetic-lab_widget_11",
+      "repository": {
+        "full_name": "synthetic-lab/widget",
+        "node_id": "R_SYNTHETIC_synthetic-lab_widget",
+        "repository_aliases": []
+      },
+      "pull_request": {
+        "number": 11,
+        "url": "https://github.com/synthetic-lab/widget/pull/11",
+        "title": "Synthetic pull request",
+        "normalized_state": "open",
+        "created_at": "2030-01-01T00:00:00Z",
+        "closed_at": null,
+        "merged_at": null,
+        "updated_at": "2030-01-05T00:00:00Z"
+      },
+      "author": {
+        "login": "synthetic-upstream-author",
+        "node_id": "U_SYNTHETIC_AUTHOR",
+        "association": "NONE",
+        "normalized_role": "unknown"
+      },
+      "sources": [
+        {
+          "source_key": "recent-closed",
+          "kind": "search-api",
+          "observations": [
+            {
+              "run_id": "recent-run-synthetic",
+              "updated_at": "2030-01-05T00:00:00Z",
+              "body_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+              "pull_request_url": "https://github.com/synthetic-lab/widget/pull/11"
+            }
+          ]
+        },
+        {
+          "source_key": "tracker-issue:1fbea287df726b58ac86acad",
+          "collection_method": "tracker-issue-comments",
+          "tracker": {
+            "issue_node_id": "I_SYNTHETIC_TRACKER_7",
+            "issue_number": 7,
+            "api_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+            "html_url": "https://github.com/synthetic-lab/tracker/issues/7"
+          },
+          "generated_by": {
+            "name": "collecting-curated-contribution-prs",
+            "revision": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "observations": [
+            {
+              "run_id": "run-5fecb3fdff7e-0001",
+              "origin_kind": "issue-body",
+              "issue_node_id": "I_SYNTHETIC_TRACKER_7",
+              "issue_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+              "api_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+              "html_url": "https://github.com/synthetic-lab/tracker/issues/7",
+              "updated_at": "2030-01-02T00:00:00Z",
+              "body_sha256": "41fccda9d6db4edbe3ee3f5f11dd2f9a7734d653be30f49f6d6ecaea0b71884c"
+            },
+            {
+              "run_id": "run-5fecb3fdff7e-0001",
+              "origin_kind": "comment",
+              "comment_id": 7101,
+              "comment_node_id": "IC_SYNTHETIC_7101",
+              "comment_url": "https://api.github.com/repos/synthetic-lab/tracker/issues/comments/7101",
+              "comment_html_url": "https://github.com/synthetic-lab/tracker/issues/7#issuecomment-7101",
+              "commenter_login": "synthetic-user-a",
+              "tracker_author_association": "NONE",
+              "created_at": "2030-01-03T00:00:00Z",
+              "updated_at": "2030-01-03T00:00:00Z",
+              "body_sha256": "41fccda9d6db4edbe3ee3f5f11dd2f9a7734d653be30f49f6d6ecaea0b71884c"
+            }
+          ]
+        }
+      ],
+      "state_history": [
+        {
+          "state": "open",
+          "observed_at": "2030-01-05T00:00:00Z",
+          "authority": "GitHub pull request",
+          "evidence_url": "https://github.com/synthetic-lab/widget/pull/11"
+        }
+      ],
+      "hydration_status": "complete",
+      "evidence_snapshot": {
+        "partial_categories": [],
+        "completeness": {}
+      },
+      "synthetic_unknown": {
+        "preserve": [
+          1,
+          {
+            "typed": true
+          }
+        ]
+      }
+    }
+  ],
+  "synthetic_envelope_unknown": {
+    "preserve": [
+      false,
+      7
+    ]
+  }
+}

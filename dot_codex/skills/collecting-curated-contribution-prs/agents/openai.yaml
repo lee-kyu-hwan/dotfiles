@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect Curated Contribution PRs"
+  short_description: "트래커 Issue 제출 PR을 감사 가능한 corpus로 수집"
+  default_prompt: "Use $collecting-curated-contribution-prs to collect pull request submissions from this tracker Issue into caller-selected corpus and manifest files."

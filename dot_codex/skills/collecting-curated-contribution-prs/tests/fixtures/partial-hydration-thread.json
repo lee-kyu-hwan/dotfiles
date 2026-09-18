@@ -1,0 +1,25 @@
+{
+  "fixture_kind": "synthetic partial hydration tracker thread",
+  "issue": {
+    "id": 7301,
+    "node_id": "I_SYNTHETIC_PARTIAL_HYDRATION",
+    "number": 7,
+    "url": "https://api.github.com/repos/synthetic-lab/tracker/issues/7",
+    "html_url": "https://github.com/synthetic-lab/tracker/issues/7",
+    "created_at": "2030-03-01T00:00:00Z",
+    "updated_at": "2030-03-02T00:00:00Z",
+    "body": "Synthetic submission: https://github.com/synthetic-lab/sample-lib/pull/9999"
+  },
+  "comment_pages": [
+    {
+      "page": 1,
+      "link": null,
+      "comments": []
+    }
+  ],
+  "core_failure": {
+    "repository": "synthetic-lab/sample-lib",
+    "number": 9999,
+    "status": 404
+  }
+}
