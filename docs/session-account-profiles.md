@@ -154,21 +154,25 @@ Explicit home은 launch와 status 전에 symlink가 아닌 기존 디렉터리�
 로그인하고 enrollment해야 admission을 통과한다(아래 Operator recovery).
 
 Account home 상위 디렉터리는 owner-only(0700)다. Chezmoi source는
-`dot_local/share/private_ai-account-profiles/private_claude/private_profile2`처럼 세
+`dot_local/share/private_ai-account-profiles/private_claude/private_profile1`처럼 세
 디렉터리에 `private_` 속성을 붙여 `~/.local/share/ai-account-profiles`, `.../claude`,
-`.../claude/profile2`를 0700으로 렌더링한다. `profile1` home은 source에 배포 자산이 없어
-chezmoi가 만들지 않는다. 기존 home은 operator가 `chmod 700`으로 맞추고, 새 머신에서
-0700으로 만드는 방법은 이슈 #131에서 다룬다.
+`.../claude/profile1`을 0700으로 렌더링한다. `profile2` home은 source에 배포 자산이 없어
+chezmoi가 만들지 않고 mode도 관리하지 않는다(#138). 기존 home은 operator가 `chmod 700`으로
+맞춘다.
 
-## Profile2 public asset boundary
+## Profile2 home 배포 자산
 
-Profile2 public allowlist는 regular non-symlink
-`agents/quality-reviewer.md`와 `skills/quality-goal/**`의 canonical byte mirror뿐이다.
-Source 위치는 `dot_local/share/private_ai-account-profiles/private_claude/private_profile2/`다.
+Profile2 home에 source가 배포하는 자산은 없다. 예전에는 `agents/quality-reviewer.md`와
+`skills/quality-goal/**`의 canonical byte mirror를 배포했지만, 역할 런처 동결 뒤 그 사본을
+읽는 실행 경로가 없어져 #138에서 source와 강제 테스트를 함께 제거했다. quality-goal 정본은
+`dot_claude/skills/quality-goal` 한 벌이다. 이미 배포된 두 경로는 한시적 `.chezmoiremove`가
+리터럴 경로로 걷어내며, 모든 머신에 적용이 끝나면 그 파일을 제거한다. 제거로 영구 스위트에서
+사라진 계약은 `docs/development/2026-09-18-138-remove-profile2-quality-mirror/removed-contracts.md`에
+있다.
+
 `settings.json`, `.claude.json`, credential/token, sessions, projects, history, backups,
 file-history, debug, todos, plans와 plugins는 private이며 배포하거나 symlink하지 않는다.
-Profile1에는 public bundle이 없고, 같은 private 항목을 `.chezmoiignore`에서 대칭으로
-제외한다.
+두 profile 모두 이 항목을 `.chezmoiignore`에서 대칭으로 제외한다.
 
 ## Operator recovery
 

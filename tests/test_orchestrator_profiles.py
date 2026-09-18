@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import os
 import pty
+from fnmatch import fnmatchcase
 from pathlib import Path
 import shutil
 import subprocess
@@ -28,19 +29,7 @@ INSTALLED_CLI_CHECKER = ROOT / "tests/check_installed_orchestrator_cli_contract.
 REGISTRY_CONTRACT = "orchestrator-permission-profiles-v2"
 E2E_FIXTURE_ROOT = ROOT / "tests/fixtures/orchestrator-profiles/e2e"
 LIVE_ACTION_SENTINEL = E2E_FIXTURE_ROOT / "executable_fail-on-live-action"
-PROFILE2_PUBLIC_SOURCE = "dot_local/share/private_ai-account-profiles/private_claude/private_profile2"
-PROFILE2_PUBLIC_ROOT = ROOT / PROFILE2_PUBLIC_SOURCE
-CANONICAL_QUALITY_SKILL = ROOT / "dot_claude/skills/quality-goal"
-CANONICAL_QUALITY_REVIEWER = ROOT / "dot_claude/agents/quality-reviewer.md"
-
-
-def is_public_quality_file(path):
-    return (
-        path.is_file()
-        and not path.is_symlink()
-        and "__pycache__" not in path.parts
-        and path.suffix != ".pyc"
-    )
+CLAUDE_ACCOUNT_HOME_SOURCE = ROOT / "dot_local/share/private_ai-account-profiles/private_claude"
 
 
 def source_artifact_path(target_path):
@@ -477,15 +466,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "docs/session-account-profiles.md",
             "docs/orchestrator-permission-profiles.md",
         }
-        expected_files.add(
-            f"{PROFILE2_PUBLIC_SOURCE}/agents/quality-reviewer.md"
-        )
-        expected_files.update(
-            f"{PROFILE2_PUBLIC_SOURCE}/skills/quality-goal/"
-            + str(path.relative_to(CANONICAL_QUALITY_SKILL))
-            for path in CANONICAL_QUALITY_SKILL.rglob("*")
-            if is_public_quality_file(path)
-        )
         self.assertTrue(all((ROOT / path).is_file() for path in expected_files))
         inspect_only = {
             "docs/claude-settings-reference.json",
@@ -3608,39 +3588,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     (set(verifier_environment) | set(provider_environment)) - set(expected),
                 )
 
-    def test_profile2_quality_bundle_mirror(self):
-        canonical = {
-            Path("agents/quality-reviewer.md"): CANONICAL_QUALITY_REVIEWER,
-            **{
-                Path("skills/quality-goal") / path.relative_to(CANONICAL_QUALITY_SKILL): path
-                for path in CANONICAL_QUALITY_SKILL.rglob("*")
-                if is_public_quality_file(path)
-            },
-        }
-        mirrored = {
-            path.relative_to(PROFILE2_PUBLIC_ROOT): path
-            for path in PROFILE2_PUBLIC_ROOT.rglob("*")
-            if is_public_quality_file(path)
-        } if PROFILE2_PUBLIC_ROOT.is_dir() else {}
-        self.assertEqual(set(canonical), set(mirrored))
-        for relative, source in canonical.items():
-            with self.subTest(path=relative):
-                target = mirrored[relative]
-                self.assertFalse(target.is_symlink())
-                self.assertEqual(source.read_bytes(), target.read_bytes())
-
-        rendered = Path(self.temporary.name) / "rendered-profile2"
-        for relative, source in mirrored.items():
-            target = rendered / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-        deployed_skill = rendered / "skills/quality-goal/SKILL.md"
-        reviewer = deployed_skill.parent / "../../agents/quality-reviewer.md"
-        self.assertTrue(reviewer.is_file())
-        self.assertFalse(reviewer.is_symlink())
-        self.assertEqual(CANONICAL_QUALITY_REVIEWER.read_bytes(), reviewer.read_bytes())
-
-    def test_profile2_public_asset_denylist(self):
+    def test_profile2_account_state_denylist(self):
         deny_targets = {
             ".local/share/ai-account-profiles/claude/profile2/settings.json",
             ".local/share/ai-account-profiles/claude/profile2/.claude.json",
@@ -3655,8 +3603,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 )
             },
             ".local/share/ai-account-profiles/claude/profile2/history.jsonl",
-            ".local/share/ai-account-profiles/claude/profile2/skills/**/__pycache__",
-            ".local/share/ai-account-profiles/claude/profile2/skills/**/*.pyc",
         }
         ignores = {
             line.strip()
@@ -3665,23 +3611,55 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         }
         self.assertIn(".claude/settings.json", ignores)
         self.assertTrue(deny_targets.issubset(ignores))
-        self.assertNotIn(
-            ".local/share/ai-account-profiles/claude/profile2/agents/**", ignores
-        )
-        self.assertNotIn(
-            ".local/share/ai-account-profiles/claude/profile2/skills/**", ignores
-        )
-        if PROFILE2_PUBLIC_ROOT.exists():
-            self.assertFalse(any(path.is_symlink() for path in PROFILE2_PUBLIC_ROOT.rglob("*")))
+
+    def test_profile2_mirror_removal_is_exact(self):
+        # Temporary (#138): removes the deployed copy of the deleted profile2 mirror.
+        # The entries delete inside an account home, so they stay literal and exact.
+        prefix = ".local/share/ai-account-profiles/claude/profile2"
+        expected = [
+            f"{prefix}/skills/quality-goal",
+            f"{prefix}/agents/quality-reviewer.md",
+        ]
+        entries = [
+            line.strip()
+            for line in (ROOT / ".chezmoiremove").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(expected, entries)
+        account_state = {
+            "settings.json", ".claude.json", ".credentials.json", "history.jsonl",
+            "sessions", "projects", "backups", "file-history", "debug", "todos",
+            "plans", "plugins",
+        }
+        for entry in entries:
+            with self.subTest(entry=entry):
+                self.assertFalse(any(character in entry for character in "*?[]{}"))
+                parts = Path(entry).parts
+                self.assertFalse(account_state.intersection(parts))
+                self.assertFalse(any(part.startswith(("credentials", "tokens")) for part in parts))
+
+        # chezmoi silently skips a .chezmoiremove target that .chezmoiignore also matches.
+        # fnmatch lets `*` cross `/`, so this over-matches rather than misses a rule.
+        ignores = {
+            line.strip()
+            for line in (ROOT / ".chezmoiignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith(("#", "{{"))
+        }
+        for entry in entries:
+            covered = (entry, *(str(parent) for parent in Path(entry).parents if parent != Path(".")))
+            with self.subTest(ignored_entry=entry):
+                self.assertEqual(
+                    [],
+                    [rule for rule in sorted(ignores) for path in covered if fnmatchcase(path, rule)],
+                )
 
     def test_account_home_private_source_and_profile1_denylist(self):
         # chezmoi private_ directories render as 0700; the account-home parents must
         # never have a public (0755) source twin that chezmoi would also manage.
         share = ROOT / "dot_local/share"
-        self.assertEqual(
-            ["private_ai-account-profiles", "private_claude", "private_profile2"],
-            list(PROFILE2_PUBLIC_ROOT.relative_to(share).parts),
-        )
+        self.assertTrue((CLAUDE_ACCOUNT_HOME_SOURCE / "private_profile1").is_dir())
+        # #138 removed the profile2 quality-goal mirror; nothing deploys into the profile2 home.
+        self.assertFalse((CLAUDE_ACCOUNT_HOME_SOURCE / "private_profile2").exists())
         for parent, name in (
             (share, "ai-account-profiles"),
             (share / "private_ai-account-profiles", "claude"),
@@ -3707,76 +3685,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             with self.subTest(profile1_ignore=name):
                 self.assertIn(f".local/share/ai-account-profiles/claude/profile1/{name}", ignores)
 
-    def test_profile2_chezmoi_diff_redaction(self):
-        rendered = Path(self.temporary.name) / "rendered-profile2-diff"
-        source_prefix = PROFILE2_PUBLIC_ROOT.relative_to(ROOT)
-        managed_paths = subprocess.run(
-            [
-                "git", "ls-files", "--cached", "--others", "--exclude-standard",
-                "--", str(source_prefix),
-            ],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.splitlines()
-        sources = [ROOT / path for path in managed_paths]
-        expected_sources = {
-            path for path in PROFILE2_PUBLIC_ROOT.rglob("*")
-            if is_public_quality_file(path)
-        }
-        self.assertEqual(expected_sources, set(sources))
-
-        rendered_targets = []
-        source_contents = []
-        target_contents = []
-        for source in sorted(sources):
-            relative = source.relative_to(PROFILE2_PUBLIC_ROOT)
-            target = rendered / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target)
-            rendered_targets.append(target.resolve())
-            source_contents.append(source.read_bytes().lower())
-            target_contents.append(target.read_bytes().lower())
-
-        self.assertTrue(rendered_targets)
-        rendered_root = rendered.resolve()
-        temporary_root = Path(self.temporary.name).resolve()
-        self.assertTrue(rendered_root.is_relative_to(temporary_root))
-        self.assertTrue(all(target.is_relative_to(rendered_root) for target in rendered_targets))
-        self.assertTrue(all(
-            target.relative_to(rendered_root).parts[0] in {"agents", "skills"}
-            for target in rendered_targets
-        ))
-        sentinels = tuple(value.lower().encode("utf-8") for value in (
-            "deployment-leak@example.invalid",
-            "token=synthetic-private-value",
-            "account-id=synthetic-private-value",
-            "/synthetic/config-home/private-profile",
-            "session-secret=synthetic-private-value",
-        ))
-        self.assertFalse(any(
-            sentinel in content
-            for content in (*source_contents, *target_contents)
-            for sentinel in sentinels
-        ))
-
-    def test_public_asset_private_boundary(self):
-        forbidden_names = {
-            "settings.json", ".claude.json", ".credentials.json", "history.jsonl",
-            "sessions", "projects", "backups", "file-history", "debug", "todos",
-            "plans", "plugins",
-        }
-        self.assertEqual(
-            {"agents", "skills"},
-            {path.name for path in PROFILE2_PUBLIC_ROOT.iterdir()},
-        )
-        self.assertTrue(
-            all(path.name not in forbidden_names for path in PROFILE2_PUBLIC_ROOT.rglob("*"))
-        )
-        selector = ACCOUNT_SELECTOR.read_text(encoding="utf-8")
-        self.assertNotIn("PROFILE2_PUBLIC_ROOT", selector)
-
     def test_profile_onboarding_documentation_contract(self):
         account_guide = (ROOT / "docs/session-account-profiles.md").read_text(encoding="utf-8")
         permission_guide = (ROOT / "docs/orchestrator-permission-profiles.md").read_text(
@@ -3799,8 +3707,6 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "profile_status",
             "human-only foreground recovery",
             "no fallback",
-            "quality-reviewer.md",
-            "skills/quality-goal",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)

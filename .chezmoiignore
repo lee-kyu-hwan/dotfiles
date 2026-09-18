@@ -23,8 +23,8 @@ tests/**
 # Claude account home에 배포하면 R4.5의 untrusted input이 되어 반드시 fail closed한다.
 .claude/settings.json
 
-# profile2에는 검토된 agents/skills public bundle만 배포한다. Account 설정,
-# credential/token, runtime/session/history 및 plugin state는 항상 제외한다.
+# profile2 home에는 source가 배포하는 자산이 없다(#138에서 quality-goal 미러 제거).
+# Account 설정, credential/token, runtime/session/history 및 plugin state는 항상 제외한다.
 .local/share/ai-account-profiles/claude/profile2/settings.json
 .local/share/ai-account-profiles/claude/profile2/.claude.json
 .local/share/ai-account-profiles/claude/profile2/.credentials.json
@@ -39,10 +39,8 @@ tests/**
 .local/share/ai-account-profiles/claude/profile2/todos/**
 .local/share/ai-account-profiles/claude/profile2/plans/**
 .local/share/ai-account-profiles/claude/profile2/plugins/**
-.local/share/ai-account-profiles/claude/profile2/skills/**/__pycache__
-.local/share/ai-account-profiles/claude/profile2/skills/**/*.pyc
 
-# profile1은 public bundle 없이 home만 쓴다. profile2와 같은 account 설정,
+# profile1은 skills·agents·workflows symlink만 배포한다. profile2와 같은 account 설정,
 # credential/token, runtime/session/history 및 plugin state를 항상 제외한다.
 .local/share/ai-account-profiles/claude/profile1/settings.json
 .local/share/ai-account-profiles/claude/profile1/.claude.json

@@ -1,0 +1,5 @@
+# 한시적(#138): source에서 지운 profile2 quality-goal 미러의 배포본을 걷어낸다.
+# 모든 머신에 적용이 끝나면 아래 두 줄과 이 파일을 제거한다.
+# 계정 home 안을 지우는 지시이므로 glob 없이 리터럴 경로만 적는다.
+.local/share/ai-account-profiles/claude/profile2/skills/quality-goal
+.local/share/ai-account-profiles/claude/profile2/agents/quality-reviewer.md
