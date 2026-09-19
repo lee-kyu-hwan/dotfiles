@@ -1,0 +1,63 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    # zsh 가 기본으로 있어 test_claude_profile1_launcher 가 skip 되지 않는다
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      # __pycache__ 가 생기면 패키징 테스트가 깨진다 (#139)
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      # 새 클론이 clean checkout 검증을 대신하므로 어떤 캐시도 복원하지 않는다
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # 표준 라이브러리만 쓰므로 pip install 은 하지 않는다
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: 저장소 테스트
+        run: python3 -m unittest discover -s tests -v
+
+      - name: 스킬 테스트
+        if: ${{ !cancelled() }}
+        run: |
+          shopt -s nullglob
+          failed=()
+          for dir in dot_codex/skills/*/tests dot_claude/skills/*/tests; do
+            skill="$(dirname "$dir")"
+            echo "::group::$skill"
+            if ! (cd "$skill" && python3 -m unittest discover -s tests -v); then
+              failed+=("$skill")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf '::error::스킬 테스트 실패: %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+      - name: __pycache__ 가 생기지 않았는지 확인
+        if: ${{ !cancelled() }}
+        run: |
+          found="$(find . -name __pycache__ -print)"
+          if [ -n "$found" ]; then
+            echo "::error::__pycache__ 가 생겼다"
+            echo "$found"
+            exit 1
+          fi

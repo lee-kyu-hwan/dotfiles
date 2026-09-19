@@ -79,6 +79,16 @@ ENTRYPOINTS = {
     "ai-claude-feature-orchestrator": ("claude", "feature-orchestrator"),
     "ai-claude-global-orchestrator": ("claude", "global-orchestrator"),
 }
+# verify_provider_cli_contract probes the real provider CLI on PATH with --version and --help,
+# so these tests cannot run where the CLI is absent (e.g. CI runners).
+requires_claude_cli = unittest.skipUnless(
+    shutil.which("claude"),
+    "claude CLI is required: verify_provider_cli_contract probes it on PATH",
+)
+requires_codex_cli = unittest.skipUnless(
+    shutil.which("codex"),
+    "codex CLI is required: verify_provider_cli_contract probes it on PATH",
+)
 
 
 class OrchestratorProfileFixture(unittest.TestCase):
@@ -864,6 +874,8 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertEqual(1, skill_policies["schema_version"])
         self.assertIsInstance(skill_policies["policies"], dict)
 
+    @requires_claude_cli
+    @requires_codex_cli
     def test_launcher_entrypoints(self):
         self.assertTrue(
             ROLE_DISPATCHER.is_file(),
@@ -903,6 +915,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     command[command.index("--", first_separator + 1) + 1],
                 )
 
+    @requires_codex_cli
     def test_codex_policy(self):
         with ROLE_MANIFEST.open("rb") as stream:
             manifest = tomllib.load(stream)
@@ -1036,6 +1049,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertEqual(37, rejected.returncode)
         self.assertEqual("1", call_count.read_text(encoding="utf-8"))
 
+    @requires_codex_cli
     def test_codex_project_config_prescan(self):
         with ROLE_MANIFEST.open("rb") as stream:
             manifest = tomllib.load(stream)
@@ -1155,6 +1169,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 self.assertIn(status, blocked.stderr)
                 self.assertEqual("1", call_count.read_text(encoding="utf-8"))
 
+    @requires_claude_cli
     def test_claude_policy(self):
         self.load_claude_settings()
         with ROLE_MANIFEST.open("rb") as stream:
@@ -1347,6 +1362,8 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 record = self.public_records(blocked.stderr)
                 self.assertEqual("blocked_binding", record[0]["status"])
 
+    @requires_claude_cli
+    @requires_codex_cli
     def test_instruction_hash(self):
         instructions = self.reviewed_instructions()
         repository = self.make_git_repository()
@@ -1707,6 +1724,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
     def test_workmux_wait_surface(self):
         self.assert_workmux_surface("wait")
 
+    @requires_claude_cli
     def test_claude_settings_prescan(self):
         self.load_claude_settings()
         repository = self.make_git_repository()
@@ -1869,6 +1887,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     hashlib.sha256(path.read_bytes()).hexdigest(),
                 )
 
+    @requires_claude_cli
     def test_effective_setting_sources(self):
         _, composed = self.load_claude_settings()
         repository = self.make_git_repository()
@@ -1903,6 +1922,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     provider_command[provider_command.index("--setting-sources") + 1],
                 )
 
+    @requires_claude_cli
     def test_claude_plugin_policy(self):
         self.load_claude_settings()
         with ROLE_MANIFEST.open("rb") as stream:
@@ -1951,6 +1971,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                 self.assertEqual(4, blocked.returncode)
                 self.assertIn("blocked_policy", blocked.stderr)
 
+    @requires_claude_cli
     def test_claude_untrusted_settings_prescan(self):
         self.load_claude_settings()
         repository = self.make_git_repository()
@@ -2122,6 +2143,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             "--lease-proof", str(proof),
         )
 
+    @requires_codex_cli
     def test_global_leader(self):
         self.require_t6_capability_contract()
         import time
@@ -2273,6 +2295,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         provider_fds = json.loads(provider_capture.read_text(encoding="utf-8"))["open_fds"]
         self.assertEqual(1, len(provider_fds), provider_fds)
 
+    @requires_codex_cli
     def test_reviewer_standby(self):
         self.require_t6_capability_contract()
         repository = self.make_git_repository()
@@ -2322,6 +2345,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             self.assertEqual([], record["internal_env"])
             self.assertEqual([], record["open_fds"])
 
+    @requires_codex_cli
     def test_takeover(self):
         self.require_t6_capability_contract()
         repository = self.make_git_repository()
@@ -2351,6 +2375,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
         self.assertEqual(b"owner-alive\n", sentinel.read_bytes())
         self.assertFalse(called.exists())
 
+    @requires_codex_cli
     def test_role_account_orthogonality(self):
         self.require_t6_capability_contract()
         repository = self.make_git_repository()
@@ -3890,6 +3915,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
                     json.loads(provider_capture.read_text(encoding="utf-8")),
                 )
 
+    @requires_claude_cli
     def test_claude_config_home_modes(self):
         with ACCOUNT_REGISTRY.open("rb") as stream:
             source_accounts = {
@@ -4843,6 +4869,7 @@ class OrchestratorProfileContractTests(OrchestratorProfileFixture):
             with ACCOUNT_REGISTRY.open("rb") as stream:
                 self.assertIn(legacy_alias, tomllib.load(stream)["legacy_records"])
 
+    @requires_codex_cli
     def test_failure_status(self):
         self.require_t7_verifier_contract()
         registry, code_root, _, _ = self.write_strict_registry()
