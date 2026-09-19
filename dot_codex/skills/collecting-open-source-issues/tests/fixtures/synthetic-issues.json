@@ -1,0 +1,279 @@
+{
+  "repositories": {
+    "synthetic-lab/widget": {
+      "full_name": "synthetic-lab/widget",
+      "node_id": "R_SYNTHETIC_WIDGET"
+    }
+  },
+  "issues": [
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 1,
+      "node_id": "I_SYNTHETIC_1",
+      "title": "Synthetic issue without any pull request",
+      "body": "Steps: run the synthetic command twice.",
+      "state": "open",
+      "state_reason": null,
+      "created_at": "2030-01-10T00:00:00Z",
+      "updated_at": "2030-01-11T00:00:00Z",
+      "closed_at": null,
+      "labels": ["bug"],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "comments": [
+        {
+          "id": 101,
+          "node_id": "IC_SYNTHETIC_101",
+          "body": "Confirmed on the synthetic main branch.",
+          "author_association": "MEMBER",
+          "user": {"login": "synthetic-maintainer"},
+          "created_at": "2030-01-11T00:00:00Z",
+          "updated_at": "2030-01-11T00:00:00Z"
+        }
+      ],
+      "timeline": [
+        {"event": "commented", "actor": {"login": "synthetic-maintainer"}, "created_at": "2030-01-11T00:00:00Z"}
+      ],
+      "graphql": {}
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 2,
+      "node_id": "I_SYNTHETIC_2",
+      "title": "Synthetic issue closed by a merged pull request",
+      "body": "The synthetic widget crashes.",
+      "state": "closed",
+      "state_reason": "completed",
+      "created_at": "2030-01-12T00:00:00Z",
+      "updated_at": "2030-01-14T00:00:00Z",
+      "closed_at": "2030-01-14T00:00:00Z",
+      "labels": ["bug"],
+      "author_association": "CONTRIBUTOR",
+      "user": {"login": "synthetic-contributor", "node_id": "U_SYNTHETIC_CONTRIBUTOR"},
+      "comments": [],
+      "timeline": [
+        {
+          "event": "cross-referenced",
+          "actor": {"login": "synthetic-contributor"},
+          "created_at": "2030-01-13T00:00:00Z",
+          "source": {
+            "type": "issue",
+            "issue": {
+              "number": 20,
+              "node_id": "PR_SYNTHETIC_20",
+              "html_url": "https://github.com/synthetic-lab/widget/pull/20",
+              "pull_request": {"html_url": "https://github.com/synthetic-lab/widget/pull/20"},
+              "repository": {"full_name": "synthetic-lab/widget"}
+            }
+          }
+        },
+        {"event": "closed", "actor": {"login": "synthetic-maintainer"}, "created_at": "2030-01-14T00:00:00Z", "state_reason": null, "commit_id": null}
+      ],
+      "graphql": {
+        "closed_events": [
+          {
+            "createdAt": "2030-01-14T00:00:00Z",
+            "stateReason": "COMPLETED",
+            "closer": {
+              "__typename": "PullRequest",
+              "id": "PR_SYNTHETIC_20",
+              "number": 20,
+              "url": "https://github.com/synthetic-lab/widget/pull/20",
+              "state": "MERGED",
+              "merged": true,
+              "repository": {"nameWithOwner": "synthetic-lab/widget"}
+            }
+          }
+        ],
+        "closing_references": [
+          {
+            "id": "PR_SYNTHETIC_20",
+            "number": 20,
+            "url": "https://github.com/synthetic-lab/widget/pull/20",
+            "state": "MERGED",
+            "merged": true,
+            "repository": {"nameWithOwner": "synthetic-lab/widget"}
+          }
+        ]
+      }
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 3,
+      "node_id": "I_SYNTHETIC_3",
+      "title": "Synthetic issue closed as not planned despite a linked pull request",
+      "body": "Please add a synthetic option.",
+      "state": "closed",
+      "state_reason": "not_planned",
+      "created_at": "2030-01-15T00:00:00Z",
+      "updated_at": "2030-01-17T00:00:00Z",
+      "closed_at": "2030-01-17T00:00:00Z",
+      "labels": ["wontfix"],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "comments": [],
+      "timeline": [
+        {"event": "closed", "actor": {"login": "synthetic-maintainer"}, "created_at": "2030-01-17T00:00:00Z", "state_reason": "not_planned", "commit_id": null}
+      ],
+      "graphql": {
+        "closed_events": [
+          {"createdAt": "2030-01-17T00:00:00Z", "stateReason": "NOT_PLANNED", "closer": null}
+        ],
+        "closing_references": [
+          {
+            "id": "PR_SYNTHETIC_30",
+            "number": 30,
+            "url": "https://github.com/synthetic-lab/widget/pull/30",
+            "state": "CLOSED",
+            "merged": false,
+            "repository": {"nameWithOwner": "synthetic-lab/widget"}
+          }
+        ]
+      }
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 4,
+      "node_id": "I_SYNTHETIC_4",
+      "title": "Synthetic duplicate issue",
+      "body": "Same crash as before.",
+      "state": "closed",
+      "state_reason": "duplicate",
+      "created_at": "2030-01-18T00:00:00Z",
+      "updated_at": "2030-01-19T00:00:00Z",
+      "closed_at": "2030-01-19T00:00:00Z",
+      "labels": [],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "comments": [],
+      "timeline": [
+        {"event": "closed", "actor": {"login": "synthetic-maintainer"}, "created_at": "2030-01-19T00:00:00Z", "state_reason": "duplicate", "commit_id": null}
+      ],
+      "graphql": {
+        "closed_events": [
+          {"createdAt": "2030-01-19T00:00:00Z", "stateReason": "DUPLICATE", "closer": null}
+        ],
+        "duplicate_of": {
+          "id": "I_SYNTHETIC_1",
+          "number": 1,
+          "url": "https://github.com/synthetic-lab/widget/issues/1",
+          "repository": {"nameWithOwner": "synthetic-lab/widget"}
+        }
+      }
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 5,
+      "node_id": "I_SYNTHETIC_5",
+      "title": "Synthetic issue whose body and comment were edited",
+      "body": "Edited synthetic body.",
+      "state": "open",
+      "state_reason": null,
+      "created_at": "2030-01-20T00:00:00Z",
+      "updated_at": "2030-01-22T00:00:00Z",
+      "closed_at": null,
+      "labels": [],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "comments": [
+        {
+          "id": 501,
+          "node_id": "IC_SYNTHETIC_501",
+          "body": "Edited synthetic comment.",
+          "author_association": "NONE",
+          "user": {"login": "synthetic-reporter"},
+          "created_at": "2030-01-21T00:00:00Z",
+          "updated_at": "2030-01-22T00:00:00Z"
+        }
+      ],
+      "timeline": [],
+      "graphql": {
+        "last_edited_at": "2030-01-22T00:00:00Z",
+        "body_edits": [
+          {"editedAt": "2030-01-22T00:00:00Z", "deletedAt": null, "editor": {"login": "synthetic-reporter"}, "diff": "SYNTHETIC-DIFF-BODY-SECOND"},
+          {"editedAt": "2030-01-21T00:00:00Z", "deletedAt": null, "editor": {"login": "synthetic-reporter"}, "diff": "SYNTHETIC-DIFF-BODY-FIRST"}
+        ],
+        "comment_edits": {
+          "501": {
+            "last_edited_at": "2030-01-22T00:00:00Z",
+            "edits": [
+              {"editedAt": "2030-01-22T00:00:00Z", "deletedAt": "2030-01-23T00:00:00Z", "editor": null, "diff": "SYNTHETIC-DIFF-COMMENT-REMOVED-TEXT"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 6,
+      "node_id": "I_SYNTHETIC_6",
+      "title": "Synthetic issue with an unreadable cross-reference",
+      "body": "Referenced from somewhere the viewer cannot read.",
+      "state": "open",
+      "state_reason": null,
+      "created_at": "2030-01-23T00:00:00Z",
+      "updated_at": "2030-01-24T00:00:00Z",
+      "closed_at": null,
+      "labels": [],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "comments": [],
+      "timeline": [
+        {"event": "cross-referenced", "actor": null, "created_at": "2030-01-24T00:00:00Z", "source": {"type": "issue"}},
+        {
+          "event": "cross-referenced",
+          "actor": {"login": "synthetic-reporter"},
+          "created_at": "2030-01-24T00:00:00Z",
+          "source": {
+            "type": "issue",
+            "issue": {
+              "number": 9,
+              "node_id": "I_SYNTHETIC_OTHER_9",
+              "html_url": "https://github.com/synthetic-lab/other/issues/9",
+              "repository": {"full_name": "synthetic-lab/other"}
+            }
+          }
+        }
+      ],
+      "graphql": {}
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 7,
+      "node_id": "PR_SYNTHETIC_7",
+      "title": "Synthetic pull request returned by an issue search",
+      "body": "A pull request, not an issue.",
+      "state": "open",
+      "state_reason": null,
+      "created_at": "2030-01-25T00:00:00Z",
+      "updated_at": "2030-01-25T00:00:00Z",
+      "closed_at": null,
+      "labels": [],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-contributor", "node_id": "U_SYNTHETIC_CONTRIBUTOR"},
+      "is_pull_request": true,
+      "comments": [],
+      "timeline": [],
+      "graphql": {}
+    },
+    {
+      "repository": "synthetic-lab/widget",
+      "number": 8,
+      "node_id": "I_SYNTHETIC_8",
+      "title": "Synthetic issue that became inaccessible after search",
+      "body": "Gone.",
+      "state": "open",
+      "state_reason": null,
+      "created_at": "2030-01-26T00:00:00Z",
+      "updated_at": "2030-01-26T00:00:00Z",
+      "closed_at": null,
+      "labels": [],
+      "author_association": "NONE",
+      "user": {"login": "synthetic-reporter", "node_id": "U_SYNTHETIC_REPORTER"},
+      "inaccessible": true,
+      "comments": [],
+      "timeline": [],
+      "graphql": {}
+    }
+  ]
+}
