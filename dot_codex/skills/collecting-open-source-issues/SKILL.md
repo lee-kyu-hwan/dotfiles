@@ -22,11 +22,12 @@ corpus and manifest paths. The script owns calendar arithmetic, queries,
 splitting, hydration, normalization, and persistence. Use its `collect`
 command rather than constructing ad-hoc GitHub commands.
 
-Exit 2 means invalid input and no GitHub request was made. Exit 3 means usable
-**partial** output; state the manifest's failed scopes, partial records, and
-method limitations before presenting the inventory. Exit 4 means failed
-collection. Never claim every matching Issue was collected merely because all
-exposed pages were read.
+Exit 2 means invalid input, or that the shared `collecting-recent-closed-prs`
+skill is not installed beside this one; either way no GitHub request was made.
+Exit 3 means usable **partial** output; state the manifest's failed scopes,
+partial records, and method limitations before presenting the inventory.
+Exit 4 means failed collection. Never claim every matching Issue was collected
+merely because all exposed pages were read.
 
 The collector records facts, not causes. Every record keeps
 `closure.normalized_cause` as `unknown`: a state, a `state_reason`, a label such

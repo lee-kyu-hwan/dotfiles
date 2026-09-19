@@ -35,11 +35,19 @@ _SIBLING_CACHE: dict[Path, Any] = {}
 _ONE_SECOND = timedelta(seconds=1)
 
 
+class SiblingMissing(FileNotFoundError):
+    """The adjacent closed-PR collector this skill shares code with is absent."""
+
+
 def load_sibling(script_path: object = SIBLING_SCRIPT) -> Any:
     """Load the adjacent closed-PR collector once from its file-relative path."""
     path = Path(script_path).resolve()
     if not path.is_file():
-        raise FileNotFoundError(path)
+        raise SiblingMissing(
+            "collecting-recent-closed-prs is not installed at {0}. This skill shares "
+            "that skill's GitHub transport, date splitting, and hydration; install it "
+            "as a sibling directory before collecting.".format(path)
+        )
     if path in _SIBLING_CACHE:
         return _SIBLING_CACHE[path]
     module_name = "_collecting_recent_closed_prs_sibling_for_issues"
@@ -57,7 +65,13 @@ def load_sibling(script_path: object = SIBLING_SCRIPT) -> Any:
     return module
 
 
-_sibling = load_sibling()
+try:
+    _sibling = load_sibling()
+except SiblingMissing as error:  # pragma: no cover - exercised as a subprocess
+    if __name__ == "__main__":
+        print("error: {0}".format(error), file=sys.stderr)
+        raise SystemExit(2)
+    raise
 resolve_interval = _sibling.resolve_interval
 
 

@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -924,6 +926,38 @@ class RevisionTests(unittest.TestCase):
                 self.assertNotEqual(baseline, self.collector.compute_skill_revision(copy), relative)
                 target.write_bytes(original)
             self.assertEqual(baseline, self.collector.compute_skill_revision(copy))
+
+
+class SiblingDependencyTests(unittest.TestCase):
+    """The shared closed-PR collector must be named when it is missing."""
+
+    def setUp(self):
+        self.collector = load_collector()
+
+    def test_missing_sibling_names_the_skill_to_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            absent = Path(directory) / "collect_recent_closed_prs.py"
+            with self.assertRaises(self.collector.SiblingMissing) as raised:
+                self.collector.load_sibling(absent)
+        message = str(raised.exception)
+        self.assertIn("collecting-recent-closed-prs", message)
+        self.assertIn(str(absent), message)
+
+    def test_running_without_the_sibling_exits_two_with_one_line(self):
+        """--help is the skill's first instruction, so it must not stack trace."""
+        with tempfile.TemporaryDirectory() as directory:
+            orphan = Path(directory) / SKILL_DIR.name / "scripts"
+            orphan.mkdir(parents=True)
+            shutil.copy2(SCRIPT, orphan / SCRIPT.name)
+            completed = subprocess.run(
+                [sys.executable, str(orphan / SCRIPT.name), "--help"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(2, completed.returncode)
+        self.assertEqual("", completed.stdout)
+        self.assertIn("collecting-recent-closed-prs", completed.stderr)
+        self.assertNotIn("Traceback", completed.stderr)
 
 
 if __name__ == "__main__":
