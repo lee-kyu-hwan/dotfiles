@@ -98,6 +98,68 @@ lsof -d cwd -F pcn 2>/dev/null | awk -v wt="$WT" '
   수동으로 옮겨 살렸다.
 - **3** — 에이전트를 끝낼지 사용자에게 묻는다. 지금 세션이 그 worktree 안에서 돌고 있으면
   자기 자신과 그 자식 프로세스(`node`·`caffeinate` 등)도 잡히므로 빼고 판단한다.
+  **그 에이전트가 orchestration 워커면 아래 「워커 worktree 정리」를 따른다.**
+
+```bash
+# 잡힌 에이전트가 워커인지 확인한다
+orca orchestration worker-list --json \
+  | jq -r '.result.workers[] | [.dispatchId, .workerState, .resource.terminalHandle] | @tsv'
+```
+
+## 워커 worktree 정리
+
+`orca orchestration worker-start` 로 띄운 워커의 worktree는 아래 절차로 치운다. 워커가
+아니면 이 절은 건너뛴다.
+
+### 시점 — `worker_done` 직후가 아니다
+
+산출물을 검토하고 **더 물어볼 것이 없을 때** 치운다. `worker_done` 을 받은 뒤에도 터미널이
+필요하다.
+
+- 산출물에 오류가 있으면 같은 컨텍스트에서 정정시킬 수 있다. 2026-09-19 에 워커 산출물의
+  근거 오류를 발견해 정정을 지시했고 터미널이 살아 있어서 가능했다.
+- 터미널을 닫으면 대화 상세 조회가 막힌다. 연결이 끊긴 워커는
+  `orca orchestration worker-read --source transcript` 가 `transcript_required` /
+  `session_not_reported` 로 실패한다(실측).
+
+### 완료된 워커에게 추가 지시를 하려면
+
+`orca orchestration reply` 는 닿지 않는다. `worker_done` 을 보낸 워커는 입력 대기 상태라
+메시지 큐를 읽는 루프에 없다. `reply` 는 `ok: true` 를 돌려주지만 워커는 받지 못한다.
+`reply` 는 워커가 `ask` 를 보내고 **대기 중일 때** 쓴다.
+
+```bash
+orca terminal read --terminal "$HANDLE" --json     # 먼저 화면 상태를 본다
+orca terminal send --terminal "$HANDLE" --text "<지시>" --enter --wait-submit 10 --json
+```
+
+화면에 모달(`/status` 등)이 떠 있으면 입력이 삼켜진다. `--text $'\033'`(Esc)로 닫은 뒤
+다시 보낸다. 실측에서 `/status` 모달에 갇힌 워커가 지시를 받지 못했다.
+
+### 정리 3단계
+
+```bash
+# handle 은 저장해 둔 값을 쓰지 않는다. 재생성되면 바뀌어 terminal_handle_stale 이 난다
+HANDLE=$(orca terminal list --json | jq -r --arg p "$WT" '.result.terminals[] | select(.worktreePath == $p) | .handle')
+
+orca orchestration worker-release --dispatch "$DISPATCH_ID" --json   # 1. 정산 기록
+orca terminal close --terminal "$HANDLE" --tab --json                # 2. 터미널
+git -C "$MAIN" worktree remove "$WT"                                 # 3. worktree
+```
+
+**1이 터미널을 닫지 않는 것은 정상이다.** `--terminal` 로 붙인 워커는 조정자 소유가 아니다.
+
+```json
+{ "state": "retained", "reason": "external_terminal", "processAction": "none" }
+```
+
+`ok: true` 이고 오류가 아니다. 도움말이 "closes only the exact **coordinator-owned** agent
+terminal" 이라고 명시한다. 사용자가 `terminal create` 로 띄운 터미널을 Orca 가 임의로 닫지
+않는 안전 설계다. `--agent` 로 띄운 워커는 Orca 소유라 `worker-release` 가 터미널까지 닫는다.
+
+**3 이후 Orca worktree 목록은 자동으로 갱신된다**(실측: 23 → 21, 경로 없는 항목 0).
+`orca worktree rm` 을 따로 부르면 `selector_not_found` 가 난다. 그 명령은 `orca worktree
+create` 로 만든 worktree 를 지울 때만 쓴다.
 
 `ls`는 alias(eza 등)로 바뀌어 있을 수 있어 쓰지 않는다. 셸 상태는 명령 호출마다 초기화될 수
 있으므로 변수와 `devdocs`는 호출할 때마다 다시 정의한다.

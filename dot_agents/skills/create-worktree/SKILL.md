@@ -262,6 +262,20 @@ workmux는 Orca를 모른다. `workmux add`로 만든 worktree는 git·Orca 목�
 밑에 붙는다. `active`는 셸 cwd로 해석되므로 새 worktree 경로로 `cd`한 뒤 부르면 새
 worktree 자신을 가리킨다. cwd를 바꾸지 말고 이 스킬을 시작한 셸에서 호출한다.
 
+### PR 모드는 보드 상태도 함께 설정한다
+
+PR 리뷰용 worktree는 계보와 별개로 보드 상태를 `in-review`로 둔다. 계보는 "무엇에 속하나",
+상태는 "어느 단계인가"를 답하는 별개 축이다.
+
+```bash
+orca worktree set --worktree "path:$WORKTREE_PATH" --workspace-status in-review --json
+```
+
+남이 작성한 PR이면 내 에픽에 속하지 않으므로 `--no-parent`로 최상위에 두거나, 리뷰 묶음용
+worktree를 부모로 지정한다. 내가 작성자인 PR이면 **계보를 옮기지 않고 상태만 바꾼다**.
+
+브랜치 모드에서는 이 단계를 건너뛴다. 상태는 기본값 그대로 둔다.
+
 `--standalone`은 에픽 조정자 worktree처럼 새 뿌리를 만들 때 쓴다. 하위 작업이
 `issue:{이슈번호}`로 이 worktree를 지목하려면 이슈가 연결돼 있어야 한다. 생성 뒤
 `orca worktree show`의 `linkedIssue`가 비어 있으면 그 사실을 결과에 알린다.
