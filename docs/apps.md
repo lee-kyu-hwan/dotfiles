@@ -10,7 +10,9 @@ Brewfile로 관리되는 macOS 애플리케이션 중 **GUI 앱(cask)** 과 **�
 | 이름 | 종류 | 설명 |
 |------|------|------|
 | [android-studio](#android-studio) | Cask (앱) | Android/Flutter/React Native 개발 IDE |
+| [antigravity-cli](#antigravity-cli) | Cask (CLI) | Google Antigravity CLI (`agy`) |
 | [copilot-cli](#copilot-cli) | Cask (앱) | GitHub Copilot CLI |
+| [docker-desktop](#docker-desktop) | Cask (앱) | 컨테이너 런타임 및 관리 GUI |
 | [flutter](#flutter) | Cask (SDK) | Flutter SDK |
 | [gcloud-cli](#gcloud-cli) | Cask (CLI) | Google Cloud CLI |
 | [ghostty](#ghostty) | Cask (앱) | GPU 가속 터미널 에뮬레이터 |
@@ -22,7 +24,6 @@ Brewfile로 관리되는 macOS 애플리케이션 중 **GUI 앱(cask)** 과 **�
 | [firebase-cli](#firebase-cli) | Formula (CLI) | Firebase 프로젝트 관리 CLI |
 | [fvm](#fvm) | Formula (CLI, tap) | Flutter 버전 관리자 |
 | [supabase](#supabase) | Formula (CLI) | Supabase 백엔드 플랫폼 CLI |
-| [gemini-cli](#gemini-cli) | Formula (CLI) | Google Gemini CLI |
 | [openjdk@17](#openjdk17) | Formula (CLI) | Java 17 런타임 |
 | [mysql-client](#mysql-client) | Formula (CLI) | MySQL 클라이언트 |
 | [redis](#redis) | Formula (CLI) | 인메모리 데이터 스토어 |
@@ -41,6 +42,18 @@ Android SDK, AVD(에뮬레이터 관리자), 디버거가 내장되어 있어 �
 
 ---
 
+### antigravity-cli
+
+Google Antigravity 에이전트를 터미널에서 사용하는 공식 CLI. 구 `gemini-cli`(Homebrew formula)의 후속이며, formula 쪽은 upstream 미지원으로 deprecated 되어 2026-12-18에 비활성화된다.
+
+- **주요 용도**: AI 텍스트 생성, 코드 보조, Google 생태계 연동 작업
+- **주요 명령어**: `agy`, `agy update`
+- **실행 이름**: 바이너리는 `antigravity`이고 `agy`로 링크된다. `gemini` 명령은 없다
+- **전제 조건**: Google 계정 인증 또는 API 키 설정 필요
+- **업데이트**: cask에 `auto_updates true`가 붙어 있어 `brew upgrade`와 `brew bundle`이 건너뛰고 `outdated`도 항상 false로 보고한다. 올리려면 `brew upgrade --cask --greedy antigravity-cli`를 쓴다
+
+---
+
 ### copilot-cli
 
 GitHub Copilot을 터미널에서 사용할 수 있게 해주는 CLI 도구.
@@ -48,6 +61,17 @@ GitHub Copilot을 터미널에서 사용할 수 있게 해주는 CLI 도구.
 
 - **주요 용도**: 셸 명령어 제안 (`gh copilot suggest`), 명령어 설명 (`gh copilot explain`)
 - **전제 조건**: GitHub Copilot 구독 및 `gh auth login` 인증 필요
+
+---
+
+### docker-desktop
+
+macOS용 Docker 런타임과 관리 GUI 묶음. Docker Engine, `docker` CLI, Compose, 선택형 Kubernetes가 함께 설치된다.
+
+- **주요 용도**: 로컬 컨테이너 실행, `supabase` 로컬 스택 구동, 개발용 DB/서비스 격리 실행
+- **주요 명령어**: `docker run`, `docker compose up`, `docker ps`
+- **설치 경로**: CLI는 Homebrew가 아니라 앱이 `/usr/local/bin`에 심는다 (`docker`, `docker-compose`)
+- **전제 조건**: CLI를 쓰려면 Docker Desktop 앱이 실행 중이어야 한다
 
 ---
 
@@ -147,15 +171,6 @@ Flutter SDK 버전을 프로젝트별로 고정하고 전환하는 CLI.
 - **주요 용도**: Flutter 프로젝트별 SDK 버전 관리
 - **주요 명령어**: `fvm install`, `fvm use`, `fvm flutter doctor`
 - **설치 경로**: Homebrew 코어가 아닌 `leoafarias/fvm` tap 경유 (`tap "leoafarias/fvm"` → `brew "leoafarias/fvm/fvm"`)
-
----
-
-### gemini-cli
-
-Google Gemini AI 모델을 터미널에서 직접 사용할 수 있는 공식 CLI 도구.
-
-- **주요 용도**: AI 텍스트 생성, 코드 보조, Google 생태계 연동 작업
-- **전제 조건**: Google 계정 인증 또는 API 키 설정 필요
 
 ---
 
