@@ -866,8 +866,11 @@ class WatchdogAbortAndReapTestCase(WatchdogProcessTestCase):
         self.assertEqual([child.pid], residual)
 
     def test_reap_failure_is_not_abort_and_never_consumes_budget(self):
-        settings = WatchdogSettings(start_deadline_seconds=.05, activity_stall_seconds=.05, hard_timeout_seconds=.2, poll_interval_seconds=.01, exit_collect_wait_seconds=.01, abort_grace_seconds=.01, reap_grace_seconds=.2, reap_wait_cap_seconds=.02)
-        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1)", validator=lambda path: True, settings=settings)
+        # cap < grace is the point of this test: the post-SIGKILL budget expires first, so
+        # the reap fails. The abort triggers must stay far away from that, or a loaded
+        # runner aborts before the result is accepted and abort["attempted"] flips to True.
+        settings = WatchdogSettings(start_deadline_seconds=2, activity_stall_seconds=2, hard_timeout_seconds=3, poll_interval_seconds=.01, exit_collect_wait_seconds=.5, abort_grace_seconds=.01, reap_grace_seconds=.2, reap_wait_cap_seconds=.02)
+        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)", validator=lambda path: True, settings=settings)
         self.assertFalse(outcome.record["abort"]["attempted"])
         self.assertEqual(0, outcome.record["retry_consumed"])
 
