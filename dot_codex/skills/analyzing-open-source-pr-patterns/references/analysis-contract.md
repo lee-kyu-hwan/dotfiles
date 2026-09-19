@@ -20,6 +20,8 @@ The enriched JSON has exactly these top-level fields:
 
 No additional top-level field is valid. In particular, no `CAN-*` field or record is valid.
 
+`limitations` contains exactly one nonempty entry that starts with `pattern-extraction: `. It is the extraction ledger defined in the extraction contract, so an empty `patterns` array is always a recorded outcome, never a default.
+
 ## Reusable analysis types
 
 ```text
@@ -102,7 +104,14 @@ PatternRecord = PatternProjection + {
 
 Every pattern uses this one shape; `source_license` is not an alternative field. The newest pattern snapshot conclusion deep-equals the current projection and its revision equals the current deterministic revision. A new pattern starts with one snapshot. Every existing pattern remains present with the same stable ID, its old `pattern_history` as an exact prefix, and exactly one new snapshot. Old history items may use a legacy shape and remain unchanged.
 
-Create a pattern only for genuinely recurring behavior. A single PR may support a low-confidence observation, not a confident universal rule. State both applicability and counterconditions.
+Create a pattern only for genuinely recurring behavior, and state both applicability and counterconditions. Every current pattern, meaning one whose `superseded_by` is null, satisfies these rules:
+
+- `evidence_pr_ids` cites at least two distinct PR-* IDs of analyzed records. Behavior seen in one PR stays an observation in the extraction artifacts.
+- `confidence.evidence` contains at least one quote entry `PR-<id> "<verbatim text>"` for every evidence PR, and quote entries cite only evidence PRs. Other evidence strings are free text.
+- A quote is 20–300 characters and sits inside one source text of that record: title, body, diff excerpt, commit message, discussion excerpt, or linked issue of the PR's own repository. HTML comments are dropped and whitespace is collapsed before comparison, and nothing else is normalized.
+- Each evidence record lists the pattern in `analysis.pattern_ids`. A record lists a current pattern only when it is that pattern's evidence, and never lists an unknown pattern.
+
+Only an existing pattern may be superseded, and `superseded_by` names a current pattern in the same output. Superseded patterns keep their history and are exempt from these rules.
 
 ## Evidence, confidence, license, and boundary
 

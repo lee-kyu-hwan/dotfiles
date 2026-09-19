@@ -9,6 +9,9 @@ import unittest
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPT = SKILL_DIR / "scripts" / "validate_corpus.py"
+QUOTE = "The schema constant and its union type drifted apart"
+BODY = "<!-- template -->\r\n" + QUOTE + ", so keep both lists<!-- note -->\n  synchronized."
+LEDGER = "pattern-extraction: fixture ledger"
 
 
 def resolved_record(pr_id="PR-001", node_id="node-001", source_key="source-a"):
@@ -18,7 +21,11 @@ def resolved_record(pr_id="PR-001", node_id="node-001", source_key="source-a"):
         "pr_id": pr_id,
         "pull_request_node_id": node_id,
         "repository": {"node_id": "repo-001"},
-        "pull_request": {"url": "https://github.com/example/repo/pull/1"},
+        "pull_request": {
+            "url": "https://github.com/example/repo/pull/1",
+            "title": "Keep derived values synchronized",
+        },
+        "evidence_snapshot": {"body_excerpt": BODY},
         "sources": [{"source_key": source_key, "observations": [{"value": "first"}]}],
         "state_history": [{"state": "open"}],
         "analysis_history": [{"analysis": "initial"}],
@@ -36,6 +43,10 @@ def unresolved_record(url="https://github.com/example/repo/pull/2"):
         "sources": [{"source_key": "source-a", "observations": [{"value": "first"}]}],
         "state_history": [{"state": "unknown"}],
     }
+
+
+def two_records():
+    return [resolved_record(), resolved_record(pr_id="PR-002", node_id="node-002")]
 
 
 def corpus(records, schema_version="1.0.0"):
@@ -70,7 +81,7 @@ def analysis_projection(pattern_ids=None):
         "closure_reason": evidence_claim("merged"),
         "files_changed": ["src/example.js"],
         "test_evidence": [evidence_claim("Unit test added")],
-        "pattern_ids": pattern_ids if pattern_ids is not None else ["PAT-001"],
+        "pattern_ids": pattern_ids if pattern_ids is not None else [],
         "evidence_links": ["https://example.invalid/evidence"],
         "evidence_manifest": {"files": {"pages_complete": True}},
         "license_spdx": "MIT",
@@ -80,7 +91,7 @@ def analysis_projection(pattern_ids=None):
     }
 
 
-def pattern_projection(revision, pattern_id="PAT-001"):
+def pattern_projection(revision, pattern_id="PAT-001", pr_ids=("PR-001", "PR-002")):
     return {
         "pattern_id": pattern_id,
         "description": "Keep derived values synchronized",
@@ -88,20 +99,26 @@ def pattern_projection(revision, pattern_id="PAT-001"):
             "name": "analyzing-open-source-pr-patterns",
             "revision": revision,
         },
-        "evidence_pr_ids": ["PR-001"],
+        "evidence_pr_ids": list(pr_ids),
         "applicability": ["A constant and its type describe the same values"],
         "counterconditions": ["The values are intentionally independent"],
         "search_clues": ["duplicated union and array literals"],
         "expected_tests": ["schema and type values remain aligned"],
         "maintainer_judgment_required": ["public API compatibility"],
-        "source_licenses": [{"pr_id": "PR-001", "spdx_id": "MIT"}],
+        "source_licenses": [{"pr_id": pr_id, "spdx_id": "MIT"} for pr_id in pr_ids],
         "provenance_mode": "independent-reimplementation",
-        "confidence": confidence(),
+        "confidence": {
+            "level": "medium",
+            "evidence": [pr_id + ' "' + QUOTE + '"' for pr_id in pr_ids]
+            + ["Selected local evidence"],
+            "limitations": ["Full upstream payload is unavailable"],
+        },
         "superseded_by": None,
     }
 
 
-def analysis_output(input_corpus, revision, existing=None):
+def analysis_output(input_corpus, revision, existing=None, pattern_id="PAT-001"):
+    """Build a valid output; it carries one pattern when two resolved records exist."""
     records = []
     existing_records = {}
     if existing is not None:
@@ -109,9 +126,16 @@ def analysis_output(input_corpus, revision, existing=None):
             identity = record.get("pull_request_node_id") or record["pull_request"]["url"]
             existing_records[identity] = record
 
+    evidence = [
+        record["pr_id"]
+        for record in input_corpus["records"]
+        if record.get("identity_status") == "resolved" and record.get("pr_id")
+    ]
+    with_pattern = len(evidence) >= 2
     for input_record in input_corpus["records"]:
         record = copy.deepcopy(input_record)
-        projection = analysis_projection()
+        cited = with_pattern and record.get("pr_id") in evidence
+        projection = analysis_projection([pattern_id] if cited else [])
         identity = record.get("pull_request_node_id") or record["pull_request"]["url"]
         old_record = existing_records.get(identity)
         if old_record is not None:
@@ -128,10 +152,10 @@ def analysis_output(input_corpus, revision, existing=None):
         record["analysis_history"] = history + [snapshot]
         records.append(record)
 
-    pattern = pattern_projection(revision)
+    pattern = pattern_projection(revision, pattern_id, tuple(evidence))
     old_patterns = [] if existing is None else existing.get("patterns", [])
     old_pattern = next(
-        (item for item in old_patterns if item.get("pattern_id") == "PAT-001"),
+        (item for item in old_patterns if item.get("pattern_id") == pattern_id),
         None,
     )
     pattern_history = (
@@ -154,8 +178,8 @@ def analysis_output(input_corpus, revision, existing=None):
             "revision": revision,
         },
         "records": records,
-        "patterns": [pattern],
-        "limitations": ["Selected evidence only"],
+        "patterns": [pattern] if with_pattern else [],
+        "limitations": ["Selected evidence only", LEDGER],
     }
 
 
@@ -439,7 +463,7 @@ class ValidateCorpusTests(unittest.TestCase):
         self.assertNotEqual(copied_after.stdout.strip(), first)
 
     def test_valid_strict_analysis_output_exits_zero(self):
-        current = corpus([resolved_record(), unresolved_record()])
+        current = corpus(two_records() + [unresolved_record()])
         output = analysis_output(current, self.current_revision())
 
         result = self.run_analysis_validator(current, output)
@@ -448,7 +472,7 @@ class ValidateCorpusTests(unittest.TestCase):
         self.assertIn("Validated analysis output", result.stdout)
 
     def test_analysis_output_rejects_wrong_repository_and_license_field_types(self):
-        current = corpus([resolved_record()])
+        current = corpus(two_records())
         revision = self.current_revision()
         cases = []
 
@@ -528,7 +552,7 @@ class ValidateCorpusTests(unittest.TestCase):
         self.assertIn("evidence_manifest must equal current analysis", result.stderr)
 
     def test_analysis_output_preserves_existing_pattern_history_prefix(self):
-        current = corpus([resolved_record()])
+        current = corpus(two_records())
         revision = self.current_revision()
         previous = analysis_output(current, revision)
 
@@ -554,7 +578,7 @@ class ValidateCorpusTests(unittest.TestCase):
                 self.assertIn(message, result.stderr)
 
     def test_analysis_output_preserves_legacy_pattern_history_item_exactly(self):
-        current = corpus([resolved_record()])
+        current = corpus(two_records())
         revision = self.current_revision()
         legacy_item = {"revision": "old", "conclusion": "preserve me"}
         previous = {
@@ -567,7 +591,7 @@ class ValidateCorpusTests(unittest.TestCase):
                 }
             ],
         }
-        output = analysis_output(current, revision)
+        output = analysis_output(current, revision, pattern_id="PAT-009")
         pattern = pattern_projection(revision, pattern_id="PAT-009")
         pattern["pattern_history"] = [
             copy.deepcopy(legacy_item),
@@ -658,6 +682,223 @@ class ValidateCorpusTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("analysis_history is not an exact prefix", result.stderr)
+
+    def test_output_without_extraction_ledger_is_rejected(self):
+        # #183: a serialization script emitted patterns [] with no trace of extraction.
+        current = corpus(two_records())
+        revision = self.current_revision()
+        cases = []
+
+        missing = analysis_output(current, revision)
+        missing["patterns"] = []
+        for record in missing["records"]:
+            record["analysis"]["pattern_ids"] = []
+            record["analysis_history"][-1]["conclusion"]["pattern_ids"] = []
+        missing["limitations"] = ["Selected evidence only"]
+        cases.append(missing)
+
+        duplicated = analysis_output(current, revision)
+        duplicated["limitations"].append(LEDGER)
+        cases.append(duplicated)
+
+        empty = analysis_output(current, revision)
+        empty["limitations"] = ["pattern-extraction:  "]
+        cases.append(empty)
+
+        for output in cases:
+            with self.subTest(limitations=output["limitations"]):
+                result = self.run_analysis_validator(current, output)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("exactly one nonempty 'pattern-extraction:' entry", result.stderr)
+
+    def test_recorded_empty_extraction_is_valid(self):
+        current = corpus([resolved_record()])
+        output = analysis_output(current, self.current_revision())
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(output["patterns"], [])
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_current_pattern_needs_two_distinct_evidence_prs(self):
+        current = corpus(two_records())
+        output = analysis_output(current, self.current_revision())
+        pattern = output["patterns"][0]
+        pattern["evidence_pr_ids"] = ["PR-001", "PR-001"]
+        pattern["confidence"]["evidence"] = ['PR-001 "' + QUOTE + '"']
+        pattern["source_licenses"] = [{"pr_id": "PR-001", "spdx_id": "MIT"}]
+        pattern["pattern_history"][-1]["conclusion"] = {
+            key: value for key, value in pattern.items() if key != "pattern_history"
+        }
+        second = output["records"][1]
+        second["analysis"]["pattern_ids"] = []
+        second["analysis_history"][-1]["conclusion"]["pattern_ids"] = []
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PAT-001 must cite at least two distinct evidence PRs", result.stderr)
+
+    def test_pattern_quotes_must_be_verbatim_in_their_evidence_record(self):
+        current = corpus(two_records())
+        revision = self.current_revision()
+        cases = [
+            ('PR-002 "The schema constant ... drifted apart"', "quote is not verbatim in PR-002"),
+            ('PR-002 "Keep derived values synchronized in the url: line"', "quote is not verbatim in PR-002"),
+            ('PR-002 "keep both lists"', "quote must be 20-300 characters"),
+            ('PR-003 "' + QUOTE + '"', "quotes PR-003 outside evidence_pr_ids"),
+        ]
+        for replacement, message in cases:
+            with self.subTest(message=message):
+                output = analysis_output(current, revision)
+                pattern = output["patterns"][0]
+                pattern["confidence"]["evidence"][1] = replacement
+                pattern["pattern_history"][-1]["conclusion"]["confidence"] = copy.deepcopy(
+                    pattern["confidence"]
+                )
+                result = self.run_analysis_validator(current, output)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+                self.assertIn("evidence PR-002 has no verified verbatim quote", result.stderr)
+
+    def test_pattern_quote_ignores_html_comments_and_whitespace_only(self):
+        current = corpus(two_records())
+        output = analysis_output(current, self.current_revision())
+        pattern = output["patterns"][0]
+        pattern["confidence"]["evidence"][1] = 'PR-002 "so keep both lists synchronized."'
+        pattern["pattern_history"][-1]["conclusion"]["confidence"] = copy.deepcopy(
+            pattern["confidence"]
+        )
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_pattern_and_record_links_must_agree(self):
+        current = corpus(two_records() + [resolved_record(pr_id="PR-003", node_id="node-003")])
+        revision = self.current_revision()
+        cases = []
+
+        missing_backlink = analysis_output(current, revision)
+        missing_backlink["records"][1]["analysis"]["pattern_ids"] = []
+        missing_backlink["records"][1]["analysis_history"][-1]["conclusion"]["pattern_ids"] = []
+        cases.append((missing_backlink, "PR-002.analysis.pattern_ids must list PAT-001"))
+
+        extra_listing = analysis_output(current, revision)
+        extra_listing["patterns"][0]["evidence_pr_ids"] = ["PR-001", "PR-002"]
+        extra_listing["patterns"][0]["confidence"]["evidence"] = [
+            'PR-001 "' + QUOTE + '"', 'PR-002 "' + QUOTE + '"'
+        ]
+        extra_listing["patterns"][0]["source_licenses"] = extra_listing["patterns"][0][
+            "source_licenses"
+        ][:2]
+        extra_listing["patterns"][0]["pattern_history"][-1]["conclusion"] = {
+            key: value
+            for key, value in extra_listing["patterns"][0].items()
+            if key != "pattern_history"
+        }
+        cases.append((extra_listing, "PR-003.analysis.pattern_ids lists PAT-001 without being its evidence"))
+
+        unknown_pattern = analysis_output(current, revision)
+        unknown_pattern["records"][0]["analysis"]["pattern_ids"].append("PAT-404")
+        unknown_pattern["records"][0]["analysis_history"][-1]["conclusion"]["pattern_ids"].append(
+            "PAT-404"
+        )
+        cases.append((unknown_pattern, "PR-001.analysis.pattern_ids lists unknown PAT-404"))
+
+        unknown_evidence = analysis_output(current, revision)
+        unknown_evidence["patterns"][0]["evidence_pr_ids"].append("PR-404")
+        unknown_evidence["patterns"][0]["pattern_history"][-1]["conclusion"][
+            "evidence_pr_ids"
+        ].append("PR-404")
+        cases.append((unknown_evidence, "evidence PR-404 is not an analyzed record"))
+
+        for output, message in cases:
+            with self.subTest(message=message):
+                result = self.run_analysis_validator(current, output)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(message, result.stderr)
+
+    def test_existing_pattern_may_be_superseded_only_by_a_current_pattern(self):
+        current = corpus(two_records())
+        revision = self.current_revision()
+        legacy = {"revision": "old", "conclusion": "single-PR pattern"}
+        previous = analysis_output(current, revision)
+        previous["patterns"].append({"pattern_id": "PAT-002", "pattern_history": [legacy]})
+
+        def superseded_output(successor):
+            output = analysis_output(current, revision, existing=previous)
+            old = pattern_projection(revision, pattern_id="PAT-002", pr_ids=("PR-001",))
+            old["confidence"]["evidence"] = ["Legacy single-PR observation"]
+            old["superseded_by"] = successor
+            old["pattern_history"] = [
+                copy.deepcopy(legacy),
+                {"revision": revision, "generated_at": "2026-09-04T12:00:00Z",
+                 "conclusion": copy.deepcopy(old)},
+            ]
+            output["patterns"].append(old)
+            return output
+
+        result = self.run_analysis_validator(current, superseded_output("PAT-001"), previous)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for successor in ("PAT-404", "PAT-002"):
+            with self.subTest(successor=successor):
+                result = self.run_analysis_validator(current, superseded_output(successor), previous)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("PAT-002.superseded_by must name a current pattern", result.stderr)
+
+    def test_new_pattern_cannot_be_superseded(self):
+        current = corpus(two_records())
+        revision = self.current_revision()
+        output = analysis_output(current, revision)
+        new = pattern_projection(revision, pattern_id="PAT-002", pr_ids=("PR-001",))
+        new["superseded_by"] = "PAT-001"
+        new["pattern_history"] = [
+            {"revision": revision, "generated_at": "2026-09-04T12:00:00Z",
+             "conclusion": copy.deepcopy(new)}
+        ]
+        output["patterns"].append(new)
+
+        result = self.run_analysis_validator(current, output)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PAT-002 is new and cannot be superseded", result.stderr)
+
+    def test_pattern_quote_comes_from_one_source_text_of_the_public_pr(self):
+        records = two_records()
+        records[1]["pull_request"]["url"] = "https://github.com/example/repo/pull/2"
+        records[1]["evidence_snapshot"] = {
+            "body_excerpt": "Short body.",
+            "changed_files": [{"path": "lib/a.js", "change_excerpt": "+  const fixable = null; // report only from now"}],
+            "commits": [{"message": "fix: stop rewriting reordered promise chains\n\nDetails"}],
+            "reviews": [{"excerpt": "Please keep the rule report-only for safety reasons."}],
+            "linked_issues": [
+                {"url": "https://github.com/example/repo/issues/9", "title": "Autofix changes runtime semantics badly"},
+                {"url": "https://github.com/private/tracker/issues/1", "title": "Private tracker issue title text"},
+            ],
+        }
+        current = corpus(records)
+        revision = self.current_revision()
+        cases = [
+            ("const fixable = null; // report only", 0),
+            ("stop rewriting reordered promise chains", 0),
+            ("keep the rule report-only for safety", 0),
+            ("Autofix changes runtime semantics badly", 0),
+            ("Private tracker issue title text", 1),
+            ("Keep derived values synchronized Short body.", 1),
+        ]
+        for quote, expected in cases:
+            with self.subTest(quote=quote):
+                output = analysis_output(current, revision)
+                pattern = output["patterns"][0]
+                pattern["confidence"]["evidence"][1] = 'PR-002 "' + quote + '"'
+                pattern["pattern_history"][-1]["conclusion"]["confidence"] = copy.deepcopy(
+                    pattern["confidence"]
+                )
+                result = self.run_analysis_validator(current, output)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                if expected:
+                    self.assertIn("quote is not verbatim in PR-002", result.stderr)
 
     def test_existing_analysis_requires_analysis_output(self):
         with tempfile.TemporaryDirectory() as directory:
