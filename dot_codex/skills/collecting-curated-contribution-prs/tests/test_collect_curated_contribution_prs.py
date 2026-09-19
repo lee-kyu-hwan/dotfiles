@@ -2684,5 +2684,76 @@ class EndToEndTests(unittest.TestCase):
             ))
 
 
+def sibling_names(path):
+    """Return the sibling names ``path`` reads and the uses this scan cannot follow.
+
+    The sibling module lives only in names called ``sibling`` or is read straight
+    off ``load_sibling()``. It is read as ``sibling.X``, by string through
+    ``getattr``-style calls and ``mock.patch.object``, or passed to a local
+    function's parameter that is also named ``sibling``. Any other use is
+    untraced, so a new sibling name cannot hide behind an alias.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    used, untraced = set(), []
+    for node in ast.walk(tree):
+        loads = isinstance(node, ast.Call) and "load_sibling" in {
+            getattr(node.func, "id", None), getattr(node.func, "attr", None)
+        }
+        holds = isinstance(node, ast.Name) and node.id == "sibling" and isinstance(node.ctx, ast.Load)
+        if not (loads or holds):
+            continue
+        parent = parents[node]
+        if isinstance(parent, ast.Attribute):
+            used.add(parent.attr)
+            continue
+        if loads and isinstance(parent, ast.Assign) and all(
+            isinstance(target, ast.Name) and target.id == "sibling" for target in parent.targets
+        ):
+            continue
+        if holds and isinstance(parent, ast.Compare):
+            continue
+        if holds and isinstance(parent, ast.keyword) and parent.arg == "sibling":
+            if getattr(parents[parent].func, "id", None) in functions:
+                continue
+        if holds and isinstance(parent, ast.Call) and node in parent.args:
+            callee = getattr(parent.func, "id", None) or getattr(parent.func, "attr", None)
+            named = parent.args[1] if len(parent.args) > 1 and parent.args[0] is node else None
+            if callee in {"getattr", "hasattr", "setattr", "delattr", "object"} and isinstance(
+                getattr(named, "value", None), str
+            ):
+                used.add(named.value)
+                continue
+            if isinstance(parent.func, ast.Name) and callee in functions:
+                parameters = functions[callee].args.posonlyargs + functions[callee].args.args
+                index = parent.args.index(node)
+                if index < len(parameters) and parameters[index].arg == "sibling":
+                    continue
+        untraced.append(f"{path.name}:{node.lineno}")
+    return used, untraced
+
+
+class SiblingDependencyTests(unittest.TestCase):
+    """The closed-PR collector is used only through the names it registers for this skill."""
+
+    def test_uses_exactly_the_names_the_sibling_registers_as_shared(self):
+        """The sibling's tests only protect names listed in its SHARED_WITH_SIBLINGS.
+
+        ApiFailure is raised only by these tests, so the tests count as a user too.
+        """
+        collector = load_collector()
+        used, untraced = set(), []
+        for path in (SCRIPT, Path(__file__).resolve()):
+            names, unfollowed = sibling_names(path)
+            used |= names
+            untraced += unfollowed
+        self.assertEqual([], untraced, "hold the sibling only as `sibling` so its names stay countable")
+        # Reading the registry is how this test checks the contract, not a use of it.
+        used.discard("SHARED_WITH_SIBLINGS")
+        registered = collector.load_sibling().SHARED_WITH_SIBLINGS[collector.SKILL_NAME]
+        self.assertEqual(sorted(registered), sorted(used))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -20,6 +20,10 @@ Treat exit 3 as usable partial evidence and show its gaps before inventory.
 Exit 4 is a failed collection. Validate a saved corpus with the adjacent
 `analyzing-open-source-pr-patterns` skill before analysis.
 
+`collecting-recent-closed-prs` owns the transport, pull request hydration,
+and corpus merge code this skill loads from its script, limited to the names
+that script lists for this skill in `SHARED_WITH_SIBLINGS`.
+
 Date-range discovery belongs to `collecting-recent-closed-prs`. Pattern
 extraction belongs to `analyzing-open-source-pr-patterns`, and repository
 candidate checks belong to `verifying-open-source-contribution-candidates`.

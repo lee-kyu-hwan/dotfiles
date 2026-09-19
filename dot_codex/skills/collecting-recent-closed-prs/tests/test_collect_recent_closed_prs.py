@@ -2513,7 +2513,7 @@ class SharedSurfaceTests(unittest.TestCase):
             "client", "repository", "search_hit", "repository_metadata", "license_cache", "captured_at",
         )))],
         "hydration_warning": [((None,), {})],
-        "merge_corpus": [((None, None), {"source_policy": "explicit-only"})],
+        "merge_corpus": [((None, None), {"source_policy": "explicit-only"}), ((None, None), {})],
         "parse_timestamp": [((None, "field"), {})],
         "resolve_interval": [((), dict.fromkeys((
             "start_at", "end_at", "start_date", "end_date", "recent_days", "timezone_name", "as_of",
