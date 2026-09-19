@@ -1,0 +1,43 @@
+<div id="session-board-concept" aria-label="tmux 세션별 진행상황 화면 제안">
+  <style>
+    #session-board-concept{--sb-bg:light-dark(#f6f7f9,#15181d);--sb-panel:light-dark(#ffffff,#20242b);--sb-ink:light-dark(#202735,#e6eaf1);--sb-muted:light-dark(#5c6676,#a9b2bf);--sb-line:light-dark(#dce1e8,#353c48);--sb-accent:light-dark(#235ccb,#91b5ff);--sb-warn:light-dark(#926000,#f1c16e);background:var(--sb-bg);color:var(--sb-ink);font:14px/1.5 system-ui,sans-serif;border:1px solid var(--sb-line);border-radius:12px;overflow:hidden}
+    #session-board-concept *{box-sizing:border-box}#session-board-concept button{font:inherit;color:inherit;cursor:pointer}#session-board-concept button:focus-visible{outline:3px solid var(--sb-accent);outline-offset:2px}
+    #session-board-concept header{padding:15px 20px;border-bottom:1px solid var(--sb-line);display:flex;justify-content:space-between;align-items:center;gap:12px}#session-board-concept small{color:var(--sb-muted);font-size:12px}
+    #session-board-concept .sb-shell{display:grid;grid-template-columns:170px minmax(0,1fr);min-height:430px}#session-board-concept nav{padding:16px 10px;background:var(--sb-panel);border-right:1px solid var(--sb-line)}#session-board-concept nav button{width:100%;text-align:left;border:0;border-radius:7px;background:transparent;padding:10px;margin-bottom:5px}#session-board-concept nav button[aria-pressed=true]{background:var(--sb-bg);color:var(--sb-accent)}#session-board-concept nav small{display:block;margin-top:3px}
+    #session-board-concept main{padding:18px;min-width:0}#session-board-concept .sb-lead{padding:12px 14px;background:var(--sb-panel);border:1px solid var(--sb-line);border-radius:8px;margin:12px 0 18px}#session-board-concept .sb-lead small{display:block;margin-top:5px}#session-board-concept .sb-board{display:grid;grid-template-columns:repeat(4,minmax(145px,1fr));gap:12px;overflow-x:auto;padding-bottom:12px}#session-board-concept h3{font-size:13px;margin:0 0 10px}#session-board-concept h3 span{color:var(--sb-muted);margin-left:6px}#session-board-concept .sb-task{display:block;text-align:left;width:100%;padding:12px;background:var(--sb-panel);border:1px solid var(--sb-line);border-radius:8px;margin-bottom:10px}#session-board-concept .sb-task strong{display:block;font-size:14px;margin:5px 0 8px}#session-board-concept .sb-task p{font-size:12px;margin:8px 0;color:var(--sb-muted)}#session-board-concept .sb-status{font-size:12px;color:var(--sb-accent)}#session-board-concept .sb-task[data-state=attention] .sb-status{color:var(--sb-warn)}#session-board-concept .sb-empty{color:var(--sb-muted);font-size:12px;padding:15px 0}
+    #session-board-concept .sb-detail{margin-top:10px;padding:15px;background:var(--sb-panel);border:1px solid var(--sb-line);border-radius:8px}#session-board-concept .sb-detail p{margin:7px 0}#session-board-concept .sb-detail button{float:right;background:transparent;border:1px solid var(--sb-line);border-radius:5px}#session-board-concept .sb-detail code{overflow-wrap:anywhere;font-size:12px}#session-board-concept .sb-compact .sb-task p{display:none}#session-board-concept footer{padding:10px 20px;border-top:1px solid var(--sb-line);color:var(--sb-muted);font-size:12px}
+    @media(max-width:600px){#session-board-concept .sb-shell{display:block}#session-board-concept nav{display:flex;border-right:0;border-bottom:1px solid var(--sb-line)}#session-board-concept nav button{margin:0}#session-board-concept main{padding:12px}}
+  </style>
+  <header><strong>세션 보드</strong><small>화면 제안 · 예시 데이터</small></header>
+  <div class="sb-shell">
+    <nav aria-label="tmux 세션 선택"><button data-session="review" aria-pressed="true">review<small>입력 필요 1 · 검토 가능 1</small></button><button data-session="feature" aria-pressed="false">feature<small>작업 중 1 · 확인 필요 1</small></button></nav>
+    <main><strong class="sb-heading"></strong><div class="sb-lead"></div><div class="sb-board"></div><section class="sb-detail" aria-label="선택한 윈도우 상세" hidden></section></main>
+  </div>
+  <footer>카드 선택 → 윈도우 안의 에이전트 확인 · 세션 전환은 예시 데이터에만 적용</footer>
+  <script>
+  (()=>{
+    const root=document.getElementById('session-board-concept');
+    const data={review:{lead:'리뷰 결과 취합 중 · 1건의 승인이 필요합니다',items:[
+      {name:'restore-check',title:'복원 동작 검토',state:'attention',agent:'Claude · 승인 대기 4분',summary:'재시작 검증 명령의 승인을 기다립니다.',panes:['%21 · Claude · 승인 대기'],path:'sessions/review/restore-check',events:['검토 시작','복원 테스트 명령 요청','사용자 승인 대기']},
+      {name:'hook-review',title:'대화 기록 훅 검토',state:'working',agent:'Codex + Claude · 작업 중',summary:'구현 검토와 테스트 검토를 병렬로 진행합니다.',panes:['%24 · Codex · 작업 중','%25 · Claude · 응답 완료'],path:'sessions/review/hook-review',events:['Codex에 구현 검토 배정','Claude에 테스트 검토 배정','Claude 검토 응답 수신']},
+      {name:'docs-review',title:'설치 가이드 검토',state:'review',agent:'Claude · 응답 완료 2분',summary:'결과를 확인하면 작업을 완료 처리할 수 있습니다.',panes:['%28 · Claude · 응답 완료'],path:'sessions/review/docs-review',events:['문서 검토 시작','검토 결과 제출','최종 확인 대기']}
+    ]},feature:{lead:'진행상황 확인 중 · 1개 윈도우의 연결 상태를 확인해야 합니다',items:[
+      {name:'session-filter',title:'세션 필터 구현',state:'working',agent:'Codex · 작업 중',summary:'다른 세션의 카드가 섞이지 않는지 확인합니다.',panes:['%41 · Codex · 작업 중'],path:'sessions/feature/session-filter',events:['요구사항 확인','필터 구현','검증 진행']},
+      {name:'restore-check',title:'복원 시나리오 구현',state:'unknown',agent:'Claude · 상태 확인 필요',summary:'마지막 상태를 보존했습니다. 연결 확인이 필요합니다.',panes:['%44 · 현재 연결 미확인'],path:'sessions/feature/restore-check',events:['구현 시작','마지막 이벤트 수신','연결 상태 확인 중']}
+    ]}};
+    const columns=[['attention','! 입력 필요'],['working','↻ 작업 중'],['review','✓ 검토 가능'],['unknown','? 확인 필요']];
+    let session='review';const appearance={compact:false};
+    const board=root.querySelector('.sb-board'),detail=root.querySelector('.sb-detail');
+    function render(){
+      root.classList.toggle('sb-compact',appearance.compact);
+      const current=data[session];root.querySelector('.sb-heading').textContent=session+' / 작업 윈도우 '+current.items.length;
+      const lead=root.querySelector('.sb-lead');lead.replaceChildren();const label=document.createElement('strong');label.textContent='orchestrator';const summary=document.createElement('small');summary.textContent=current.lead;lead.append(label,summary);
+      board.replaceChildren();columns.forEach(([key,title])=>{const col=document.createElement('section');const heading=document.createElement('h3');const items=current.items.filter(x=>x.state===key);heading.textContent=title+' '+items.length;col.append(heading);items.forEach(item=>{const button=document.createElement('button');button.className='sb-task';button.dataset.state=key;const name=document.createElement('small');name.textContent=item.name;const titleEl=document.createElement('strong');titleEl.textContent=item.title;const status=document.createElement('div');status.className='sb-status';status.textContent=item.agent;const p=document.createElement('p');p.textContent=item.summary;button.append(name,titleEl,status,p);button.addEventListener('click',()=>showDetail(item));col.append(button)});if(!items.length){const empty=document.createElement('div');empty.className='sb-empty';empty.textContent='해당 윈도우 없음';col.append(empty)}board.append(col)});
+    }
+    function showDetail(item){detail.replaceChildren();detail.hidden=false;const close=document.createElement('button');close.textContent='닫기';close.onclick=()=>{detail.hidden=true};const title=document.createElement('strong');title.textContent=session+' / '+item.name;const p=document.createElement('p');p.textContent=item.panes.join(' · ');const path=document.createElement('code');path.textContent=item.path;const events=document.createElement('p');events.textContent=item.events.join(' → ');detail.append(close,title,p,path,events)}
+    root.querySelectorAll('[data-session]').forEach(button=>button.addEventListener('click',()=>{session=button.dataset.session;root.querySelectorAll('[data-session]').forEach(b=>b.setAttribute('aria-pressed',String(b===button)));detail.hidden=true;render()}));
+    render();
+    if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addToggle(appearance,'compact',{label:'카드를 간결하게 표시'});}
+  })();
+  </script>
+</div>

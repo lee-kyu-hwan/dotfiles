@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex CLI when working with code in this repository.
 
 ## 개요
 
@@ -39,11 +39,14 @@ chezmoi edit ~/.Brewfile    # 패키지 추가 → 자동 apply + commit + push 
 - `dot_config/앱/` → `$HOME/.config/앱/`으로 배치
 - `.tmpl` 확장자 → Go 템플릿으로 처리 후 배치
 
-### Claude 스킬·워크플로우 위치
+### 에이전트 스킬·워크플로우 위치
 
-- `dot_agents/skills/` → `~/.agents/skills/` — 에이전트 공용 스킬 (Claude Code 외 도구도 읽음)
+- `dot_agents/skills/` → `~/.agents/skills/` — 공용 스킬. Codex·Claude Code 양쪽이 읽는다
+- `dot_codex/skills/` → `~/.codex/skills/` — Codex 전용 스킬
 - `dot_claude/skills/` → `~/.claude/skills/` — Claude Code 전용 스킬
 - `dot_claude/workflows/` → `~/.claude/workflows/` — Claude Code 워크플로우 스크립트
+
+`dot_codex/` 아래에는 스킬 외에 `hooks.json.tmpl`과 설정(`private_config.toml` 등)도 있다.
 
 ### 분기 시스템
 
