@@ -25,18 +25,23 @@ Analysis output preserves every normalized field and JSON value type. Resolved r
 
 ## Deterministic analysis revision
 
-`--print-revision` returns `sha256:<64 lowercase hex>`. It hashes these six relative paths in sorted order:
+`--print-revision` returns `sha256:<64 lowercase hex>`. It hashes these eleven relative paths in sorted order:
 
 ```text
 SKILL.md
 agents/openai.yaml
 references/analysis-contract.md
 references/data-contract.md
+references/extraction-contract.md
+scripts/build_digest.py
+scripts/build_prompts.py
+scripts/check_extraction.py
 scripts/validate_corpus.py
+tests/test_extraction.py
 tests/test_validate_corpus.py
 ```
 
-For each path, the canonical byte sequence is: its UTF-8 path-byte length as an unsigned 8-byte big-endian integer, its UTF-8 path bytes, its raw-content length in the same integer format, then its raw file bytes. Concatenate those six framed entries and take SHA-256. The path is relative, so byte-identical source and installed trees have the same revision.
+For each path, the canonical byte sequence is: its UTF-8 path-byte length as an unsigned 8-byte big-endian integer, its UTF-8 path bytes, its raw-content length in the same integer format, then its raw file bytes. Concatenate those eleven framed entries and take SHA-256. The path is relative, so byte-identical source and installed trees have the same revision.
 
 Use that value for the envelope `analysis_generated_by.revision`, every current record snapshot, every current pattern `generated_by.revision`, and every current pattern snapshot.
 
@@ -49,7 +54,7 @@ python3 "$SKILL_DIR/scripts/validate_corpus.py" CURRENT \
   --analysis-output OUTPUT [--existing-analysis PREVIOUS_OUTPUT]
 ```
 
-`--existing-analysis` is valid only with `--analysis-output`. This command validates the normalized input, exact output shape and types, record preservation, current projections/snapshots, and optional append-only PR/pattern histories. A JSON read, UTF-8 decode, schema, shape, identity, type, or preservation error exits 1 with concise stderr and no traceback.
+`--existing-analysis` is valid only with `--analysis-output`. This command validates the normalized input, exact output shape and types, record preservation, current projections/snapshots, optional append-only PR/pattern histories, the extraction ledger, and every current pattern's distinct evidence PRs, verbatim quotes against the corpus, and record links. A JSON read, UTF-8 decode, schema, shape, identity, type, or preservation error exits 1 with concise stderr and no traceback.
 
 ## Interpretation boundary
 
@@ -57,4 +62,4 @@ Keep observed facts and their sources separate from analysis. Record changed fac
 
 ## Side effects and recovery
 
-The analyzer reads supplied local artifacts and may write only requested enriched local outputs. It never edits input in place or creates external state. It does not automatically retry or silently repair a version, validation, identity, preservation, or unavailable-evidence failure; report the limitation and await the required migration, corrected input, resolved conflict, or evidence.
+The analyzer reads supplied local artifacts and may write only requested enriched local outputs and its extraction working files: digest, keymap, prompts, worker results, check reports, and candidates. Worker calls send only the generated prompt files to the chosen model service. It never edits input in place or creates external state. It does not automatically retry or silently repair a version, validation, identity, preservation, or unavailable-evidence failure; report the limitation and await the required migration, corrected input, resolved conflict, or evidence.

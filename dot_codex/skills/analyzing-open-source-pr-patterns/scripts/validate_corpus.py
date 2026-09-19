@@ -18,9 +18,21 @@ REVISION_PATHS = (
     "agents/openai.yaml",
     "references/analysis-contract.md",
     "references/data-contract.md",
+    "references/extraction-contract.md",
+    "scripts/build_digest.py",
+    "scripts/build_prompts.py",
+    "scripts/check_extraction.py",
     "scripts/validate_corpus.py",
+    "tests/test_extraction.py",
     "tests/test_validate_corpus.py",
 )
+# A pattern's confidence.evidence carries its verbatim quotes as `PR-001 "text"`.
+QUOTE_EVIDENCE = re.compile(r'(PR-[^\s"]+) "(.*)"', re.S)
+MIN_QUOTE_LENGTH = 20
+MAX_QUOTE_LENGTH = 300
+EXTRACTION_LEDGER_PREFIX = "pattern-extraction: "
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
+DISCUSSION_CATEGORIES = ("issue_comments", "reviews", "review_comments", "timeline_events")
 OUTPUT_KEYS = {
     "schema_version",
     "generated_by",
@@ -67,6 +79,64 @@ PATTERN_SNAPSHOT_KEYS = {"revision", "generated_at", "conclusion"}
 
 def _is_nonempty_string(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def clean_text(text):
+    """Drop HTML comments and collapse whitespace, as the digest and quote checks do."""
+    return re.sub(r"\s+", " ", HTML_COMMENT.sub("", text)).strip()
+
+
+def _dict_items(value):
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def own_repository_issues(record):
+    """Linked issues in the PR's own repository.
+
+    The collector derives linked issues from cross-reference events, which can
+    point into private repositories. Only issues of the public PR's own
+    repository are readable or quotable.
+    """
+    pull_request = record.get("pull_request")
+    url = pull_request.get("url") if isinstance(pull_request, dict) else None
+    if not isinstance(url, str) or "/pull/" not in url:
+        return []
+    prefix = url.split("/pull/", 1)[0].lower() + "/issues/"
+    snapshot = record.get("evidence_snapshot")
+    issues = _dict_items(snapshot.get("linked_issues")) if isinstance(snapshot, dict) else []
+    return [
+        issue
+        for issue in issues
+        if isinstance(issue.get("url"), str) and issue["url"].lower().startswith(prefix)
+    ]
+
+
+def quotable_texts(record):
+    """Return the cleaned source texts of a record that a verbatim quote may come from.
+
+    A quote must sit inside one of these texts. Digest scaffolding such as keys,
+    URLs, state lines, or author markers is not source text, and neither are
+    linked issues outside the PR's own repository.
+    """
+    texts = []
+    pull_request = record.get("pull_request")
+    if isinstance(pull_request, dict):
+        texts.append(pull_request.get("title"))
+    snapshot = record.get("evidence_snapshot")
+    if isinstance(snapshot, dict):
+        texts.append(snapshot.get("body_excerpt"))
+        texts.extend(item.get("change_excerpt") for item in _dict_items(snapshot.get("changed_files")))
+        texts.extend(item.get("message") for item in _dict_items(snapshot.get("commits")))
+        for category in DISCUSSION_CATEGORIES:
+            texts.extend(item.get("excerpt") for item in _dict_items(snapshot.get(category)))
+        for issue in own_repository_issues(record):
+            texts.extend((issue.get("title"), issue.get("body_excerpt")))
+    return [clean_text(text) for text in texts if _is_nonempty_string(text)]
+
+
+def quote_in_record(record, quote):
+    cleaned = clean_text(quote)
+    return bool(cleaned) and any(cleaned in text for text in quotable_texts(record))
 
 
 def _record_url(record):
@@ -696,6 +766,7 @@ def _validate_analysis_output(current, output, existing, revision):
         errors,
     )
     _validate_string_list(output.get("limitations"), "analysis output.limitations", errors)
+    _validate_extraction_ledger(output.get("limitations"), errors)
 
     input_records = {
         _record_identity(record): record
@@ -774,7 +845,112 @@ def _validate_analysis_output(current, output, existing, revision):
         if pattern_id not in output_patterns:
             errors.append("existing pattern was removed: " + pattern_id)
 
+    if isinstance(output_records, list):
+        _validate_pattern_links(output_records, output_patterns, previous_patterns, errors)
     return errors
+
+
+def _validate_extraction_ledger(limitations, errors):
+    if not isinstance(limitations, list):
+        return
+    ledger = [
+        item
+        for item in limitations
+        if isinstance(item, str) and item.startswith(EXTRACTION_LEDGER_PREFIX)
+    ]
+    if len(ledger) != 1 or not ledger[0][len(EXTRACTION_LEDGER_PREFIX):].strip():
+        errors.append(
+            "analysis output.limitations must contain exactly one nonempty '"
+            + EXTRACTION_LEDGER_PREFIX.strip()
+            + "' entry"
+        )
+
+
+def _validate_pattern_links(output_records, output_patterns, previous_patterns, errors):
+    """Tie current patterns to analyzed records and their verbatim source text."""
+    records_by_pr_id = {}
+    for record in output_records:
+        if isinstance(record, dict) and _is_nonempty_string(record.get("pr_id")):
+            records_by_pr_id[record["pr_id"]] = record
+
+    for pattern_id, pattern in output_patterns.items():
+        successor_id = pattern.get("superseded_by")
+        if successor_id is not None:
+            successor = output_patterns.get(successor_id) if isinstance(successor_id, str) else None
+            if pattern_id not in previous_patterns:
+                errors.append("analysis output pattern " + pattern_id + " is new and cannot be superseded")
+            if successor is None or successor_id == pattern_id or successor.get("superseded_by") is not None:
+                errors.append(
+                    "analysis output pattern " + pattern_id + ".superseded_by must name a current pattern"
+                )
+            continue
+        prefix = "analysis output pattern " + pattern_id
+        evidence_pr_ids = pattern.get("evidence_pr_ids")
+        confidence = pattern.get("confidence")
+        if not isinstance(evidence_pr_ids, list) or not isinstance(confidence, dict):
+            continue
+        cited = [pr_id for pr_id in evidence_pr_ids if isinstance(pr_id, str)]
+        if len(set(cited)) < 2:
+            errors.append(prefix + " must cite at least two distinct evidence PRs")
+        quoted = set()
+        quote_items = confidence.get("evidence")
+        for index, item in enumerate(quote_items if isinstance(quote_items, list) else []):
+            match = QUOTE_EVIDENCE.fullmatch(item) if isinstance(item, str) else None
+            if match is None:
+                continue
+            item_prefix = prefix + ".confidence.evidence[" + str(index) + "]"
+            pr_id, quote = match.group(1), clean_text(match.group(2))
+            if pr_id not in cited:
+                errors.append(item_prefix + " quotes " + pr_id + " outside evidence_pr_ids")
+                continue
+            record = records_by_pr_id.get(pr_id)
+            if record is None:
+                continue
+            if not MIN_QUOTE_LENGTH <= len(quote) <= MAX_QUOTE_LENGTH:
+                errors.append(
+                    item_prefix
+                    + " quote must be "
+                    + str(MIN_QUOTE_LENGTH)
+                    + "-"
+                    + str(MAX_QUOTE_LENGTH)
+                    + " characters"
+                )
+            elif not quote_in_record(record, quote):
+                errors.append(item_prefix + " quote is not verbatim in " + pr_id)
+            else:
+                quoted.add(pr_id)
+        for pr_id in dict.fromkeys(cited):
+            record = records_by_pr_id.get(pr_id)
+            if record is None:
+                errors.append(prefix + " evidence " + pr_id + " is not an analyzed record")
+                continue
+            if pr_id not in quoted:
+                errors.append(prefix + " evidence " + pr_id + " has no verified verbatim quote")
+            analysis = record.get("analysis")
+            pattern_ids = analysis.get("pattern_ids") if isinstance(analysis, dict) else None
+            if isinstance(pattern_ids, list) and pattern_id not in pattern_ids:
+                errors.append(pr_id + ".analysis.pattern_ids must list " + pattern_id)
+
+    for record in output_records:
+        analysis = record.get("analysis") if isinstance(record, dict) else None
+        pattern_ids = analysis.get("pattern_ids") if isinstance(analysis, dict) else None
+        if not isinstance(pattern_ids, list):
+            continue
+        label = record.get("pr_id") or _record_url(record) or "record"
+        for pattern_id in pattern_ids:
+            if not isinstance(pattern_id, str):
+                continue
+            pattern = output_patterns.get(pattern_id)
+            if pattern is None:
+                errors.append(str(label) + ".analysis.pattern_ids lists unknown " + pattern_id)
+                continue
+            evidence_pr_ids = pattern.get("evidence_pr_ids")
+            if pattern.get("superseded_by") is None and record.get("pr_id") not in (
+                evidence_pr_ids if isinstance(evidence_pr_ids, list) else []
+            ):
+                errors.append(
+                    str(label) + ".analysis.pattern_ids lists " + pattern_id + " without being its evidence"
+                )
 
 
 def _load(path, label):
