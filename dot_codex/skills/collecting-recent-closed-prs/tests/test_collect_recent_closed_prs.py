@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError, dataclass
 from copy import deepcopy
 from importlib import util
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -1041,7 +1042,7 @@ class HydratePullRequestTests(unittest.TestCase):
                 def handler(endpoint, params):
                     remaining = cap - (params["page"] - 1) * 100
                     return ([None] + [valid] * (min(100, remaining) - 1), {}) if remaining > 0 else ([], {})
-                items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/bounded", category=category, known_limit=cap, maximum_items=cap, captured_at=self.captured_at)
+                items, meta = self.collector.hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/bounded", category=category, known_limit=cap, maximum_items=cap, captured_at=self.captured_at)
                 self.assertFalse(meta["pages_complete"])
                 self.assertEqual(meta["attempted_pages"], 30 if category == "files" else 3)
                 self.assertEqual(len(items), 2970 if category == "files" else 247)
@@ -1050,7 +1051,7 @@ class HydratePullRequestTests(unittest.TestCase):
         fixtures = [("timeline", {"event": "closed", "actor": {"login": []}}), ("timeline", {"event": "closed", "created_at": []}), ("timeline", {"event": "cross-referenced", "source": []}), ("reviews", {"id": 1, "body": "", "state": "APPROVED", "submitted_at": []}), ("reviews", {"id": 1, "body": "", "state": "APPROVED", "commit_id": []}), ("review_comments", {"id": 1, "body": "", "path": "a", "line": True}), ("review_comments", {"id": 1, "body": "", "path": "a", "diff_hunk": []})]
         for category, item in fixtures:
             with self.subTest(category=category, item=item):
-                items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, lambda endpoint, params: ([item], {})), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
+                items, meta = self.collector.hydrate_list_category(client=FakeHydrationClient(self.collector, lambda endpoint, params: ([item], {})), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
                 self.assertEqual(items, [])
                 self.assertFalse(meta["pages_complete"])
 
@@ -1173,7 +1174,7 @@ class HydratePullRequestTests(unittest.TestCase):
                 with self.subTest(category=category, bad=bad):
                     def handler(endpoint, params):
                         return ([valid], {"link": '<next>; rel="next"'}) if params["page"] == 1 else ([bad], {})
-                    items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
+                    items, meta = self.collector.hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/evidence", category=category, known_limit=None, captured_at=self.captured_at)
                     self.assertEqual(items, [valid])
                     self.assertFalse(meta["pages_complete"])
                     self.assertEqual(meta["returned_count"], 1)
@@ -1182,7 +1183,7 @@ class HydratePullRequestTests(unittest.TestCase):
     def test_later_page_failure_counts_successes_separately_and_keeps_etags(self):
         def handler(endpoint, params):
             return ([{"id": 1, "body": "retained"}], {"link": '<next>; rel="next"', "etag": '"one"'}) if params["page"] == 1 else self.collector.ApiFailure("page two failed")
-        items, meta = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
+        items, meta = self.collector.hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
         self.assertEqual(items, [{"id": 1, "body": "retained"}])
         self.assertFalse(meta["pages_complete"])
         self.assertEqual((meta["page_count"], meta["attempted_pages"]), (1, 2))
@@ -1322,7 +1323,7 @@ class HydratePullRequestTests(unittest.TestCase):
                 return ([], {"etag": '"two"'})
             raise AssertionError("unexpected page")
 
-        items, metadata = self.collector._hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/repos/owner/repo/issues/42/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
+        items, metadata = self.collector.hydrate_list_category(client=FakeHydrationClient(self.collector, handler), endpoint="/repos/owner/repo/issues/42/comments", category="issue_comments", known_limit=None, captured_at=self.captured_at)
 
         self.assertEqual(len(items), 1)
         self.assertEqual(metadata["page_count"], 2)
@@ -2478,6 +2479,139 @@ class Task7OrchestrationTests(unittest.TestCase):
             with self.subTest(repositories=repositories, kwargs=kwargs), self.assertRaises(ValueError):
                 self.collector.collect(Client(), repositories, self.interval, **kwargs)
         self.assertEqual(calls, [])
+
+
+class SharedSurfaceTests(unittest.TestCase):
+    """Pin the interface other skills load from this script by file path.
+
+    Their tests do not run when this script changes, so a rename or an
+    incompatible signature has to fail here. Behavior behind these names is
+    shared on purpose and is not pinned.
+    """
+
+    # How each consumer calls a shared name. Binding against the current
+    # signature accepts a new optional parameter and rejects anything else.
+    CALL_SHAPES = {
+        "ApiFailure": [(("message",), {"status": 500, "endpoint": "/synthetic"})],
+        "BudgetExhausted": [(("message",), {})],
+        "GhApiClient": [
+            ((), {"api_version": "2026-03-10", "budget": None, "runner": None, "sleeper": None}),
+            ((), {"budget": None}),
+            ((), {"budget": None, "runner": None, "sleeper": None, "clock": None}),
+        ],
+        "RequestBudget": [((1,), {})],
+        "SearchPartition": [((), dict.fromkeys((
+            "repository", "interval", "query", "total_count", "returned_count",
+            "pagination_complete", "incomplete_results", "completion_state", "failure",
+        )))],
+        "atomic_write_json": [(("path", {}), {})],
+        "author": [(({},), {})],
+        "classify_repository_failure": [((), {"status": 404})],
+        "completeness": [((None,) * 8, {})],
+        "hydrate_list_category": [((), dict.fromkeys(("client", "endpoint", "known_limit", "captured_at", "category")))],
+        "hydrate_pull_request": [((), dict.fromkeys((
+            "client", "repository", "search_hit", "repository_metadata", "license_cache", "captured_at",
+        )))],
+        "hydration_warning": [((None,), {})],
+        "merge_corpus": [((None, None), {"source_policy": "explicit-only"})],
+        "parse_timestamp": [((None, "field"), {})],
+        "resolve_interval": [((), dict.fromkeys((
+            "start_at", "end_at", "start_date", "end_date", "recent_days", "timezone_name", "as_of",
+        )))],
+        "search_response": [((None,), {})],
+        "serialise_partition": [((None,), {})],
+        "utc_string": [((None,), {})],
+    }
+
+    def setUp(self):
+        self.collector = load_collector()
+
+    def test_registry_names_only_public_names_with_a_call_shape(self):
+        registered = {name for names in self.collector.SHARED_WITH_SIBLINGS.values() for name in names}
+        self.assertEqual(registered - {"API_VERSION"}, set(self.CALL_SHAPES))
+        self.assertEqual([], sorted(name for name in registered if name.startswith("_")))
+
+    def test_every_shared_name_accepts_its_consumers_call_shapes(self):
+        for consumer, names in self.collector.SHARED_WITH_SIBLINGS.items():
+            for name in names:
+                with self.subTest(consumer=consumer, name=name):
+                    self.assertTrue(hasattr(self.collector, name), name)
+                    if name == "API_VERSION":
+                        self.assertRegex(self.collector.API_VERSION, r"\A\d{4}-\d{2}-\d{2}\Z")
+                        continue
+                    target = getattr(self.collector, name)
+                    for args, kwargs in self.CALL_SHAPES[name]:
+                        if isinstance(target, type) and issubclass(target, Exception):
+                            # Builtin exception bases have no signature; constructing one is harmless.
+                            target(*args, **kwargs)
+                        else:
+                            inspect.signature(target).bind(*args, **kwargs)
+
+    def test_command_hook_is_all_a_subclass_replaces(self):
+        """collecting-open-source-issues sends GraphQL by overriding api_command."""
+        command = ["gh", "api", "graphql", "--include", "-f", "query=query { viewer { login } }"]
+
+        class Replaced(self.collector.GhApiClient):
+            def api_command(self, endpoint, params, cached_etag):
+                return list(command)
+
+        runner = FakeRunner([FakeCompletedProcess(stdout=included_response(200, {"ETag": '"v1"'}, '{"data": {}}'))])
+        client = Replaced(budget=self.collector.RequestBudget(5), runner=runner, sleeper=FakeSleep())
+
+        response = client.get_json("/graphql", {"query": "query { viewer { login } }"})
+
+        self.assertEqual(command, runner.calls[0][0])
+        self.assertEqual({"data": {}}, response.payload)
+        self.assertEqual('"v1"', response.headers["etag"])
+        self.assertEqual(1, client.budget.consumed)
+        self.assertEqual(1, len(client.request_events))
+
+    def test_list_reader_validates_the_categories_consumers_name(self):
+        """An unknown category accepts every item, so a rename would stop validation silently."""
+        malformed = {"issue_comments": {"body": "no id"}, "timeline": {"actor": {"login": "someone"}}}
+        for category, item in malformed.items():
+            with self.subTest(category=category):
+                client = FakeHydrationClient(self.collector, lambda endpoint, params, item=item: ([item], {}))
+                items, meta = self.collector.hydrate_list_category(
+                    client=client, endpoint="/repos/owner/repo/issues/1/" + category, known_limit=None,
+                    captured_at="2030-01-01T00:00:00Z", category=category,
+                )
+                self.assertEqual([], items)
+                self.assertFalse(meta["pages_complete"])
+
+    def test_timestamp_primitives_round_trip_the_resolved_interval(self):
+        interval = self.collector.resolve_interval(
+            start_at="2030-01-01T09:00:00+09:00", end_at="2030-02-01T00:00:00Z", start_date=None,
+            end_date=None, recent_days=None, timezone_name="UTC", as_of=None,
+        )
+        for field in ("start_at", "end_at", "timezone", "input_mode", "as_of", "last_day_partial"):
+            self.assertTrue(hasattr(interval, field), field)
+        self.assertEqual("2030-01-01T00:00:00Z", interval.start_at)
+        start = self.collector.parse_timestamp(interval.start_at, "interval.start_at")
+        self.assertEqual(interval.start_at, self.collector.utc_string(start))
+
+    def test_values_consumers_read_back_keep_their_shape(self):
+        collector = self.collector
+        self.assertEqual(404, collector.ApiFailure("gone", status=404).status)
+        budget = collector.RequestBudget(3)
+        self.assertEqual((3, 0), (budget.limit, budget.consumed))
+        client = collector.GhApiClient(budget=budget, runner=FakeRunner([]), sleeper=FakeSleep())
+        self.assertIs(budget, client.budget)
+        self.assertEqual(collector.API_VERSION, client.api_version)
+        self.assertEqual([], client.request_events)
+        partition = collector.SearchPartition(
+            repository="owner/repo", interval=("a", "b"), query="q", total_count=0, returned_count=0,
+            pagination_complete=True, incomplete_results=False, completion_state="complete", failure=None,
+        )
+        self.assertEqual((("a", "b"), "complete", None),
+                         (partition.interval, partition.completion_state, partition.failure))
+        self.assertIsInstance(collector.serialise_partition(partition), dict)
+        self.assertEqual(
+            (1, False, [{"number": 1}]),
+            collector.search_response({"total_count": 1, "incomplete_results": False, "items": [{"number": 1}]}),
+        )
+        meta = collector.completeness("GET /x", True, 1, None, "2030-01-01T00:00:00Z", 1, None, [])
+        self.assertIs(True, meta["pages_complete"])
 
 
 if __name__ == "__main__":

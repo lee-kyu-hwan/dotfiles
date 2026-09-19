@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -135,9 +135,14 @@ def validate_filters(date_field: str, state: str, labels: list[str]) -> None:
 
 def build_issue_query(repository: str, interval: Any, date_field: str, state: str, labels: list[str]) -> str:
     """Build one Search API query for a UTC half-open interval on one date field."""
+    start = _sibling.parse_timestamp(interval.start_at, "interval.start_at")
+    end = _sibling.parse_timestamp(interval.end_at, "interval.end_at")
+    return _issue_query(repository, start, end, date_field, state, labels)
+
+
+def _issue_query(repository: str, start: datetime, end: datetime, date_field: str, state: str,
+                 labels: list[str]) -> str:
     validate_filters(date_field, state, labels)
-    start = _sibling._parse_timestamp(interval.start_at, "interval.start_at")
-    end = _sibling._parse_timestamp(interval.end_at, "interval.end_at")
     if start >= end:
         raise ValueError("interval.start_at must be earlier than interval.end_at")
     last_second = end - _ONE_SECOND
@@ -145,7 +150,7 @@ def build_issue_query(repository: str, interval: Any, date_field: str, state: st
     if state != "all":
         qualifiers.append("is:" + state)
     qualifiers.append(
-        "{0}:{1}..{2}".format(date_field, _sibling._utc_string(start), _sibling._utc_string(last_second))
+        "{0}:{1}..{2}".format(date_field, _sibling.utc_string(start), _sibling.utc_string(last_second))
     )
     qualifiers.extend('label:"{0}"'.format(label) for label in labels)
     return " ".join(qualifiers)
@@ -222,7 +227,7 @@ class GraphqlQueryClient(_sibling.GhApiClient):
         params.update(variables)
         return self.get_json("/graphql", params)
 
-    def _api_command(
+    def api_command(
         self,
         endpoint: str,
         params: Optional[dict[str, object]],
@@ -252,9 +257,54 @@ def build_clients(
     return rest, graphql
 
 
+# Copied from the sibling rather than shared: each is a few lines that read one
+# response attribute or shape this corpus, so a change made for pull requests
+# must not silently change Issue records.
+_MISSING = object()
+
+
+def _response_payload(response: object, context: str) -> object:
+    payload = getattr(response, "payload", _MISSING)
+    if payload is _MISSING:
+        raise ValueError("{0} has no parsed payload".format(context))
+    return payload
+
+
+def _response_etag(response: object) -> Optional[str]:
+    headers = getattr(response, "headers", None)
+    value = headers.get("etag") if isinstance(headers, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _run_timestamp(value: Optional[str]) -> str:
+    return value if isinstance(value, str) and value else _sibling.utc_string(datetime.now(timezone.utc))
+
+
+def _first_nonempty_string(*values: object) -> Optional[str]:
+    return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _discussion_evidence(item: object) -> dict[str, object]:
+    value = item if isinstance(item, dict) else {}
+    user = value.get("user") if isinstance(value.get("user"), dict) else {}
+    actor = value.get("actor") if isinstance(value.get("actor"), dict) else {}
+    evidence = {
+        "kind": _first_nonempty_string(value.get("event"), value.get("state")) or "observed",
+        "author": _first_nonempty_string(user.get("login"), actor.get("login")),
+        "source": deepcopy(value.get("source")) if isinstance(value.get("source"), dict) else None,
+        "excerpt": value.get("body") if isinstance(value.get("body"), str) else None,
+    }
+    for key in ("path", "diff_hunk", "state", "submitted_at", "created_at", "updated_at", "commit_id",
+                "original_commit_id", "commit_url", "html_url", "side", "start_side"):
+        evidence[key] = value.get(key) if isinstance(value.get(key), str) else None
+    for key in ("id", "line", "original_line", "start_line", "original_start_line", "position", "original_position"):
+        evidence[key] = value.get(key) if isinstance(value.get(key), int) and not isinstance(value.get(key), bool) else None
+    return evidence
+
+
 def _date_value(item: dict[str, object], date_field: str) -> Optional[datetime]:
     try:
-        return _sibling._parse_timestamp(item.get(date_field + "_at"), "search hit " + date_field + "_at")
+        return _sibling.parse_timestamp(item.get(date_field + "_at"), "search hit " + date_field + "_at")
     except ValueError:
         return None
 
@@ -287,7 +337,7 @@ def collect_repository_issue_hits(
     }
     try:
         response = client.get_json("/repos/{0}".format(repository))
-        preflight = _sibling._response_payload(response, "repository preflight")
+        preflight = _response_payload(response, "repository preflight")
         if not isinstance(preflight, dict):
             raise ValueError("repository preflight payload must be an object")
     except _sibling.BudgetExhausted:
@@ -316,7 +366,7 @@ def collect_repository_issue_hits(
             result["partial"] = True
         partitions.append(_sibling.SearchPartition(
             repository=repository,
-            interval=(_sibling._utc_string(start), _sibling._utc_string(end)),
+            interval=(_sibling.utc_string(start), _sibling.utc_string(end)),
             query=query,
             total_count=total,
             returned_count=returned,
@@ -346,14 +396,14 @@ def collect_repository_issue_hits(
 
     def search(start: datetime, end: datetime) -> None:
         nonlocal stopped
-        query = build_issue_query(repository, _sibling._partition_interval(interval, start, end), date_field, state, labels)
+        query = _issue_query(repository, start, end, date_field, state, labels)
         if stopped:
             record_partition(start, end, query, None, 0, False, False,
                              "request budget exhausted before this partition was searched")
             return
         try:
-            first = _sibling._response_payload(client.get_json("/search/issues", {"q": query, "page": 1}), "search response")
-            total, incomplete, items = _sibling._search_response(first)
+            first = _response_payload(client.get_json("/search/issues", {"q": query, "page": 1}), "search response")
+            total, incomplete, items = _sibling.search_response(first)
         except _sibling.BudgetExhausted:
             stopped = True
             record_partition(start, end, query, None, 0, False, False, "request budget exhausted")
@@ -370,16 +420,16 @@ def collect_repository_issue_hits(
             if on_split_observation is not None:
                 on_split_observation({
                     "repository": repository,
-                    "interval": [_sibling._utc_string(start), _sibling._utc_string(end)],
+                    "interval": [_sibling.utc_string(start), _sibling.utc_string(end)],
                     "query": query,
                     "total_count": total,
                     "returned_count": len(items),
                     "incomplete_results": incomplete,
-                    "observed_at": _sibling._run_timestamp(None),
+                    "observed_at": _run_timestamp(None),
                     "split_reasons": (["search-result-limit"] if total >= 1000 else [])
                     + (["incomplete-results"] if incomplete else []),
-                    "children": [[_sibling._utc_string(start), _sibling._utc_string(midpoint)],
-                                 [_sibling._utc_string(midpoint), _sibling._utc_string(end)]],
+                    "children": [[_sibling.utc_string(start), _sibling.utc_string(midpoint)],
+                                 [_sibling.utc_string(midpoint), _sibling.utc_string(end)]],
                 })
             search(start, midpoint)
             search(midpoint, end)
@@ -389,10 +439,10 @@ def collect_repository_issue_hits(
         while len(collected) < total:
             page += 1
             try:
-                payload = _sibling._response_payload(
+                payload = _response_payload(
                     client.get_json("/search/issues", {"q": query, "page": page}), "search response",
                 )
-                page_total, page_incomplete, page_items = _sibling._search_response(payload)
+                page_total, page_incomplete, page_items = _sibling.search_response(payload)
             except _sibling.BudgetExhausted:
                 stopped = True
                 record_partition(start, end, query, total, len(collected), False, incomplete, "request budget exhausted")
@@ -413,8 +463,8 @@ def collect_repository_issue_hits(
         accept(collected, start, end)
 
     search(
-        _sibling._parse_timestamp(interval.start_at, "interval.start_at"),
-        _sibling._parse_timestamp(interval.end_at, "interval.end_at"),
+        _sibling.parse_timestamp(interval.start_at, "interval.start_at"),
+        _sibling.parse_timestamp(interval.end_at, "interval.end_at"),
     )
     result["excluded"]["is-pull-request"] = len(pull_request_nodes)
     result["hits"] = sorted(
@@ -566,7 +616,7 @@ def _timeline_references(timeline: list[object]) -> tuple[list[dict[str, object]
             continue
         pull_request = issue.get("pull_request") if isinstance(issue.get("pull_request"), dict) else {}
         repository = issue.get("repository")
-        url = _sibling._first_nonempty_string(issue.get("html_url"), pull_request.get("html_url"), issue.get("url"))
+        url = _first_nonempty_string(issue.get("html_url"), pull_request.get("html_url"), issue.get("url"))
         full_name = _text(repository.get("full_name")) if isinstance(repository, dict) else None
         if url is None or full_name is None:
             unresolvable.append({"event": "cross-referenced", "event_at": event_at,
@@ -589,7 +639,7 @@ def _timeline_references(timeline: list[object]) -> tuple[list[dict[str, object]
 
 
 def _timeline_evidence(item: object) -> dict[str, object]:
-    evidence = _sibling._discussion_evidence(item)
+    evidence = _discussion_evidence(item)
     evidence["state_reason"] = _text(item.get("state_reason")) if isinstance(item, dict) else None
     return evidence
 
@@ -613,7 +663,7 @@ def hydrate_issue(
     number = hit["number"]
     root = "/repos/{0}/issues/{1}".format(repository, number)
     response = rest.get_json(root)
-    payload = _sibling._response_payload(response, "Issue response")
+    payload = _response_payload(response, "Issue response")
     if not isinstance(payload, dict):
         raise ValueError("Issue response payload must be an object")
     if "pull_request" in payload:
@@ -624,11 +674,11 @@ def hydrate_issue(
     body = payload.get("body")
     if body is not None and not isinstance(body, str):
         raise ValueError("Issue body must be text or null")
-    core_meta = _sibling._completeness("GET " + root, True, 1, None, captured_at, 1, _sibling._response_etag(response), [])
-    comments, comments_meta = _sibling._hydrate_list_category(
+    core_meta = _sibling.completeness("GET " + root, True, 1, None, captured_at, 1, _response_etag(response), [])
+    comments, comments_meta = _sibling.hydrate_list_category(
         client=rest, endpoint=root + "/comments", known_limit=None, captured_at=captured_at, category="issue_comments",
     )
-    timeline, timeline_meta = _sibling._hydrate_list_category(
+    timeline, timeline_meta = _sibling.hydrate_list_category(
         client=rest, endpoint=root + "/timeline", known_limit=None, captured_at=captured_at, category="timeline",
     )
     owner, name = repository.split("/", 1)
@@ -636,10 +686,10 @@ def hydrate_issue(
     graphql_warnings: list[str] = []
     try:
         graph_response = graphql.query(ISSUE_EVIDENCE_QUERY, {"owner": owner, "name": name, "number": number})
-        facts, graphql_warnings = _graphql_facts(_sibling._response_payload(graph_response, "GraphQL response"), node_id)
+        facts, graphql_warnings = _graphql_facts(_response_payload(graph_response, "GraphQL response"), node_id)
     except (_sibling.ApiFailure, _sibling.BudgetExhausted, ValueError, TypeError, AttributeError) as error:
-        graphql_warnings = [_sibling._hydration_warning(error)]
-    graphql_meta = _sibling._completeness(
+        graphql_warnings = [_sibling.hydration_warning(error)]
+    graphql_meta = _sibling.completeness(
         GRAPHQL_EVIDENCE_ENDPOINT, facts is not None and not graphql_warnings, 1 if facts is not None else 0,
         None, captured_at, 1 if facts is not None else 0, None, graphql_warnings,
     )
@@ -707,7 +757,7 @@ def hydrate_issue(
             "closed_by_login": _text(closed_by.get("login")) if isinstance(closed_by, dict) else None,
             "github_issue_type_raw": _text(issue_type.get("name")) if isinstance(issue_type, dict) else None,
         },
-        "author": _sibling._author(payload),
+        "author": _sibling.author(payload),
         "sources": [{
             "source_key": "general-issue",
             "kind": "search-api",
@@ -726,7 +776,7 @@ def hydrate_issue(
         "hydration_status": "partial" if partial_categories else "complete",
         "evidence_snapshot": {
             "body_excerpt": body,
-            "comments": [_sibling._discussion_evidence(item) for item in comments],
+            "comments": [_discussion_evidence(item) for item in comments],
             "timeline_events": [_timeline_evidence(item) for item in timeline],
             "related_pull_requests": (facts["related"] if facts else []) + cross_references,
             "unresolvable_references": unresolvable,
@@ -942,7 +992,7 @@ def collect(
     revision = skill_revision or compute_skill_revision()
     budget = rest.budget
     api_version = rest.api_version
-    timestamp = _sibling._run_timestamp(captured_at)
+    timestamp = _run_timestamp(captured_at)
     fingerprint = request_fingerprint(repositories, date_field, state, labels, interval,
                                       max_per_repository, budget.limit, api_version)
     run_id = "run-" + hashlib.sha256((timestamp + fingerprint).encode("utf-8")).hexdigest()[:20]
@@ -981,7 +1031,7 @@ def collect(
 
     def finish(status: str, exit_code: int, collected_any: bool) -> CollectionRun:
         run["collection_status"] = status
-        run["completed_at"] = _sibling._run_timestamp(None)
+        run["completed_at"] = _run_timestamp(None)
         run["request_count"] = budget.consumed
         run["request_events"] = deepcopy(rest.request_events)
         manifest = {
@@ -997,8 +1047,8 @@ def collect(
         run["preflight"] = deepcopy(preflight)
         run["client_version"] = str(preflight.get("client_version", "unknown"))
     except (_sibling.ApiFailure, _sibling.BudgetExhausted, ValueError) as error:
-        run["warnings"].append(_sibling._hydration_warning(error))
-        run["failed_scopes"].append({"scope": "preflight", "outcome": "failed", "reason": _sibling._hydration_warning(error)})
+        run["warnings"].append(_sibling.hydration_warning(error))
+        run["failed_scopes"].append({"scope": "preflight", "outcome": "failed", "reason": _sibling.hydration_warning(error)})
         return finish("failed", 4, False)
 
     collected_any = False
@@ -1033,7 +1083,7 @@ def collect(
                 continue
             except _sibling.BudgetExhausted as error:
                 # No request was sent for this hit, so it and every later hit are unattempted.
-                warnings.append(_sibling._hydration_warning(error))
+                warnings.append(_sibling.hydration_warning(error))
                 run["failed_scopes"].append({"repository": repository, "scope": "issue",
                                              "number": hit.get("number"), "outcome": "budget-exhausted"})
                 processed -= 1
@@ -1042,7 +1092,7 @@ def collect(
             except (_sibling.ApiFailure, ValueError, TypeError, KeyError) as error:
                 outcome = (_sibling.classify_repository_failure(status=error.status)
                            if isinstance(error, _sibling.ApiFailure) else "failed")
-                partial_records.append(_partial_issue(hit, outcome, _sibling._hydration_warning(error)))
+                partial_records.append(_partial_issue(hit, outcome, _sibling.hydration_warning(error)))
                 run["failed_scopes"].append({"repository": repository, "scope": "issue",
                                              "number": hit.get("number"), "outcome": outcome})
                 continue
@@ -1072,7 +1122,7 @@ def collect(
         entry.update({
             "collection_status": status,
             "preflight_outcome": search["preflight_outcome"],
-            "partitions": [_sibling._serialise_partition(partition) for partition in search["partitions"]],
+            "partitions": [_sibling.serialise_partition(partition) for partition in search["partitions"]],
             "matched_count": len(search["hits"]),
             "selected_count": len(hydrated),
             "excluded_by_cap": len(search["hits"]) - processed if len(hydrated) >= max_per_repository else 0,

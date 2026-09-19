@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import contextlib
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -929,7 +930,7 @@ class RevisionTests(unittest.TestCase):
 
 
 class SiblingDependencyTests(unittest.TestCase):
-    """The shared closed-PR collector must be named when it is missing."""
+    """The shared closed-PR collector is named when missing and used only through its registry."""
 
     def setUp(self):
         self.collector = load_collector()
@@ -958,6 +959,16 @@ class SiblingDependencyTests(unittest.TestCase):
         self.assertEqual("", completed.stdout)
         self.assertIn("collecting-recent-closed-prs", completed.stderr)
         self.assertNotIn("Traceback", completed.stderr)
+
+    def test_uses_exactly_the_names_the_sibling_registers_as_shared(self):
+        """The sibling's tests only protect names listed in its SHARED_WITH_SIBLINGS."""
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        used = {
+            node.attr for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "_sibling"
+        }
+        registered = self.collector._sibling.SHARED_WITH_SIBLINGS[self.collector.SKILL_NAME]
+        self.assertEqual(sorted(registered), sorted(used))
 
 
 if __name__ == "__main__":
