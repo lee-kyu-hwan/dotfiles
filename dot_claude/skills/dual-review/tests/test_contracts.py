@@ -167,7 +167,22 @@ class PackagingContractTests(unittest.TestCase):
         # Only the chezmoi source tree has the repository-level .chezmoiignore.
         if "dot_claude" in SKILL_ROOT.parts:
             chezmoiignore = (SKILL_ROOT.parents[2] / ".chezmoiignore").read_text(encoding="utf-8")
-            self.assertIn(".claude/skills/dual-review/**/__pycache__", chezmoiignore)
+            patterns = [
+                line.strip()
+                for line in chezmoiignore.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "{{"))
+            ]
+            # What matters is that this skill's bytecode cache is never deployed, not
+            # which line says so. A repository-wide pattern satisfies the contract just
+            # as a skill-specific one does; pinning the exact string breaks the test
+            # when the two are consolidated.
+            deployed = pathlib.PurePosixPath(".claude/skills/dual-review/scripts/__pycache__")
+            covered = any(
+                candidate.full_match(pattern)
+                for candidate in (deployed, deployed / "review_state.cpython-314.pyc")
+                for pattern in patterns
+            )
+            self.assertTrue(covered, "no .chezmoiignore pattern covers {0}".format(deployed))
 
         source_state_prefixes = (
             "after_", "before_", "create_", "dot_", "empty_", "encrypted_",
