@@ -53,6 +53,7 @@ orca worktree list --json
 | `projectId` | 저장소 구분 |
 | `parentWorktreeId` | 이미 계보가 있는지 |
 | `linkedIssue` | 이미 이슈가 연결됐는지 |
+| `linkedPR` | Orca가 채운 PR 번호. PR 조회(§3)에 먼저 쓴다. 비어 있을 수 있다 |
 | `workspaceStatus` | 현재 보드 상태 |
 | `isMainWorktree` | 메인은 편성 대상이 아니다 |
 
@@ -76,8 +77,8 @@ refs/heads/1352-improvement/guest-booking-token-url-removal
 패턴은 `<번호>-<type>/<이름>`이다. 선행 숫자가 없으면 번호를 얻지 못한 것으로 처리한다.
 
 번호를 얻지 못한 worktree는 **사용자에게 보고하고 에픽 판정과 이슈 연결에서 건너뛴다.**
-디렉터리 이름이 비슷하다는 이유로 다른 이슈에 연결하지 않는다. PR 조회(§3)는 번호가
-아니라 브랜치로 하므로 이런 worktree도 조회한다.
+디렉터리 이름이 비슷하다는 이유로 다른 이슈에 연결하지 않는다. PR 조회(§3)는 이슈 번호가
+아니라 `linkedPR`과 브랜치로 하므로 이런 worktree도 조회한다.
 
 > 실측 근거: tmux 창 이름의 번호는 이슈가 아니라 **PR 번호**였고, 그마저도 최신이 아니었다.
 > 창 `1216-user-partnership-inquiry`의 실제 PR은 #1305, 창 `1471-admin-partner-vat-reports`의
@@ -85,16 +86,37 @@ refs/heads/1352-improvement/guest-booking-token-url-removal
 
 ## 3. PR 조회
 
+worktree마다 PR 하나를 정한다.
+
 ```bash
-gh pr list --head "<브랜치명>" --state all --json number,state,reviewDecision,isDraft,author
 gh api user --jq .login    # 내 로그인
+
+# linkedPR이 있으면 — 정확히 하나
+gh pr view <linkedPR> --json number,state,reviewDecision,isDraft,author
+
+# linkedPR이 없으면 — 브랜치로 찾는다
+gh pr list --head "<브랜치명>" --state all --json number,state,reviewDecision,isDraft,author
 ```
 
-`--head`에는 `refs/heads/`를 뗀 브랜치명을 넣는다. 번호가 아니라 브랜치로 조회하므로 §2에서
-이슈 번호를 얻지 못한 worktree도 조회한다.
+**`linkedPR`이 있으면 그것을 쓴다.** 추가 조회 없이 PR이 하나로 정해진다. `linkedPR`은
+Orca가 채우고 CLI로 설정할 수 없어서 비어 있는 worktree가 많다. 없을 때만 브랜치로 찾는다.
 
-**한 브랜치에 PR이 여럿일 수 있다.** 닫고 다시 연 경우다. 첫 항목(`.[0]`)을 집으면
-틀린다. 다음 순서로 고른다.
+`--head`에는 `refs/heads/`를 뗀 브랜치명을 넣는다. owner 접두사(`<owner>:<브랜치>`)는
+붙이지 않는다. 붙이면 fork PR도 0건이 된다. 접두사 없이도 fork PR과 원격에서 지운 브랜치의
+PR이 찾힌다.
+
+**한 브랜치에 PR이 여럿일 수 있다.** 흔한 브랜치명이 fork끼리 겹친 경우와, 닫고 다시 연
+경우다.
+
+**작성자가 서로 다른 PR이 섞였으면 판정하지 않고 보고한다.** 아래 선택 규칙은 한 사람이
+닫고 다시 연 경우를 위한 것이라, 섞인 결과에 쓰면 남의 PR을 집는다.
+
+```
+eslint/eslint  --head patch-1                    100건 이상 (--limit 100에 걸림)
+eslint/eslint  --head fix-no-loss-of-precision   #21337 OPEN sethamus · #20164 MERGED fasttime
+```
+
+작성자가 모두 같아도 첫 항목(`.[0]`)을 집으면 틀린다. 다음 순서로 고른다.
 
 1. `OPEN`이 있으면 그것
 2. 없으면 `MERGED`
@@ -148,10 +170,14 @@ gh api graphql -f query='
 **이미 `review` 밑에 있다는 사실은 판정 근거가 아니다.** 근거로 삼으면 한번 잘못 들어간
 worktree가 빠져나오지 못한다. 작성자가 나인 PR이 `review` 밑에 있으면 ②③으로 옮긴다.
 
-예외는 하나다. `review` 밑 worktree에서 §3이 PR을 찾지 못하면 계보와 상태를 바꾸지 않고
-보고한다. 리뷰 worktree에는 PR이 있어야 하므로, 여기서 PR 없음은 "내 브랜치"가 아니라 로컬
-브랜치 이름이 PR head와 다르다는 신호다. 그대로 ③으로 옮기면 남의 작업이 내 묶음에
-들어간다. 매번 보고되므로 오분류가 조용히 남지 않는다.
+예외는 하나다. `review` 밑 worktree가 `linkedPR`도 없고 `--head`로도 PR을 찾지 못하면
+계보와 상태를 바꾸지 않고 보고한다. 리뷰 worktree에는 PR이 있어야 하므로, 여기서 PR 없음은
+"내 브랜치"라는 증거가 아니라 데이터가 없다는 뜻이다. 그대로 ③으로 옮기면 남의 작업이 내
+묶음에 들어갈 수 있다. 드문 경우다. fork PR과 원격에서 지운 브랜치의 PR도 `--head`로
+찾힌다(eslint/eslint fork PR, zambaguni-front #1475·#1472 실측). 매번 보고되므로 오분류가
+조용히 남지 않는다.
+
+§3에서 작성자가 섞여 판정하지 않은 worktree는 편성하지 않는다.
 
 이슈 번호가 없는 worktree(§2)는 ①에 걸리면 이슈 연결 없이 `review`로 편성하고, 아니면
 편성하지 않는다.
@@ -311,7 +337,8 @@ forum-board-noindex               #1411   없음          standalone    없음 �
 
 - 이슈 번호를 얻지 못한 worktree
 - PR이 `CLOSED`라 상태를 보류한 worktree
-- `review` 밑인데 PR을 찾지 못해 옮기지 않은 worktree
+- `linkedPR`이 없고 `--head` 결과에 작성자가 섞여 판정하지 않은 worktree
+- `review` 밑인데 `linkedPR`도 `--head` 결과도 없어 옮기지 않은 worktree
 - 정리 후보가 된 worktree — `review` 밑 PR `MERGED`·`CLOSED`, 내 작업 `completed`
 - 새로 만들 역할 worktree와 그 경로
 
