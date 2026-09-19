@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect Open Source Issues"
+  short_description: "일반 저장소 Issue를 감사 가능한 Issue corpus로 수집"
+  default_prompt: "Use $collecting-open-source-issues to collect general Issues from these repositories by the date field and range I specify into caller-selected corpus and manifest files."

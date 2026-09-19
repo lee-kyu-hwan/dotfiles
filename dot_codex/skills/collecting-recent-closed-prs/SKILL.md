@@ -1,6 +1,6 @@
 ---
 name: collecting-recent-closed-prs
-description: Use when collecting pull requests closed within an explicit date range from a user-supplied GitHub repository list for cross-project research. For personal activity reports use github-work-log; for tracker Issue submissions use collecting-curated-contribution-prs.
+description: Use when collecting pull requests closed within an explicit date range from a user-supplied GitHub repository list for cross-project research. For personal activity reports use github-work-log; for tracker Issue submissions use collecting-curated-contribution-prs; for general Issues use collecting-open-source-issues.
 ---
 
 # Collect recent closed pull requests

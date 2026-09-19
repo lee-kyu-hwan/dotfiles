@@ -1,6 +1,6 @@
 ---
 name: collecting-curated-contribution-prs
-description: Use when collecting pull request submissions from a caller-supplied tracker Issue for an auditable offline corpus. Excludes date-range collection, analysis, candidate verification, and GitHub writes.
+description: Use when collecting pull request submissions from a caller-supplied tracker Issue for an auditable offline corpus. Excludes date-range collection, analysis, candidate verification, and GitHub writes. For general Issues use collecting-open-source-issues.
 ---
 
 # Collect curated contribution pull requests
