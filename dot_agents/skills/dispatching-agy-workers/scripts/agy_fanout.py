@@ -72,6 +72,10 @@ def call_agy(prompt, args, workdir):
 def run_job(path, args, out, workdir):
     name = path.stem
     prompt = path.read_text()
+    # 같은 --out 으로 다시 돌릴 때 이전 결과가 남아 이번 실패를 가리지 않게 한다
+    stale = [p for p in out.iterdir() if p.name.startswith(f"{name}.raw.") and p.name.endswith(".json")]
+    for path in [*stale, out / f"{name}.result.json", out / f"{name}.result.txt"]:
+        path.unlink(missing_ok=True)
     attempts = []
     for n in range(1, args.retries + 2):
         raw, wall = call_agy(prompt, args, workdir)

@@ -153,6 +153,16 @@ class FanoutTest(FanoutHarness):
         self.assertTrue(jobs["two"]["ok"])
         self.assertFalse((self.out / "one.result.json").exists())
 
+    def test_rerun_failure_removes_stale_outputs(self):
+        self.out.mkdir()
+        (self.out / "one.result.json").write_text('{"stale": true}')
+        (self.out / "one.raw.2.json").write_text("{}")
+        proc = self.run_fanout(self.prompt("one", "always-empty"), "--expect-json", "--retries", "0")
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse((self.out / "one.result.json").exists())
+        self.assertFalse((self.out / "one.raw.2.json").exists())
+        self.assertTrue((self.out / "one.raw.1.json").exists())
+
     def test_unparseable_json_is_retried_then_fails(self):
         proc = self.run_fanout(self.prompt("one", "bad-json"), "--expect-json", "--retries", "2")
         self.assertEqual(proc.returncode, 1)
