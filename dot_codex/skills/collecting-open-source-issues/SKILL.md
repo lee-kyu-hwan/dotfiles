@@ -29,6 +29,10 @@ partial records, and method limitations before presenting the inventory.
 Exit 4 means failed collection. Never claim every matching Issue was collected
 merely because all exposed pages were read.
 
+`collecting-recent-closed-prs` owns the transport, date splitting, and
+hydration code this skill loads from its script, limited to the names that
+script lists for this skill in `SHARED_WITH_SIBLINGS`.
+
 The collector records facts, not causes. Every record keeps
 `closure.normalized_cause` as `unknown`: a state, a `state_reason`, a label such
 as `wontfix`, or a linked pull request is not evidence of why an Issue was

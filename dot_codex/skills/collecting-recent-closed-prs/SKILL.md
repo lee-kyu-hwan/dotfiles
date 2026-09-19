@@ -42,3 +42,7 @@ ideas ready to file during collection.
 The tracker collector and candidate verifier may not be installed. If routing
 to either is needed, report that boundary explicitly rather than claiming it
 ran. Repository names, program roles, and date ranges come from the caller.
+
+This skill owns code that `collecting-open-source-issues` and
+`collecting-curated-contribution-prs` load from its script by path; the names
+listed in the script's `SHARED_WITH_SIBLINGS` are their contract.

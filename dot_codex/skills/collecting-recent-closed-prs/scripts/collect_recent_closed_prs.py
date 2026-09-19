@@ -29,6 +29,23 @@ MAX_RETRIES = 3
 MAX_RATE_LIMIT_WAIT_SECONDS = 5 * 60
 _MISSING = object()
 
+# Sibling skills load this file by path and call these names directly, and
+# collecting-open-source-issues also overrides GhApiClient.api_command. Their
+# tests do not run when this file changes, so SharedSurfaceTests pins each
+# call shape. Keep a name and its signature, or change those skills with it.
+SHARED_WITH_SIBLINGS: dict[str, tuple[str, ...]] = {
+    "collecting-open-source-issues": (
+        "API_VERSION", "ApiFailure", "BudgetExhausted", "GhApiClient", "RequestBudget", "SearchPartition",
+        "atomic_write_json", "author", "classify_repository_failure", "completeness", "hydrate_list_category",
+        "hydration_warning", "parse_timestamp", "resolve_interval", "search_response", "serialise_partition",
+        "utc_string",
+    ),
+    "collecting-curated-contribution-prs": (
+        "API_VERSION", "ApiFailure", "BudgetExhausted", "GhApiClient", "RequestBudget", "atomic_write_json",
+        "hydrate_pull_request", "merge_corpus",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Interval:
@@ -50,12 +67,18 @@ class ApiResponse:
 
 
 class BudgetExhausted(RuntimeError):
-    """Raised before an attempt that would exceed the global request budget."""
+    """Raised before an attempt that would exceed the global request budget.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
 
 
 @dataclass
 class RequestBudget:
-    """A run-global count of API attempts, including retries."""
+    """A run-global count of API attempts, including retries.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
 
     limit: int
     consumed: int = 0
@@ -71,7 +94,10 @@ class RequestBudget:
 
 
 class ApiFailure(RuntimeError):
-    """A safe API failure suitable for manifest recording and classification."""
+    """A safe API failure suitable for manifest recording and classification.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
 
     def __init__(
         self,
@@ -89,7 +115,10 @@ class ApiFailure(RuntimeError):
 
 
 class GhApiClient:
-    """A serial, read-only ``gh api`` transport with bounded retries."""
+    """A serial, read-only ``gh api`` transport with bounded retries.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
 
     def __init__(
         self,
@@ -167,7 +196,7 @@ class GhApiClient:
         cached_payload: object,
         cached_etag: Optional[str],
     ) -> ApiResponse:
-        command = self._api_command(endpoint, params, cached_etag)
+        command = self.api_command(endpoint, params, cached_etag)
         for attempt in range(MAX_RETRIES + 1):
             self.budget.consume()
             event = {"endpoint": endpoint, "attempt": attempt + 1, "status": None,
@@ -249,12 +278,13 @@ class GhApiClient:
 
         raise AssertionError("bounded retry loop must return or raise")
 
-    def _api_command(
+    def api_command(
         self,
         endpoint: str,
         params: Optional[dict[str, object]],
         cached_etag: Optional[str],
     ) -> list[str]:
+        """Build one attempt's ``gh`` argv; collecting-open-source-issues overrides it for GraphQL."""
         command = [
             "gh",
             "api",
@@ -307,15 +337,18 @@ def resolve_interval(
     timezone_name: str,
     as_of: Optional[str],
 ) -> Interval:
-    """Resolve one requested interval into whole-second UTC bounds."""
+    """Resolve one requested interval into whole-second UTC bounds.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
     input_timezone = _timezone(timezone_name)
     mode = _interval_mode(start_at, end_at, start_date, end_date, recent_days)
 
     if mode == "timestamps":
         if as_of is not None:
             raise ValueError("as_of is only valid with recent_days")
-        start = _parse_timestamp(start_at, "start_at")
-        end = _parse_timestamp(end_at, "end_at")
+        start = parse_timestamp(start_at, "start_at")
+        end = parse_timestamp(end_at, "end_at")
         input_mode: dict[str, object] = {"start_at": start_at, "end_at": end_at}
         last_day_partial = False
         resolved_as_of = end
@@ -337,7 +370,7 @@ def resolve_interval(
         ):
             raise ValueError("recent_days must be a positive integer")
         current = (
-            _parse_timestamp(as_of, "as_of") if as_of is not None else datetime.now(timezone.utc)
+            parse_timestamp(as_of, "as_of") if as_of is not None else datetime.now(timezone.utc)
         ).astimezone(input_timezone)
         local_start = current.date() - timedelta(days=recent_days - 1)
         start = datetime.combine(local_start, time.min, input_timezone)
@@ -352,11 +385,11 @@ def resolve_interval(
         raise ValueError("start_at must be earlier than end_at")
 
     return Interval(
-        start_at=_utc_string(start),
-        end_at=_utc_string(end),
+        start_at=utc_string(start),
+        end_at=utc_string(end),
         timezone=timezone_name,
         input_mode=input_mode,
-        as_of=_utc_string(resolved_as_of),
+        as_of=utc_string(resolved_as_of),
         last_day_partial=last_day_partial,
     )
 
@@ -366,8 +399,8 @@ def build_closed_query(repository: str, interval: Interval, outcome: str) -> str
     if outcome not in {"all", "merged", "closed-unmerged"}:
         raise ValueError("outcome must be all, merged, or closed-unmerged")
 
-    start = _parse_timestamp(interval.start_at, "interval.start_at")
-    end = _parse_timestamp(interval.end_at, "interval.end_at")
+    start = parse_timestamp(interval.start_at, "interval.start_at")
+    end = parse_timestamp(interval.end_at, "interval.end_at")
     if start >= end:
         raise ValueError("interval.start_at must be earlier than interval.end_at")
 
@@ -375,7 +408,7 @@ def build_closed_query(repository: str, interval: Interval, outcome: str) -> str
         f"repo:{repository}",
         "is:pr",
         "is:closed",
-        f"closed:{_utc_string(start)}..{_utc_string(end - timedelta(seconds=1))}",
+        f"closed:{utc_string(start)}..{utc_string(end - timedelta(seconds=1))}",
     ]
     if outcome == "merged":
         qualifiers.append("is:merged")
@@ -408,7 +441,10 @@ def migrate_manifest_v1(document: dict[str, object]) -> dict[str, object]:
 
 
 def classify_repository_failure(*, status: Optional[int]) -> str:
-    """Map only demonstrated repository failures to safe public outcomes."""
+    """Map only demonstrated repository failures to safe public outcomes.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
     if status == 401:
         return "unauthorized"
     if status == 404:
@@ -420,7 +456,10 @@ def classify_repository_failure(*, status: Optional[int]) -> str:
 
 @dataclass(frozen=True)
 class SearchPartition:
-    """Immutable evidence for one final Search API interval partition."""
+    """Immutable evidence for one final Search API interval partition.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
 
     repository: str
     interval: tuple[str, str]
@@ -500,8 +539,8 @@ def collect_repository_hits(
     partial = False
     stopped = False
 
-    root_start = _parse_timestamp(interval.start_at, "interval.start_at")
-    root_end = _parse_timestamp(interval.end_at, "interval.end_at")
+    root_start = parse_timestamp(interval.start_at, "interval.start_at")
+    root_end = parse_timestamp(interval.end_at, "interval.end_at")
 
     def fail_partition(
         start: datetime,
@@ -517,7 +556,7 @@ def collect_repository_hits(
         partitions.append(
             SearchPartition(
                 repository=repository,
-                interval=(_utc_string(start), _utc_string(end)),
+                interval=(utc_string(start), utc_string(end)),
                 query=query,
                 total_count=total_count,
                 returned_count=returned_count,
@@ -549,7 +588,7 @@ def collect_repository_hits(
                 client.get_json("/search/issues", {"q": query, "page": 1}),
                 "search response",
             )
-            total_count, incomplete_results, first_items = _search_response(first_payload)
+            total_count, incomplete_results, first_items = search_response(first_payload)
         except BudgetExhausted:
             stopped = True
             fail_partition(start, end, query, None, 0, False, "request budget exhausted")
@@ -575,7 +614,7 @@ def collect_repository_hits(
             if on_split_observation is not None:
                 on_split_observation({
                     "repository": repository,
-                    "interval": [_utc_string(start), _utc_string(end)],
+                    "interval": [utc_string(start), utc_string(end)],
                     "query": query,
                     "total_count": total_count,
                     "returned_count": len(first_items),
@@ -583,8 +622,8 @@ def collect_repository_hits(
                     "observed_at": _run_timestamp(None),
                     "split_reasons": (["search-result-limit"] if total_count >= 1000 else [])
                                      + (["incomplete-results"] if incomplete_results else []),
-                    "children": [[_utc_string(start), _utc_string(midpoint)],
-                                 [_utc_string(midpoint), _utc_string(end)]],
+                    "children": [[utc_string(start), utc_string(midpoint)],
+                                 [utc_string(midpoint), utc_string(end)]],
                 })
             collect_partition(start, midpoint)
             collect_partition(midpoint, end)
@@ -610,7 +649,7 @@ def collect_repository_hits(
                     client.get_json("/search/issues", {"q": query, "page": page}),
                     "search response",
                 )
-                page_total_count, page_incomplete, page_items = _search_response(page_payload)
+                page_total_count, page_incomplete, page_items = search_response(page_payload)
             except BudgetExhausted:
                 stopped = True
                 fail_partition(
@@ -661,7 +700,7 @@ def collect_repository_hits(
         partitions.append(
             SearchPartition(
                 repository=repository,
-                interval=(_utc_string(start), _utc_string(end)),
+                interval=(utc_string(start), utc_string(end)),
                 query=query,
                 total_count=total_count,
                 returned_count=len(items),
@@ -673,7 +712,7 @@ def collect_repository_hits(
         )
         safe_hits.extend(_exact_partition_hits(items, start, end, warnings))
         if on_safe_leaf is not None:
-            on_safe_leaf({"partition": _serialise_partition(partitions[-1]), "hits": deepcopy(items), "preflight": deepcopy(preflight_payload)})
+            on_safe_leaf({"partition": serialise_partition(partitions[-1]), "hits": deepcopy(items), "preflight": deepcopy(preflight_payload)})
 
     collect_partition(root_start, root_end)
     hits = _deduplicated_ordered_hits(safe_hits)
@@ -718,6 +757,8 @@ def hydrate_pull_request(
     endpoint is unavailable.  Endpoint failures are therefore represented in
     that category's completeness metadata rather than raised after identity is
     established.  Text from GitHub is copied as untrusted data only.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
     """
     if not isinstance(repository, str) or not repository:
         raise ValueError("repository must be a non-empty owner/name string")
@@ -748,7 +789,7 @@ def hydrate_pull_request(
         if _pull_request_details(payload, number, pull_endpoint)["normalized_state"] == "unknown":
             core_warning = "pull request response has no authoritative state"
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
-        core_warning = _hydration_warning(error)
+        core_warning = hydration_warning(error)
 
     node_id = _first_nonempty_string(core_payload.get("node_id"), search_hit.get("node_id"))
     repository_node_id = _first_nonempty_string(
@@ -764,7 +805,7 @@ def hydrate_pull_request(
     if pull_url is None:
         pull_url = "https://github.com/{0}/pull/{1}".format(repository, number)
 
-    body_meta = _completeness(
+    body_meta = completeness(
         endpoint="GET " + pull_endpoint,
         pages_complete=core_warning is None,
         returned_count=1 if core_warning is None else 0,
@@ -787,7 +828,7 @@ def hydrate_pull_request(
         ("review_comments", pull_endpoint + "/comments", None),
         ("timeline", root + "/issues/{0}/timeline".format(number), None),
     ):
-        category_results[category] = _hydrate_list_category(
+        category_results[category] = hydrate_list_category(
             client=client,
             endpoint=endpoint,
             category=category,
@@ -827,7 +868,7 @@ def hydrate_pull_request(
         and len(commits) >= _PULL_COMMITS_LIMIT
     ):
         fallback_endpoint = root + "/commits"
-        fallback, fallback_meta = _hydrate_list_category(
+        fallback, fallback_meta = hydrate_list_category(
             client=client,
             endpoint=fallback_endpoint,
             category="commits",
@@ -872,7 +913,7 @@ def hydrate_pull_request(
         captured_at=captured_at,
     )
     linked_issues = _linked_issues(timeline)
-    linked_meta = _completeness(
+    linked_meta = completeness(
         endpoint="GET " + root + "/issues/{0}/timeline (cross-referenced issue observations)".format(number),
         pages_complete=bool(timeline_meta["pages_complete"]),
         returned_count=len(linked_issues),
@@ -884,7 +925,7 @@ def hydrate_pull_request(
         attempted_pages=timeline_meta["attempted_pages"],
         page_etags=deepcopy(timeline_meta["page_etags"]),
     )
-    completeness = {
+    category_completeness = {
         "pull_request_body": body_meta,
         "files": files_meta,
         "commits": commits_meta,
@@ -896,7 +937,7 @@ def hydrate_pull_request(
         "linked_issues": linked_meta,
     }
     partial_categories = [
-        category for category, metadata in completeness.items()
+        category for category, metadata in category_completeness.items()
         if not metadata["pages_complete"]
     ]
     return {
@@ -910,7 +951,7 @@ def hydrate_pull_request(
             "repository_aliases": [],
         },
         "pull_request": details,
-        "author": _author(core_payload),
+        "author": author(core_payload),
         "license": license,
         "sources": [],
         "state_history": _state_history(details),
@@ -925,7 +966,7 @@ def hydrate_pull_request(
             "timeline_events": [_discussion_evidence(item) for item in timeline],
             "linked_issues": linked_issues,
             "partial_categories": partial_categories,
-            "completeness": completeness,
+            "completeness": category_completeness,
         },
     }
 
@@ -943,6 +984,8 @@ def merge_corpus(
     Pull-request node IDs are authoritative.  Repository node ID plus PR
     number is accepted only as corroboration when one side does not have a
     pull-request node ID.  The function never mutates either input.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
     """
     if source_policy not in ("recent-closed", "explicit-only"):
         raise ValueError("source_policy must be 'recent-closed' or 'explicit-only'")
@@ -1410,7 +1453,7 @@ def _record_updated_datetime(record: dict[str, object]) -> Optional[datetime]:
     if value is None:
         return None
     try:
-        return _parse_timestamp(value, "pull_request.updated_at")
+        return parse_timestamp(value, "pull_request.updated_at")
     except ValueError:
         return None
 
@@ -1613,11 +1656,14 @@ def _observation_identity(observation: dict[str, object]) -> tuple[object, objec
     return None, None, None, json.dumps(observation, sort_keys=True, separators=(",", ":"))
 
 
-def _hydrate_list_category(
+def hydrate_list_category(
     *, client: Any, endpoint: str, known_limit: Optional[int], captured_at: str, category: str,
     extra_params: Optional[dict[str, object]] = None, maximum_items: Optional[int] = None,
 ) -> tuple[list[object], dict[str, object]]:
-    """Read consecutive 100-item pages and contain malformed endpoint data."""
+    """Read consecutive 100-item pages and contain malformed endpoint data.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
     items: list[object] = []
     raw_count = 0
     page = 0
@@ -1663,8 +1709,8 @@ def _hydrate_list_category(
                 break
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
         complete = False
-        warnings.append(_hydration_warning(error))
-    return items, _completeness(
+        warnings.append(hydration_warning(error))
+    return items, completeness(
         endpoint="GET " + endpoint,
         pages_complete=complete,
         returned_count=len(items),
@@ -1760,14 +1806,15 @@ def _hydrate_license(*, client: Any, repository: str, cache: dict[str, object], 
         if not isinstance(spdx_id, str) or not spdx_id:
             raise ValueError("license SPDX identifier must be a non-empty string")
         license_value["spdx_id"] = spdx_id
-        metadata = _completeness("GET " + endpoint, True, 1, None, captured_at, 1, _response_etag(response), [])
+        metadata = completeness("GET " + endpoint, True, 1, None, captured_at, 1, _response_etag(response), [])
     except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
-        metadata = _completeness("GET " + endpoint, False, 0, None, captured_at, 0, None, [_hydration_warning(error)])
+        metadata = completeness("GET " + endpoint, False, 0, None, captured_at, 0, None, [hydration_warning(error)])
     cache[repository] = (deepcopy(license_value), deepcopy(metadata))
     return license_value, metadata
 
 
-def _completeness(endpoint: str, pages_complete: bool, returned_count: int, known_limit: Optional[int], captured_at: str, page_count: int, etag: Optional[str], warnings: list[str], attempted_pages: Optional[int] = None, page_etags: Optional[list[dict[str, object]]] = None) -> dict[str, object]:
+def completeness(endpoint: str, pages_complete: bool, returned_count: int, known_limit: Optional[int], captured_at: str, page_count: int, etag: Optional[str], warnings: list[str], attempted_pages: Optional[int] = None, page_etags: Optional[list[dict[str, object]]] = None) -> dict[str, object]:
+    """Build one evidence category's completeness entry. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     return {"endpoint": endpoint, "pages_complete": pages_complete, "returned_count": returned_count, "known_limit": known_limit, "captured_at": captured_at, "page_count": page_count, "attempted_pages": page_count if attempted_pages is None else attempted_pages, "etag": etag, "page_etags": [] if page_etags is None else page_etags, "warnings": warnings}
 
 
@@ -1777,7 +1824,8 @@ def _response_etag(response: object) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
-def _hydration_warning(error: BaseException) -> str:
+def hydration_warning(error: BaseException) -> str:
+    """Redact a failure into one recordable warning. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     return _redact_diagnostics(str(error)) or error.__class__.__name__
 
 
@@ -1800,7 +1848,7 @@ def _pull_request_details(payload: dict[str, object], number: int, url: str) -> 
     valid_merge_observation = "merged_at" in payload
     if payload.get("merged_at") is not None:
         try:
-            _parse_timestamp(merged_at, "merged_at")
+            parse_timestamp(merged_at, "merged_at")
         except ValueError:
             valid_merge_observation = False
     normalized_state = "unknown"
@@ -1811,7 +1859,8 @@ def _pull_request_details(payload: dict[str, object], number: int, url: str) -> 
     return {"number": number, "url": url, "title": payload.get("title") if isinstance(payload.get("title"), str) else None, "normalized_state": normalized_state, "closure_reason": "merged" if merged_at is not None else "unknown", "created_at": payload.get("created_at") if isinstance(payload.get("created_at"), str) else None, "closed_at": payload.get("closed_at") if isinstance(payload.get("closed_at"), str) else None, "merged_at": merged_at, "updated_at": payload.get("updated_at") if isinstance(payload.get("updated_at"), str) else None, "base_sha": _nested_value(payload, "base", "sha"), "head_sha": _nested_value(payload, "head", "sha"), "merge_sha": payload.get("merge_commit_sha") if isinstance(payload.get("merge_commit_sha"), str) else None, "labels": [label["name"] for label in payload.get("labels", []) if isinstance(label, dict) and isinstance(label.get("name"), str)] if isinstance(payload.get("labels", []), list) else [], "changed_files_count": payload.get("changed_files") if isinstance(payload.get("changed_files"), int) and not isinstance(payload.get("changed_files"), bool) else None, "commits_count": payload.get("commits") if isinstance(payload.get("commits"), int) and not isinstance(payload.get("commits"), bool) else None}
 
 
-def _author(payload: dict[str, object]) -> dict[str, object]:
+def author(payload: dict[str, object]) -> dict[str, object]:
+    """Map ``author_association`` to a normalized role. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     raw = payload.get("author_association")
     association = raw if isinstance(raw, str) else "unknown"
     if association in {"OWNER", "MEMBER", "COLLABORATOR"}:
@@ -1936,7 +1985,8 @@ def _response_payload(response: object, context: str) -> object:
     return payload
 
 
-def _search_response(payload: object) -> tuple[int, bool, list[dict[str, object]]]:
+def search_response(payload: object) -> tuple[int, bool, list[dict[str, object]]]:
+    """Validate one Search API page. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     if not isinstance(payload, dict):
         raise ValueError("search response payload must be an object")
     total_count = payload.get("total_count")
@@ -1953,8 +2003,8 @@ def _search_response(payload: object) -> tuple[int, bool, list[dict[str, object]
 
 def _partition_interval(source: Interval, start: datetime, end: datetime) -> Interval:
     return Interval(
-        start_at=_utc_string(start),
-        end_at=_utc_string(end),
+        start_at=utc_string(start),
+        end_at=utc_string(end),
         timezone=source.timezone,
         input_mode=deepcopy(source.input_mode),
         as_of=source.as_of,
@@ -1977,7 +2027,7 @@ def _exact_partition_hits(
             warnings.append("search hit without a usable node_id or pull-request number was excluded")
             continue
         try:
-            closed_at_value = _parse_timestamp(closed_at, "search hit closed_at")
+            closed_at_value = parse_timestamp(closed_at, "search hit closed_at")
         except ValueError:
             warnings.append("search hit with an invalid closed_at timestamp was excluded")
             continue
@@ -1994,7 +2044,7 @@ def _deduplicated_ordered_hits(items: list[dict[str, object]]) -> list[dict[str,
             unique[node_id] = item
 
     def sort_key(item: dict[str, object]) -> tuple[float, int, str]:
-        closed_at = _parse_timestamp(item["closed_at"], "search hit closed_at")
+        closed_at = parse_timestamp(item["closed_at"], "search hit closed_at")
         return (-closed_at.timestamp(), -item["number"], item["node_id"])
 
     return sorted(unique.values(), key=sort_key)
@@ -2164,10 +2214,12 @@ def _interval_mode(
     return ("timestamps", "dates", "recent_days")[complete_modes.index(True)]
 
 
-def _parse_timestamp(value: Optional[str], field: str) -> datetime:
+def parse_timestamp(value: Optional[str], field: str) -> datetime:
     """Accept `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)` only.
 
     Numeric offset hours must be 00--23 and minutes must be 00--59.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
     """
     if not isinstance(value, str):
         raise ValueError(f"{field} must be an RFC 3339 timestamp")
@@ -2195,7 +2247,8 @@ def _whole_second(value: datetime) -> datetime:
     return value.replace(microsecond=0)
 
 
-def _utc_string(value: datetime) -> str:
+def utc_string(value: datetime) -> str:
+    """Format as whole-second UTC ``Z`` text. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
@@ -2229,7 +2282,7 @@ class CollectionRun:
 
 
 def _run_timestamp(value: Optional[str]) -> str:
-    return value if isinstance(value, str) and value else _utc_string(datetime.now(timezone.utc))
+    return value if isinstance(value, str) and value else utc_string(datetime.now(timezone.utc))
 
 
 def _repository_records(corpus: object, repository: str) -> list[dict[str, object]]:
@@ -2244,7 +2297,8 @@ def _repository_records(corpus: object, repository: str) -> list[dict[str, objec
     ]
 
 
-def _serialise_partition(partition: SearchPartition) -> dict[str, object]:
+def serialise_partition(partition: SearchPartition) -> dict[str, object]:
+    """Project a partition into its manifest form. Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``."""
     return {
         "repository": partition.repository,
         "interval": list(partition.interval),
@@ -2446,7 +2500,7 @@ def collect(
                 client_version = str(preflight.get("client_version", client_version))
                 effective_api_version = str(preflight.get("api_version", effective_api_version))
         except (ApiFailure, BudgetExhausted, ValueError) as error:
-            warning = _hydration_warning(error)
+            warning = hydration_warning(error)
             warnings.append(warning)
             prior_corpus = deepcopy(existing_corpus) if isinstance(existing_corpus, dict) else {"schema_version": "1.0.0", "generated_by": {"name": "collecting-recent-closed-prs", "revision": skill_revision or "unknown"}, "records": []}
             failed_record = {
@@ -2546,7 +2600,7 @@ def collect(
         except KeyboardInterrupt:
             search = _empty_repository_search_result(repository, "partial", "partial", "collection interrupted during search")
         except (ApiFailure, BudgetExhausted, ValueError, TypeError) as error:
-            search = _empty_repository_search_result(repository, "failed", "failed", _hydration_warning(error))
+            search = _empty_repository_search_result(repository, "failed", "failed", hydration_warning(error))
         repo_warnings = list(search.warnings)
         selected_records: list[dict[str, object]] = []
         partial_records: list[dict[str, object]] = []
@@ -2571,7 +2625,7 @@ def collect(
                 repo_warnings.append("collection interrupted during hydration")
                 break
             except (ApiFailure, BudgetExhausted, ValueError, TypeError, KeyError) as error:
-                repo_warnings.append(_hydration_warning(error))
+                repo_warnings.append(hydration_warning(error))
                 continue
             indexed_state = "merged" if outcome == "merged" else "closed-unmerged" if outcome == "closed-unmerged" else None
             hydrated_state = hydrated.get("pull_request", {}).get("normalized_state") if isinstance(hydrated.get("pull_request"), dict) else None
@@ -2604,7 +2658,7 @@ def collect(
             "collection_status": "partial" if repo_warnings or hydration_partial_count or search.collection_status == "partial" else search.collection_status,
             "preflight": deepcopy(search.preflight),
             "preflight_outcome": search.preflight_outcome,
-            "partitions": [_serialise_partition(partition) for partition in search.partitions],
+            "partitions": [serialise_partition(partition) for partition in search.partitions],
             "matched_count": search.matched_count,
             "selected_count": len(selected_records),
             "excluded_by_cap": max(0, len(candidates) - processed_hits) if len(selected_records) >= max_per_repository else 0,
@@ -2692,7 +2746,10 @@ def collect(
 
 
 def atomic_write_json(destination: object, document: object, *, replacer: Callable[[str, str], None] = os.replace) -> None:
-    """Replace one explicit JSON output only after a complete adjacent write."""
+    """Replace one explicit JSON output only after a complete adjacent write.
+
+    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    """
     path = os.fspath(destination)
     directory = os.path.dirname(os.path.abspath(path))
     temporary = None
