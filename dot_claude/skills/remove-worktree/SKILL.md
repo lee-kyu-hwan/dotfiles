@@ -72,8 +72,13 @@ devdocs() { find "$1/docs/development" -type f ! -name .DS_Store 2>/dev/null | s
 [ -d "$WT/.claude/quality-state" ] && du -sh "$WT/.claude/quality-state" \
   && find "$WT/.claude/quality-state" -mindepth 1 -maxdepth 1
 
-# 2. main에 없는 개발 기록 — quality-goal이 docs/development/에 만들지만 커밋은 지시하지 않는다
-comm -23 <(devdocs "$WT") <(devdocs "$MAIN")
+# 2. 기준에 없는 개발 기록 — quality-goal이 docs/development/에 만들지만 커밋은 지시하지 않는다
+#    MAIN의 작업트리로 비교하면 안 된다. 로컬이 뒤처져 있으면 이미 머지된 파일까지 "없다"고 나온다
+#    (실측: 20커밋 뒤처진 기준으로 비교해 64개를 잃을 기록으로 오판했다. 실제로는 11개였다)
+BASE=$(git -C "$MAIN" symbolic-ref --short HEAD)   # develop / main 등
+git -C "$MAIN" fetch origin "$BASE" --quiet
+comm -23 <(devdocs "$WT") \
+         <(git -C "$WT" ls-tree -r --name-only "origin/$BASE" docs/development 2>/dev/null | sort)
 
 # 3. 살아있는 에이전트 — AGENT 열이 아니라 실제 명령으로 판정한다. 셸이 아니면 살아있다고 본다
 #    (Claude Code는 pane 명령이 `2.1.275` 같은 버전 문자열로 보인다)

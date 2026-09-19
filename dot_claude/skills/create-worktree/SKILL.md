@@ -252,6 +252,9 @@ workmux는 Orca를 모른다. `workmux add`로 만든 worktree는 git·Orca 목�
 기존 worktree를 재사용한 호출에서는 계보를 바꾸지 않는다. 그때 `--epic`이나
 `--standalone`이 주어졌으면 현재 부모를 보여 주고 바꿀지 확인받는다.
 
+이 절은 이번 호출이 만든 worktree 하나만 다룬다. 이미 있는 worktree 여러 개를 한 번에
+편성할 때는 `organize-worktree-lineage`를 쓴다.
+
 | 인자 | `orca worktree set` 옵션 | 부모 |
 | --- | --- | --- |
 | 없음 (기본) | `--parent-worktree active` | 이 스킬을 실행하는 셸 cwd의 Orca worktree |
