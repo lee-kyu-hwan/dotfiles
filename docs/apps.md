@@ -51,6 +51,7 @@ Google Antigravity 에이전트를 터미널에서 사용하는 공식 CLI. 구 
 - **실행 이름**: 바이너리는 `antigravity`이고 `agy`로 링크된다. `gemini` 명령은 없다
 - **전제 조건**: Google 계정 인증 또는 API 키 설정 필요
 - **업데이트**: cask에 `auto_updates true`가 붙어 있어 `brew upgrade`와 `brew bundle`이 건너뛰고 `outdated`도 항상 false로 보고한다. 올리려면 `brew upgrade --cask --greedy antigravity-cli`를 쓴다
+- **분석 워커로 쓰기**: Claude·Codex 가 조정하고 `agy` 를 병렬 독립 호출로 붙이는 방법은 공용 스킬 `dispatching-agy-workers`(`dot_agents/skills/`)에 있다. 실측 근거는 #169
 
 ---
 

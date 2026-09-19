@@ -39,7 +39,7 @@ jobs:
         run: |
           shopt -s nullglob
           failed=()
-          for dir in dot_codex/skills/*/tests dot_claude/skills/*/tests; do
+          for dir in dot_agents/skills/*/tests dot_codex/skills/*/tests dot_claude/skills/*/tests; do
             skill="$(dirname "$dir")"
             echo "::group::$skill"
             if ! (cd "$skill" && python3 -m unittest discover -s tests -v); then

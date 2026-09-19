@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dispatch agy Workers"
+  short_description: "agy 를 독립 병렬 분석 워커로 호출하고 인용·사용량 검증"
+  default_prompt: "Use $dispatching-agy-workers to run these analysis prompts as parallel agy workers and validate their JSON and quotes."
