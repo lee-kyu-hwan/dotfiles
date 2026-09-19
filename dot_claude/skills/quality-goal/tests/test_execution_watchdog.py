@@ -195,7 +195,12 @@ class WatchdogProcessTestCase(unittest.TestCase):
                 exit_collect_wait_seconds=0.08,
                 abort_grace_seconds=0.03,
                 reap_grace_seconds=0.03,
-                reap_wait_cap_seconds=0.08,
+                # The grace windows stay short so signalling escalates quickly, but the
+                # cap also bounds the wait *after* SIGKILL. At 0.08 only ~50ms remained
+                # for the kernel to reap the child, which a loaded CI runner misses and
+                # the outcome flips to cap_exceeded. Waiting longer costs nothing when
+                # the child does die: _wait_for_exit returns as soon as poll() succeeds.
+                reap_wait_cap_seconds=0.5,
             ),
         )
         self._owned_pgids.extend(outcome.record["residual_pids"])
@@ -832,12 +837,16 @@ class WatchdogAbortAndReapTestCase(WatchdogProcessTestCase):
         self.assertFalse(outcome.record["abort"]["attempted"])
         self.assertEqual(0, outcome.record["retry_consumed"])
 
+    # These two children sleep far longer than the 0.03s reap grace on purpose. If the
+    # child were to exit on its own while a loaded runner is still measuring the grace
+    # window, the reap would record "terminated" and neither assertion below would hold.
+    # SIGKILL ends the child regardless, so the long sleep never slows the suite.
     def test_reap_sends_sigterm_before_sigkill(self):
-        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1)", validator=lambda path: True)
+        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)", validator=lambda path: True)
         self.assertEqual(["SIGTERM", "SIGKILL"], outcome.record["reap"]["signals"])
 
     def test_reap_escalates_to_sigkill_and_records_outcome(self):
-        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(1)", validator=lambda path: True)
+        outcome, _ = self.run_child("import json,pathlib,signal,time; pathlib.Path('result.json').write_text(json.dumps({'ok': True})); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)", validator=lambda path: True)
         self.assertEqual("killed", outcome.record["reap"]["outcome"])
 
     def test_reap_wait_cap_records_residual_and_returns_accepted_result(self):
