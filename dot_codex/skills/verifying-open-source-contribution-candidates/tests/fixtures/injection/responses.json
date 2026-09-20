@@ -129,5 +129,26 @@
       "incomplete_results": false,
       "items": []
     }
+  },
+  "/repos/example-org/.github": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "payload": {
+      "node_id": "NODE-example-org-.github",
+      "full_name": "example-org/.github",
+      "archived": false,
+      "disabled": false,
+      "fork": false,
+      "parent": null,
+      "has_issues": true,
+      "default_branch": "main",
+      "pushed_at": "",
+      "visibility": "public",
+      "license": {
+        "spdx_id": "MIT"
+      }
+    }
   }
 }

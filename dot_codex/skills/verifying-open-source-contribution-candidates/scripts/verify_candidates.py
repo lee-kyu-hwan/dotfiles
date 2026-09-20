@@ -108,6 +108,9 @@ POLICY_KEYWORD_PATTERNS = (
         "Contributor License",
         re.compile(r"\bcontributor license\b", re.IGNORECASE),
     ),
+    ("AI", re.compile(r"\bai\b|\ba\.i\.", re.IGNORECASE)),
+    ("LLM", re.compile(r"\bllms?\b", re.IGNORECASE)),
+    ("Generative", re.compile(r"\bgenerative\b", re.IGNORECASE)),
 )
 
 ACCESS_FAILURE_OUTCOMES = (
@@ -119,6 +122,39 @@ ACCESS_FAILURE_OUTCOMES = (
 
 SEARCH_INDEX_LIMITATION = (
     "GitHub search index delay can omit recently created or updated matches."
+)
+
+SEARCH_COMPLETENESS_LIMITATION = (
+    "A complete duplicate search means every query returned a response, "
+    "not that no duplicate exists."
+)
+
+LOCUS_SEARCH_FIELDS = {
+    "pattern_id",
+    "repository",
+    "locus",
+    "clues",
+    "queries",
+    "complete",
+    "unused_clues",
+    "method_limitations",
+}
+
+POLICY_EVIDENCE_FIELDS = {
+    "repository",
+    "policy_key",
+    "path",
+    "source_repository",
+    "source_url",
+    "content_path",
+}
+
+LOCUS_CLUE_STOPWORDS = frozenset(
+    (
+        "js", "jsx", "ts", "tsx", "mjs", "cjs", "py", "rb", "go", "rs", "java",
+        "md", "mdx", "json", "yaml", "yml", "toml", "txt", "src", "lib", "test",
+        "tests", "docs", "doc", "index", "main", "the", "and", "for",
+    )
 )
 
 ALLOWED_RESPONSE_HEADERS = (
@@ -195,6 +231,10 @@ READINESS_KEYS = (
 POLICY_CHECK_KEYS = (
     "contributing", "issue_template", "pr_template", "security_policy",
     "code_of_conduct", "cla_or_dco", "ai_policy", "program_rules",
+)
+
+REVIEWABLE_POLICY_KEYS = tuple(
+    key for key in POLICY_CHECK_KEYS if key != "program_rules"
 )
 
 POLICY_CHECK_PATHS = {
@@ -996,7 +1036,22 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--manifest", required=True)
     record.add_argument("--markdown-output")
     record.add_argument("--program-rules")
+    record.add_argument("--policy-evidence")
+    record.add_argument("--locus-search")
     record.add_argument("--replace", action="store_true")
+
+    locus_search = subparsers.add_parser("locus-search")
+    locus_search.add_argument("--discovery", required=True)
+    locus_search.add_argument("--assessment", required=True)
+    locus_search.add_argument("--output", required=True)
+    locus_search.add_argument("--manifest", required=True)
+    locus_search.add_argument("--clue", action="append", default=[])
+    locus_search.add_argument("--request-budget", type=_positive_integer, default=300)
+    locus_search.add_argument(
+        "--max-clues-per-locus", type=_positive_integer, default=5
+    )
+    locus_search.add_argument("--api-version", default=DEFAULT_API_VERSION)
+    locus_search.add_argument("--fixture-dir")
 
     recheck = subparsers.add_parser("recheck")
     recheck.add_argument("--candidates", required=True)
@@ -1239,42 +1294,44 @@ def _decode_policy_payload(payload: object) -> Tuple[bytes, int, str]:
     return content, len(content), ""
 
 
+def _policy_placeholder(
+    source_repository: str,
+    policy_path: str,
+    status: str,
+    ref: Optional[str],
+) -> Dict[str, object]:
+    """Return a policy result for a path that produced no usable content."""
+    return {
+        "path": policy_path,
+        "source_repository": source_repository,
+        "status": status,
+        "found": False if status == "absent" else None,
+        "sha256": None,
+        "size": None,
+        "entry_count": None,
+        "excerpt": None,
+        "truncated": False,
+        "url": None,
+        "ref": ref,
+        "keyword_hits": [],
+    }
+
+
 def _policy_result(
     source_repository: str,
     policy_path: str,
     request_path: str,
     response: ApiResponse,
     warnings: List[str],
+    ref: Optional[str] = None,
 ) -> Dict[str, object]:
     if response.status == 404:
-        return {
-            "path": policy_path,
-            "source_repository": source_repository,
-            "status": "absent",
-            "found": False,
-            "sha256": None,
-            "size": None,
-            "entry_count": None,
-            "excerpt": None,
-            "truncated": False,
-            "url": None,
-            "keyword_hits": [],
-        }
+        return _policy_placeholder(source_repository, policy_path, "absent", ref)
     if not 200 <= response.status < 300:
         _append_response_warning(warnings, response, request_path)
-        return {
-            "path": policy_path,
-            "source_repository": source_repository,
-            "status": "request-failed",
-            "found": False,
-            "sha256": None,
-            "size": None,
-            "entry_count": None,
-            "excerpt": None,
-            "truncated": False,
-            "url": None,
-            "keyword_hits": [],
-        }
+        return _policy_placeholder(
+            source_repository, policy_path, "request-failed", ref
+        )
     if isinstance(response.payload, list):
         names = sorted(
             item["name"]
@@ -1303,6 +1360,7 @@ def _policy_result(
             "excerpt": excerpt,
             "truncated": truncated,
             "url": request_path,
+            "ref": ref,
             "keyword_hits": keyword_hits,
         }
     if (
@@ -1311,19 +1369,9 @@ def _policy_result(
         or not isinstance(response.payload.get("content"), str)
     ):
         _append_invalid_payload_warning(warnings, request_path, "policy")
-        return {
-            "path": policy_path,
-            "source_repository": source_repository,
-            "status": "request-failed",
-            "found": False,
-            "sha256": None,
-            "size": None,
-            "entry_count": None,
-            "excerpt": None,
-            "truncated": False,
-            "url": None,
-            "keyword_hits": [],
-        }
+        return _policy_placeholder(
+            source_repository, policy_path, "request-failed", ref
+        )
     content, size, url = _decode_policy_payload(response.payload)
     decoded = content.decode("utf-8", errors="replace")
     excerpt_text = decoded[:4000]
@@ -1344,8 +1392,30 @@ def _policy_result(
         "excerpt": excerpt,
         "truncated": truncated,
         "url": url or request_path,
+        "ref": ref,
         "keyword_hits": keyword_hits,
     }
+
+
+def _policy_source_ref(
+    client: object, source_repository: str, warnings: List[str]
+) -> Tuple[Optional[str], str]:
+    """Resolve the default branch of a policy source repository."""
+    endpoint = "/repos/" + source_repository
+    response = client.get_json(endpoint)
+    if 200 <= response.status < 300 and isinstance(response.payload, dict):
+        branch = response.payload.get("default_branch")
+        if isinstance(branch, str) and branch:
+            return branch, "found"
+        _append_invalid_payload_warning(warnings, endpoint, "policy-source")
+        return None, "request-failed"
+    if response.status == 404:
+        warning = "policy-source-absent:%s" % source_repository
+        if warning not in warnings:
+            warnings.append(warning)
+        return None, "absent"
+    _append_response_warning(warnings, response, endpoint)
+    return None, "request-failed"
 
 
 def discover_policy_files(
@@ -1355,18 +1425,51 @@ def discover_policy_files(
     warnings: List[str],
 ) -> List[Dict[str, object]]:
     owner = repository.split("/", 1)[0]
+    organization_repository = owner + "/.github"
     results = []
-    for source_repository in (repository, owner + "/.github"):
-        for policy_path in POLICY_PATHS:
-            endpoint = "/repos/%s/contents/%s" % (source_repository, policy_path)
-            params = {"ref": default_branch}
-            response = client.get_json(endpoint, params)
-            request_path = _request_path(endpoint, params)
-            results.append(
-                _policy_result(
-                    source_repository, policy_path, request_path, response, warnings
-                )
+    for policy_path in POLICY_PATHS:
+        endpoint = "/repos/%s/contents/%s" % (repository, policy_path)
+        params = {"ref": default_branch}
+        response = client.get_json(endpoint, params)
+        request_path = _request_path(endpoint, params)
+        results.append(
+            _policy_result(
+                repository,
+                policy_path,
+                request_path,
+                response,
+                warnings,
+                default_branch,
             )
+        )
+    if organization_repository == repository:
+        return results
+    organization_ref, source_status = _policy_source_ref(
+        client, organization_repository, warnings
+    )
+    if organization_ref is None:
+        results.extend(
+            _policy_placeholder(
+                organization_repository, policy_path, source_status, None
+            )
+            for policy_path in POLICY_PATHS
+        )
+        return results
+    for policy_path in POLICY_PATHS:
+        endpoint = "/repos/%s/contents/%s" % (organization_repository, policy_path)
+        params = {"ref": organization_ref}
+        response = client.get_json(endpoint, params)
+        request_path = _request_path(endpoint, params)
+        results.append(
+            _policy_result(
+                organization_repository,
+                policy_path,
+                request_path,
+                response,
+                warnings,
+                organization_ref,
+            )
+        )
     return results
 
 
@@ -1558,7 +1661,10 @@ def discover_duplicate_search(
         "queries": queries,
         "complete": complete,
         "unused_clues": list(clues[len(used):]),
-        "method_limitations": [SEARCH_INDEX_LIMITATION],
+        "method_limitations": [
+            SEARCH_INDEX_LIMITATION,
+            SEARCH_COMPLETENESS_LIMITATION,
+        ],
     }
 
 
@@ -2445,8 +2551,11 @@ def _assessment_gate_violations(
     assessment: Dict[str, object],
     discovery_record: Dict[str, object],
     program_rules_sha256: Optional[str],
+    manual_policy_shas: Optional[Dict[str, set]] = None,
+    locus_search_index: Optional[Dict[Tuple[object, object, object], object]] = None,
 ) -> List[str]:
     violations = []
+    manual_policy_shas = manual_policy_shas or {}
     status = assessment.get("status")
     reason = assessment.get("status_reason")
     if status not in STATUS_REASON_TABLE or reason not in STATUS_REASON_TABLE.get(status, ()):
@@ -2493,20 +2602,31 @@ def _assessment_gate_violations(
     duplicate = duplicate if isinstance(duplicate, dict) else {}
     open_check = readiness.get("open_and_closed_searched")
     open_confirmed = isinstance(open_check, dict) and open_check.get("result") == "confirmed"
-    policy_review = readiness.get("policy_files_reviewed")
-    policy_review_confirmed = (
-        isinstance(policy_review, dict)
-        and policy_review.get("result") == "confirmed"
-    )
-    if (
-        status in ("issue-ready", "pr-ready")
-        and policy_review_confirmed
-        and _policy_request_failure_keys(
-            discovery_record.get("repository"),
-            discovery_record.get("policy_files"),
-        )
+    if status in READY_STATUSES and _policy_request_failure_keys(
+        discovery_record.get("repository"),
+        discovery_record.get("policy_files"),
     ):
         violations.append("policy_files_reviewed: request-failed policy observation")
+    if status in READY_STATUSES and not str(assessment.get("locus") or "").strip():
+        violations.append("locus: a ready status requires a locus")
+    if status in READY_STATUSES:
+        entry = None
+        if locus_search_index is not None:
+            entry = locus_search_index.get(
+                (
+                    assessment.get("pattern_id"),
+                    assessment.get("repository"),
+                    assessment.get("locus"),
+                )
+            )
+        if locus_search_index is None:
+            violations.append("locus_search: missing locus search input")
+        elif entry is None:
+            violations.append("locus_search: no search for this locus")
+        elif entry.get("complete") is not True:
+            violations.append("locus_search: incomplete locus search")
+        elif not entry.get("clues"):
+            violations.append("locus_search: no usable locus clue")
     if duplicate.get("complete") is not True and open_confirmed:
         violations.append("open_and_closed_searched")
     if assessment.get("sensitivity") == "security-sensitive" and status in ("issue-ready", "pr-ready"):
@@ -2583,6 +2703,14 @@ def _assessment_gate_violations(
             violations.append("policy_checks.%s.found" % key)
         if item.get("source") is not None and not isinstance(item.get("source"), str):
             violations.append("policy_checks.%s.source" % key)
+        if item.get("found") is True and not str(item.get("source") or "").strip():
+            violations.append("policy_checks.%s.source" % key)
+        if (
+            status in READY_STATUSES
+            and key != "program_rules"
+            and item.get("found") is None
+        ):
+            violations.append("policy_checks.%s.found: policy not reviewed" % key)
         if item.get("sha256") is not None and (
             not isinstance(item.get("sha256"), str)
             or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
@@ -2593,7 +2721,7 @@ def _assessment_gate_violations(
         if not _is_string_list(item.get("evidence_links")):
             violations.append("policy_checks.%s.evidence_links" % key)
         if item.get("found") is True and key != "program_rules":
-            allowed_shas = set()
+            allowed_shas = set(manual_policy_shas.get(key, set()))
             for path in POLICY_CHECK_PATHS.get(key, ()):
                 allowed_shas.update(discovered_shas.get(path, set()))
             if item.get("sha256") not in allowed_shas:
@@ -2893,6 +3021,186 @@ def _program_rules_input(path: Optional[str]) -> Tuple[Optional[str], Optional[D
     }
 
 
+def _policy_evidence_input(
+    path: Optional[str],
+) -> Tuple[Dict[Tuple[str, str], set], Optional[List[Dict[str, object]]]]:
+    """Read hand-reviewed policy observations and bind them to local bytes."""
+    if path is None:
+        return {}, None
+    if re.match(r"\A[a-z]+://", path):
+        raise CliInputError(
+            "policy-evidence must be a local file path, not a URL"
+        )
+    document = _read_json_file(path, "policy-evidence")
+    if set(document) != {"schema_version", "observations"}:
+        raise CliInputError(
+            "policy-evidence: expected schema_version and observations"
+        )
+    if document.get("schema_version") != "1.0.0":
+        raise CliInputError("policy-evidence.schema_version: unsupported")
+    observations = document.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise CliInputError(
+            "policy-evidence.observations: expected a non-empty array"
+        )
+    shas = {}  # type: Dict[Tuple[str, str], set]
+    entries = []
+    for index, observation in enumerate(observations):
+        location = "policy-evidence.observations[%d]" % index
+        if not isinstance(observation, dict) or set(observation) != POLICY_EVIDENCE_FIELDS:
+            raise CliInputError(location + ": unsupported fields")
+        repository = observation.get("repository")
+        if not isinstance(repository, str) or REPOSITORY_PATTERN.fullmatch(repository) is None:
+            raise CliInputError(location + ".repository: expected owner/name")
+        policy_key = observation.get("policy_key")
+        if policy_key not in REVIEWABLE_POLICY_KEYS:
+            raise CliInputError(location + ".policy_key: unsupported policy key")
+        source_repository = observation.get("source_repository")
+        if not isinstance(source_repository, str) or REPOSITORY_PATTERN.fullmatch(source_repository) is None:
+            raise CliInputError(location + ".source_repository: expected owner/name")
+        policy_path = observation.get("path")
+        if not isinstance(policy_path, str) or not policy_path.strip():
+            raise CliInputError(location + ".path: expected a non-empty string")
+        source_url = observation.get("source_url")
+        if source_url is not None and not isinstance(source_url, str):
+            raise CliInputError(location + ".source_url: expected string or null")
+        content_path = observation.get("content_path")
+        if not isinstance(content_path, str) or re.match(r"\A[a-z]+://", content_path):
+            raise CliInputError(
+                location + ".content_path: expected a local file path"
+            )
+        try:
+            content = Path(content_path).read_bytes()
+        except OSError as error:
+            raise CliInputError(
+                location + ".content_path: unable to read local file: %s" % error
+            ) from error
+        digest = _sha256_bytes(content)
+        shas.setdefault((repository, policy_key), set()).add(digest)
+        decoded = content.decode("utf-8", errors="replace")
+        excerpt_text = decoded[:4000]
+        entries.append(
+            {
+                "repository": repository,
+                "policy_key": policy_key,
+                "path": policy_path,
+                "source_repository": source_repository,
+                "source_url": source_url,
+                "sha256": digest,
+                "excerpt": _untrusted_text(
+                    excerpt_text,
+                    source_url or content_path,
+                    len(decoded) > len(excerpt_text),
+                ),
+            }
+        )
+    return shas, entries
+
+
+def _locus_clues(locus: object) -> List[str]:
+    """Derive deterministic search clues from an assessed locus."""
+    if not isinstance(locus, str):
+        return []
+    clues = []
+    for token in re.split(r"[^A-Za-z0-9_$-]+", locus):
+        if not token or token.lower() in LOCUS_CLUE_STOPWORDS:
+            continue
+        if len(token) < 3:
+            continue
+        if token.isdigit():
+            continue
+        if token not in clues:
+            clues.append(token)
+    return [clue for clue in clues if _safe_search_clue(clue)]
+
+
+def _read_locus_search(
+    path: Optional[str], discovery_sha256: str
+) -> Optional[Dict[Tuple[object, object, object], Dict[str, object]]]:
+    """Read the locus search document and index it by combination and locus."""
+    if path is None:
+        return None
+    document = _read_json_file(path, "locus-search")
+    if set(document) != {
+        "schema_version", "generated_by", "discovery_sha256", "searches", "status"
+    }:
+        raise CliInputError(
+            "locus-search: expected schema_version, generated_by, "
+            "discovery_sha256, searches, status"
+        )
+    if document.get("schema_version") != "1.0.0":
+        raise CliInputError("locus-search.schema_version: unsupported")
+    if document.get("discovery_sha256") != discovery_sha256:
+        raise CliInputError("locus-search.discovery_sha256 does not match discovery")
+    searches = document.get("searches")
+    if not isinstance(searches, list):
+        raise CliInputError("locus-search.searches: expected array")
+    index = {}  # type: Dict[Tuple[object, object, object], Dict[str, object]]
+    for position, search in enumerate(searches):
+        location = "locus-search.searches[%d]" % position
+        if not isinstance(search, dict) or set(search) != LOCUS_SEARCH_FIELDS:
+            raise CliInputError(location + ": unsupported fields")
+        if not _is_string_list(search.get("clues")):
+            raise CliInputError(location + ".clues: expected an array of strings")
+        if not isinstance(search.get("queries"), list):
+            raise CliInputError(location + ".queries: expected array")
+        if search.get("complete") not in (True, False):
+            raise CliInputError(location + ".complete: expected boolean")
+        repository = search.get("repository")
+        if not isinstance(repository, str):
+            raise CliInputError(location + ".repository: expected string")
+        for query in search["queries"]:
+            if not isinstance(query, dict) or not _trusted_duplicate_query(
+                repository, query.get("q")
+            ):
+                raise CliInputError(location + ".queries: untrusted query")
+        key = (
+            search.get("pattern_id"), repository, search.get("locus")
+        )
+        if key in index:
+            raise CliInputError(location + ": duplicate locus search")
+        index[key] = search
+    return index
+
+
+def _merged_duplicate_search(
+    discovery_duplicate: object, locus_search: Optional[Dict[str, object]]
+) -> Dict[str, object]:
+    """Combine the pattern-level and locus-level duplicate search evidence."""
+    merged = json.loads(json.dumps(discovery_duplicate))
+    if not isinstance(merged, dict):
+        merged = {}
+    queries = list(merged.get("queries") or [])
+    limitations = list(merged.get("method_limitations") or [])
+    unused = list(merged.get("unused_clues") or [])
+    locus_clues = list(merged.get("locus_clues") or [])
+    complete = merged.get("complete") is True
+    if locus_search is not None:
+        seen = {
+            query.get("q") for query in queries if isinstance(query, dict)
+        }
+        for query in locus_search.get("queries", []):
+            if isinstance(query, dict) and query.get("q") not in seen:
+                seen.add(query.get("q"))
+                queries.append(json.loads(json.dumps(query)))
+        for clue in locus_search.get("clues", []):
+            if clue not in locus_clues:
+                locus_clues.append(clue)
+        for clue in locus_search.get("unused_clues", []):
+            if clue not in unused:
+                unused.append(clue)
+        complete = complete and locus_search.get("complete") is True
+    for limitation in (SEARCH_INDEX_LIMITATION, SEARCH_COMPLETENESS_LIMITATION):
+        if limitation not in limitations:
+            limitations.append(limitation)
+    merged["queries"] = queries
+    merged["complete"] = complete
+    merged["unused_clues"] = unused
+    merged["locus_clues"] = locus_clues
+    merged["method_limitations"] = limitations
+    return merged
+
+
 def _run_outcome(records: Sequence[Dict[str, object]]) -> str:
     if not records:
         return "no-candidates"
@@ -2904,6 +3212,8 @@ def _run_outcome(records: Sequence[Dict[str, object]]) -> str:
 def _markdown_cell(value: object) -> str:
     if value is None:
         return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, (list, tuple)):
         text = ", ".join(str(item) for item in value)
     else:
@@ -2952,6 +3262,17 @@ def _fenced_untrusted_excerpt(excerpt: Dict[str, object]) -> List[str]:
         fence,
         "",
     ]
+
+
+def _latest_snapshot_evidence(record: Dict[str, object]) -> Dict[str, object]:
+    history = record.get("verification_history")
+    if not isinstance(history, list) or not history:
+        return {}
+    latest = history[-1]
+    if not isinstance(latest, dict):
+        return {}
+    evidence = latest.get("evidence")
+    return evidence if isinstance(evidence, dict) else {}
 
 
 def _latest_manifest_run(manifest: Optional[Dict[str, object]]) -> Dict[str, object]:
@@ -3066,6 +3387,29 @@ def render_markdown(
         lines.append("- Failed scopes: none")
     lines.append("")
 
+    lines.extend([
+        "## Candidates",
+        "",
+        "| candidate_id | repository | locus | status | summary |",
+        "|---|---|---|---|---|",
+    ])
+    if records:
+        for record in records:
+            lines.append(
+                "| %s | %s | %s | %s / %s | %s |"
+                % (
+                    _markdown_cell(record.get("candidate_id")),
+                    _markdown_cell(record.get("repository")),
+                    _markdown_cell(record.get("locus")),
+                    _markdown_cell(record.get("status")),
+                    _markdown_cell(record.get("status_reason")),
+                    _markdown_cell(record.get("summary")),
+                )
+            )
+    else:
+        lines.append("| none | none | none | none | none |")
+    lines.append("")
+
     for record in records:
         candidate_id = _markdown_cell(record.get("candidate_id"))
         lines.extend([
@@ -3080,9 +3424,68 @@ def render_markdown(
                 _markdown_cell(record.get("status_reason")),
             ),
             "| repository | %s |" % _markdown_cell(record.get("repository")),
+            "| locus | %s |" % _markdown_cell(record.get("locus")),
+            "| pattern_ids | %s |" % _markdown_cell(record.get("pattern_ids")),
+            "| summary | %s |" % _markdown_cell(record.get("summary")),
+            "| impact | %s |" % _markdown_cell(record.get("impact")),
+            "| sensitivity | %s |" % _markdown_cell(record.get("sensitivity")),
+            "| ai_policy_status | %s |"
+            % _markdown_cell(record.get("ai_policy_status")),
+            "| disclosure_required | %s |"
+            % _markdown_cell(record.get("disclosure_required")),
             "| verified_base_sha | %s |"
             % _markdown_cell(record.get("verified_base_sha")),
             "| verified_at | %s |" % _markdown_cell(record.get("verified_at")),
+            "",
+            "### Policy verdict",
+            "",
+            "| check | found | source | assessment |",
+            "|---|---|---|---|",
+        ])
+        policy_checks = record.get("policy_checks")
+        policy_checks = policy_checks if isinstance(policy_checks, dict) else {}
+        for key in POLICY_CHECK_KEYS:
+            item = policy_checks.get(key)
+            item = item if isinstance(item, dict) else {}
+            found = item.get("found")
+            lines.append(
+                "| %s | %s | %s | %s |"
+                % (
+                    _markdown_cell(key),
+                    "not-reviewed" if found is None else _markdown_cell(found),
+                    _markdown_cell(item.get("source")),
+                    _markdown_cell(item.get("assessment")),
+                )
+            )
+        duplicate_search = record.get("duplicate_search")
+        duplicate_search = (
+            duplicate_search if isinstance(duplicate_search, dict) else {}
+        )
+        queries = duplicate_search.get("queries")
+        queries = queries if isinstance(queries, list) else []
+        locus_clues = duplicate_search.get("locus_clues")
+        locus_clues = locus_clues if isinstance(locus_clues, list) else []
+        verdict = _latest_snapshot_evidence(record).get("duplicate_verdict")
+        verdict = verdict if isinstance(verdict, dict) else {}
+        matched = verdict.get("matched_items")
+        matched = matched if isinstance(matched, list) else []
+        lines.extend([
+            "",
+            "### Duplicate search",
+            "",
+            "- Queries: %d (every query returned: `%s`)"
+            % (len(queries), _markdown_cell(duplicate_search.get("complete"))),
+            "- Locus clues: %s"
+            % (
+                ", ".join("`%s`" % _markdown_cell(clue) for clue in locus_clues)
+                if locus_clues
+                else "none — the locus was not searched again"
+            ),
+            "- Verdict: %s"
+            % (_markdown_cell(verdict.get("judgment")) or "none"),
+            "- Matched items: %s"
+            % (_markdown_cell(matched) if matched else "none"),
+            "- %s" % SEARCH_COMPLETENESS_LIMITATION,
             "",
             "### Evidence links",
             "",
@@ -3170,6 +3573,10 @@ def run_record(arguments: argparse.Namespace, *, clock: Callable[[], float]) -> 
     if assessment_document["discovery_sha256"] != discovery_sha256:
         raise CliInputError("assessment.discovery_sha256 does not match discovery")
     program_rules_sha256, program_rules_input = _program_rules_input(arguments.program_rules)
+    manual_policy_shas, policy_evidence_input = _policy_evidence_input(
+        arguments.policy_evidence
+    )
+    locus_search_index = _read_locus_search(arguments.locus_search, discovery_sha256)
 
     discovery_by_combo = {}
     for record in discovery["records"]:
@@ -3195,7 +3602,18 @@ def run_record(arguments: argparse.Namespace, *, clock: Callable[[], float]) -> 
             gate_violations.append("assessments[%d]: duplicate candidate_key" % index)
         seen_keys.add(key)
         assessed_by_combo.setdefault(combo, []).append(assessment)
-        for violation in _assessment_gate_violations(assessment, record, program_rules_sha256):
+        repository_policy_shas = {
+            key: values
+            for (repository, key), values in manual_policy_shas.items()
+            if repository == assessment.get("repository")
+        }
+        for violation in _assessment_gate_violations(
+            assessment,
+            record,
+            program_rules_sha256,
+            repository_policy_shas,
+            locus_search_index,
+        ):
             gate_violations.append("assessments[%d].%s" % (index, violation))
     if gate_violations:
         raise CliInputError("; ".join(gate_violations))
@@ -3251,7 +3669,18 @@ def run_record(arguments: argparse.Namespace, *, clock: Callable[[], float]) -> 
                 "policy_checks": json.loads(json.dumps(assessment["policy_checks"])),
                 "blocking_gaps": list(assessment["blocking_gaps"]),
                 "superseded_by": assessment["superseded_by"],
-                "duplicate_search": json.loads(json.dumps(discovery_record["duplicate_search"])),
+                "duplicate_search": _merged_duplicate_search(
+                    discovery_record["duplicate_search"],
+                    None
+                    if locus_search_index is None
+                    else locus_search_index.get(
+                        (
+                            assessment["pattern_id"],
+                            discovery_record["repository"],
+                            assessment["locus"],
+                        )
+                    ),
+                ),
                 "repository_checks": json.loads(json.dumps(discovery_record["repository_checks"])),
                 "verification_history": history,
                 "verified_at": discovery_record["observed_at"],
@@ -3293,6 +3722,15 @@ def run_record(arguments: argparse.Namespace, *, clock: Callable[[], float]) -> 
         "discovery_sha256": discovery_sha256,
         "assessment_sha256": assessment_sha256,
         "program_rules": program_rules_input,
+        "policy_evidence": policy_evidence_input,
+        "locus_search": (
+            None
+            if arguments.locus_search is None
+            else {
+                "path": arguments.locus_search,
+                "sha256": _file_sha256(arguments.locus_search),
+            }
+        ),
     }
     run = {
         "run_id": "RUN-%03d" % (len(manifest["runs"]) + 1), "command": "record",
@@ -3461,7 +3899,11 @@ def _recheck_duplicate_search(
         "queries": queries,
         "complete": complete,
         "unused_clues": list(previous.get("unused_clues", [])),
-        "method_limitations": [SEARCH_INDEX_LIMITATION],
+        "locus_clues": list(previous.get("locus_clues", [])),
+        "method_limitations": [
+            SEARCH_INDEX_LIMITATION,
+            SEARCH_COMPLETENESS_LIMITATION,
+        ],
     }
 
 
@@ -3845,6 +4287,207 @@ def run_recheck(
     return 3 if partial else 0
 
 
+def run_locus_search(
+    arguments: argparse.Namespace,
+    *,
+    runner: Callable[..., Any],
+    sleeper: Callable[[float], None],
+    clock: Callable[[], float],
+) -> int:
+    """Search again with clues derived from each assessed locus."""
+    discovery = _read_json_file(arguments.discovery, "discovery")
+    _validate_discovery_document(discovery)
+    assessment_document = _read_assessment(arguments.assessment)
+    discovery_sha256 = _file_sha256(arguments.discovery)
+    assessment_sha256 = _file_sha256(arguments.assessment)
+    if assessment_document["discovery_sha256"] != discovery_sha256:
+        raise CliInputError("assessment.discovery_sha256 does not match discovery")
+    for clue in arguments.clue:
+        if not _safe_search_clue(clue):
+            raise CliInputError("clue: unsupported characters: %s" % clue)
+    known_combinations = {
+        (record.get("pattern_id"), record.get("repository"))
+        for record in discovery["records"]
+        if isinstance(record, dict)
+    }
+    ordered_repositories = []
+    for record in discovery["records"]:
+        repository = record.get("repository") if isinstance(record, dict) else None
+        if isinstance(repository, str) and repository not in ordered_repositories:
+            ordered_repositories.append(repository)
+
+    started_at = _utc_observation(clock)
+    budget = RequestBudget(arguments.request_budget)
+    if arguments.fixture_dir:
+        try:
+            client = FixtureTransport(
+                Path(arguments.fixture_dir),
+                budget=budget,
+                sleeper=sleeper,
+                clock=clock,
+            )
+        except ValueError as error:
+            raise CliInputError(str(error)) from error
+    else:
+        client = GhApiClient(
+            runner=runner,
+            sleeper=sleeper,
+            clock=clock,
+            budget=budget,
+            api_version=arguments.api_version,
+        )
+
+    searches = []
+    warnings = []  # type: List[str]
+    searched_repositories = []  # type: List[str]
+    seen = set()
+    partial = False
+    exhausted = False
+    for index, assessment in enumerate(assessment_document["assessments"]):
+        pattern_id = assessment.get("pattern_id")
+        repository = assessment.get("repository")
+        locus = assessment.get("locus")
+        key = (pattern_id, repository, locus)
+        if key in seen:
+            raise CliInputError(
+                "assessment.assessments[%d]: duplicate pattern, repository, and locus"
+                % index
+            )
+        seen.add(key)
+        if (pattern_id, repository) not in known_combinations:
+            continue
+        if not str(locus or "").strip():
+            continue
+        clues = _locus_clues(locus)
+        for clue in arguments.clue:
+            if clue not in clues:
+                clues.append(clue)
+        used = clues[:arguments.max_clues_per_locus]
+        if not used:
+            partial = True
+            warning = "locus-clue-unavailable:%s" % repository
+            if warning not in warnings:
+                warnings.append(warning)
+            searches.append(
+                {
+                    "pattern_id": pattern_id,
+                    "repository": repository,
+                    "locus": locus,
+                    "clues": [],
+                    "queries": [],
+                    "complete": False,
+                    "unused_clues": [],
+                    "method_limitations": [
+                        SEARCH_INDEX_LIMITATION,
+                        SEARCH_COMPLETENESS_LIMITATION,
+                    ],
+                }
+            )
+            continue
+        if exhausted:
+            partial = True
+            continue
+        try:
+            result = discover_duplicate_search(
+                client,
+                str(repository),
+                clues,
+                arguments.max_clues_per_locus,
+                warnings,
+            )
+        except BudgetExhausted:
+            exhausted = True
+            partial = True
+            if "budget-exhausted" not in warnings:
+                warnings.append("budget-exhausted")
+            continue
+        if repository not in searched_repositories:
+            searched_repositories.append(str(repository))
+        if result["complete"] is not True:
+            partial = True
+        searches.append(
+            {
+                "pattern_id": pattern_id,
+                "repository": repository,
+                "locus": locus,
+                "clues": used,
+                "queries": result["queries"],
+                "complete": result["complete"],
+                "unused_clues": result["unused_clues"],
+                "method_limitations": result["method_limitations"],
+            }
+        )
+
+    status = "partial" if partial else "complete"
+    generated_by = {
+        "name": "verifying-open-source-contribution-candidates",
+        "revision": compute_revision(),
+    }
+    document = {
+        "schema_version": "1.0.0",
+        "generated_by": generated_by,
+        "discovery_sha256": discovery_sha256,
+        "searches": searches,
+        "status": status,
+    }
+    completed_at = _utc_observation(clock)
+    manifest_path = Path(arguments.manifest)
+    manifest = _manifest_document(manifest_path, generated_by)
+    repositories = [
+        {
+            "repository": repository,
+            "outcome": "checked" if repository in searched_repositories else (
+                "budget-exhausted" if exhausted else "checked"
+            ),
+            "reason": None if repository in searched_repositories else (
+                "budget-exhausted" if exhausted else "no-locus"
+            ),
+            "stages_completed": (
+                ["duplicate_search"] if repository in searched_repositories else []
+            ),
+            "head_sha": None,
+        }
+        for repository in ordered_repositories
+    ]
+    run = {
+        "run_id": "RUN-%03d" % (len(manifest["runs"]) + 1),
+        "command": "locus-search",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "inputs": {
+            "discovery_sha256": discovery_sha256,
+            "assessment_sha256": assessment_sha256,
+            "extra_clues": list(arguments.clue),
+        },
+        "budget": {
+            "request_limit": arguments.request_budget,
+            "requests_consumed": budget.consumed,
+            "per_repo_cap": None,
+            "total_cap": arguments.max_clues_per_locus,
+        },
+        "repositories": repositories,
+        "clones": [],
+        "failed_scopes": [],
+        "retry_events": list(client.request_events),
+        "method_limitations": [
+            SEARCH_INDEX_LIMITATION,
+            SEARCH_COMPLETENESS_LIMITATION,
+        ],
+        "warnings": warnings,
+        "status": status,
+        "outcome": "searched" if searches else "no-locus",
+    }
+    if _has_secret_like_string([document, run]):
+        if "secret-like-string-redacted" not in warnings:
+            warnings.append("secret-like-string-redacted")
+        run["warnings"] = warnings
+    manifest["runs"].append(run)
+    write_json_atomic(Path(arguments.output), document)
+    write_json_atomic(manifest_path, manifest)
+    print("%s: searched %d loci" % (status, len(searches)))
+    return 3 if partial else 0
+
+
 def _stub(command: str) -> int:
     _write_stderr("%s is not implemented yet" % command)
     return 2
@@ -3873,6 +4516,13 @@ def main(
             return run_discover(
                 arguments,
                 analysis,
+                runner=runner,
+                sleeper=sleeper,
+                clock=clock,
+            )
+        elif arguments.command == "locus-search":
+            return run_locus_search(
+                arguments,
                 runner=runner,
                 sleeper=sleeper,
                 clock=clock,

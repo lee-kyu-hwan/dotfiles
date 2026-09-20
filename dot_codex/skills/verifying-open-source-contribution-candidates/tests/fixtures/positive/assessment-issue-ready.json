@@ -2,5 +2,5 @@
   "status": "issue-ready",
   "status_reason": "ready",
   "sensitivity": "normal",
-  "locus": ""
+  "locus": "lib/rules/example-boundary.js#ExampleBoundary"
 }

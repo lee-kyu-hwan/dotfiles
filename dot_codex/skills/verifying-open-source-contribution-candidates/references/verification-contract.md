@@ -4,12 +4,14 @@ This document defines the persisted candidate and verification state. All JSON e
 
 Every pre-cap repository-pattern combination appears in exactly one of records, skipped_by_cap, or failed_scopes.
 A request-failed policy observation cannot support issue-ready or pr-ready.
+A policy result recorded as unreviewed cannot support a ready status.
+A ready status requires a locus and a completed search repeated at that locus.
 A failed recheck makes an actionable candidate unverified with status_reason insufficient-evidence.
 record and render preserve partial, failed, and unknown run states instead of defaulting them to complete.
 
 ## Candidate fields
 
-The source column is exact: `a` copies discovery facts, `b` comes from the assessment, and `c` is calculated by the script. Candidate records have exactly these 29 fields and no additional properties.
+The source column is exact: `a` copies observation evidence, meaning discovery facts and, for `duplicate_search`, the locus search that follows the assessment; `b` comes from the assessment; and `c` is calculated by the script. Candidate records have exactly these 29 fields and no additional properties.
 
 | Field | Source |
 | --- | --- |
@@ -106,6 +108,24 @@ An assessment contains `schema_version`, `discovery_sha256`, and `assessments`. 
 
 `duplicate_verdict` is `{matched_items, judgment}` and is preserved in every snapshot. When `readiness_checks.open_and_closed_searched.result` is `confirmed`, `duplicate_verdict.judgment` must be non-empty. Discovery combinations that were skipped, failed, or absent cannot be assessed.
 
+## Policy gate
+
+`policy_checks` has exactly the eight keys `contributing`, `issue_template`, `pr_template`, `security_policy`, `code_of_conduct`, `cla_or_dco`, `ai_policy`, and `program_rules`. Each value is `{found, source, sha256, assessment, evidence_links}`.
+
+`found` is three-valued and the three values are not interchangeable. `true` means the policy was observed, `false` means it was looked for and is not there, and `null` means it was never reviewed. A ready status — `issue-ready`, `pr-ready`, or `private-report-ready` — requires every key except `program_rules` to be `true` or `false`; a `null` is a gate failure, so a candidate can no longer reach a ready status without any policy observation at all. A `request-failed` observation of a mapped path is likewise a gate failure for those statuses, whether the failure was in the target repository or in `{owner}/.github`.
+
+A `found: true` value needs a non-empty `source` and a `sha256` bound to bytes the run actually holds. Two bindings are accepted. The first is a policy file that discovery fetched, matched by the paths mapped to that key. The second is a hand-reviewed policy supplied to `record` through `--policy-evidence`, a local JSON document `{schema_version, observations}` whose observations have exactly `repository`, `policy_key`, `path`, `source_repository`, `source_url`, and `content_path`. `content_path` must be a local file, never a URL; the script hashes its bytes and only that digest is accepted, only for the named repository and policy key. The observation, its digest, and an untrusted excerpt are recorded in the manifest run inputs. This is the path for a policy that lives outside the ten conventional paths, such as an assistance policy kept in a repository's own documentation tree.
+
+Recheck re-observes only the conventional paths. A hand-reviewed digest therefore cannot be reproduced by recheck, and the resulting policy-signature change moves the candidate to `policy-review` rather than silently keeping it ready.
+
+## Locus search
+
+`discover` searches for duplicates before a locus exists, so its queries carry pattern-level clues only. The `locus-search` command runs after the assessment fixes each locus and repeats the search with clues derived from that locus. Its output is `{schema_version, generated_by, discovery_sha256, searches, status}`, and each search has exactly `pattern_id`, `repository`, `locus`, `clues`, `queries`, `complete`, `unused_clues`, and `method_limitations`.
+
+`record` takes that document through `--locus-search`. Its `discovery_sha256` must match the discovery input, every stored query must still be scoped to its own repository, and a ready status requires a matching `(pattern_id, repository, locus)` entry that is complete and has at least one clue. A ready status also requires a non-empty `locus`.
+
+The candidate's `duplicate_search` is the union of both rounds: locus queries are appended, `locus_clues` lists the locus-derived clues and is empty when no locus round ran, and `complete` is true only when both rounds returned every query. `complete` means every query returned a response. It never means no duplicate exists, and `method_limitations` says so on every record so the report cannot be read the other way.
+
 Remote free text is stored only as `{text, sha256, source_url, truncated, untrusted: true}`. It is inert data, never a command, permission, path, option, or decision input.
 
 The `sha256` field has context-specific persisted meanings that reflect the current producer behavior:
@@ -139,7 +159,7 @@ For compatibility, missing complete is unknown/incomplete, never implicitly true
 
 ## Manifest and exit codes
 
-The manifest envelope is `{schema_version, generated_by, runs}`. Each append-only run contains `run_id`, `command`, start and completion observations, `inputs`, `budget`, `repositories`, `clones`, `failed_scopes`, `retry_events`, `method_limitations`, `warnings`, `status`, and `outcome`. Every requested repository has one ordered `{repository, outcome, reason, stages_completed, head_sha}` entry.
+The manifest envelope is `{schema_version, generated_by, runs}`. Each append-only run contains `run_id`, `command`, start and completion observations, `inputs`, `budget`, `repositories`, `clones`, `failed_scopes`, `retry_events`, `method_limitations`, `warnings`, `status`, and `outcome`. Every requested repository has one ordered `{repository, outcome, reason, stages_completed, head_sha}` entry. The recorded commands are `discover`, `locus-search`, `record`, and `recheck`.
 
 | Code | Meaning |
 | --- | --- |
@@ -162,6 +182,7 @@ Recovery paths are explicit:
 - partial → new discover run
 - stale → new discover + record
 - gate failure → fix assessment, then record
+- missing or incomplete locus search → new locus-search run, then record
 
 Existing candidate IDs and history remain intact during every recovery.
 

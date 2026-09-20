@@ -117,6 +117,8 @@ class SkillContractTests(unittest.TestCase):
         required_behavior = (
             "Every pre-cap repository-pattern combination appears in exactly one of records, skipped_by_cap, or failed_scopes.",
             "A request-failed policy observation cannot support issue-ready or pr-ready.",
+            "A policy result recorded as unreviewed cannot support a ready status.",
+            "A ready status requires a locus and a completed search repeated at that locus.",
             "A failed recheck makes an actionable candidate unverified with status_reason insufficient-evidence.",
             "record and render preserve partial, failed, and unknown run states instead of defaulting them to complete.",
         )
@@ -195,8 +197,22 @@ class SkillContractTests(unittest.TestCase):
             "retry-limit-reached",
             "static_search.complete",
             "invalid-search-payload",
+            "R3.5",
+            "GET /repos/{owner}/.github",
+            "policy-source-absent:{owner}/.github",
+            "never reuse the target branch name",
+            "null when the request failed",
         ):
             self.assertIn(phrase, github)
+        for phrase in (
+            "--policy-evidence",
+            "--locus-search",
+            "locus_clues",
+            "content_path",
+            "never means no duplicate exists",
+            "missing or incomplete locus search → new locus-search run, then record",
+        ):
+            self.assertIn(phrase, contract)
 
         ordinary = verify_candidates._untrusted_text(
             "ordinary excerpt", "https://docs.github.com/example", False
@@ -247,6 +263,14 @@ class SkillContractTests(unittest.TestCase):
                 [],
             )
 
+        self.assertEqual(
+            {
+                "path", "source_repository", "status", "found", "ref", "sha256",
+                "size", "entry_count", "excerpt", "truncated", "url",
+                "keyword_hits",
+            },
+            set(policies[0]),
+        )
         file_result = next(
             item
             for item in policies
@@ -342,6 +366,25 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(12, len(verify_candidates.READINESS_KEYS))
         self.assertEqual(expected_policy, set(verify_candidates.POLICY_CHECK_KEYS))
         self.assertEqual(8, len(verify_candidates.POLICY_CHECK_KEYS))
+        self.assertEqual(
+            expected_policy - {"program_rules"},
+            set(verify_candidates.REVIEWABLE_POLICY_KEYS),
+        )
+        self.assertEqual(7, len(verify_candidates.REVIEWABLE_POLICY_KEYS))
+        self.assertEqual(
+            {
+                "pattern_id", "repository", "locus", "clues", "queries",
+                "complete", "unused_clues", "method_limitations",
+            },
+            verify_candidates.LOCUS_SEARCH_FIELDS,
+        )
+        self.assertEqual(
+            {
+                "repository", "policy_key", "path", "source_repository",
+                "source_url", "content_path",
+            },
+            verify_candidates.POLICY_EVIDENCE_FIELDS,
+        )
         self.assertEqual(expected_failed, set(verify_candidates.FAILED_SCOPE_REASONS))
         self.assertEqual(5, len(verify_candidates.FAILED_SCOPE_REASONS))
         self.assertEqual(expected_access, set(verify_candidates.ACCESS_FAILURE_OUTCOMES))
