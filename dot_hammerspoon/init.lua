@@ -204,6 +204,7 @@ bindIfAppExists(appKey, "b", "Google Chrome")  -- Browser
 bindIfAppExists(appKey, "s", "Slack")
 bindIfAppExists(appKey, "f", "Figma")          -- ⌥⌘F는 Mail Search 충돌 (글로벌 override)
 bindIfAppExists(appKey, "g", "Ghostty")        -- ⌥⌘G는 일부 앱 Find Next 충돌 (글로벌 override)
+bindIfAppExists(appKey, "o", "Orca")
 bindIfAppExists(appKey, "p", "Spotify")
 bindIfAppExists(appKey, "n", "Notes")          -- macOS 기본 메모
 

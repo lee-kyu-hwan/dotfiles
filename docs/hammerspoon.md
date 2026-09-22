@@ -42,6 +42,7 @@ dotfiles의 `dot_hammerspoon/init.lua`에 Magnet 기본 단축키를 그대로 �
 | 앱 토글 (Slack) | `⌥⌘` + S |
 | 앱 토글 (Figma) | `⌥⌘` + F |
 | 앱 토글 (Ghostty) | `⌥⌘` + G |
+| 앱 토글 (Orca) | `⌥⌘` + O |
 | 앱 토글 (Spotify) | `⌥⌘` + P |
 | 앱 토글 (Notes) | `⌥⌘` + N |
 | 모바일 디바이스 전체 토글 (iOS 시뮬레이터 + 안드로이드 에뮬레이터) | `⌥⌘` + E |
