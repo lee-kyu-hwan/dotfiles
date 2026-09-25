@@ -40,6 +40,12 @@ SHELLS = {"sh", "bash", "zsh", "fish"}
 CODE_RUNNERS = {"python", "python3", "node", "ruby", "perl", "osascript"}
 NETWORK_CLIENTS = {"curl", "wget", "http"}
 CLOUD_CLIENTS = {"aws", "kubectl", "supabase", "gcloud"}
+DECISIONS = {"allow", "prompt", "forbidden"}
+DIRECT_WRITE_CATEGORIES = {"github-write", "github-api-generic", "git-push"}
+RAW_RULES_WARNING = (
+    "--json 을 명시해 규칙 pattern 원문을 포함했다. 원문에는 토큰이나 비공개 경로가 "
+    "들어 있을 수 있으므로 공유하거나 로그에 남기지 않는다."
+)
 
 
 def classify(pattern: list[str]) -> str:
@@ -86,13 +92,18 @@ def parse_rules(path: Path) -> list[dict[str, object]]:
         keys = [keyword.arg for keyword in node.value.keywords]
         if len(keys) != 2 or set(keys) != {"pattern", "decision"}:
             raise ValueError(f"unsupported rule fields at line {node.lineno}")
-        values = {keyword.arg: ast.literal_eval(keyword.value) for keyword in node.value.keywords}
+        try:
+            values = {keyword.arg: ast.literal_eval(keyword.value)
+                      for keyword in node.value.keywords}
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"invalid rule at line {node.lineno}") from error
         pattern, decision = values["pattern"], values["decision"]
         if (
             not isinstance(pattern, list)
             or not pattern
             or not all(isinstance(item, str) and item for item in pattern)
-            or decision not in {"allow", "prompt", "forbidden"}
+            or not isinstance(decision, str)
+            or decision not in DECISIONS
         ):
             raise ValueError(f"invalid rule at line {node.lineno}")
         rows.append(
@@ -102,29 +113,39 @@ def parse_rules(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", nargs="?", type=Path,
                         default=Path.home() / ".codex/rules/default.rules")
-    parser.add_argument("--json", action="store_true", help="include every rule")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--json", action="store_true",
+        help="명시적 선택: 규칙 pattern 원문을 포함한다 (토큰이 노출될 수 있다)",
+    )
+    args = parser.parse_args(argv)
     try:
         rows = parse_rules(args.path)
     except (OSError, UnicodeError, SyntaxError, ValueError) as error:
         print(f"Codex rules audit failed: {error}", file=sys.stderr)
         return 2
-    summary = {
+    direct = [
+        row for row in rows
+        if row["decision"] == "allow" and row["category"] in DIRECT_WRITE_CATEGORIES
+    ]
+    # 기본 출력은 집계만 담는다. pattern 원문은 --json 을 명시했을 때만 나간다.
+    summary: dict[str, object] = {
         "path": str(args.path),
         "total": len(rows),
         "decisions": dict(Counter(row["decision"] for row in rows)),
         "categories": dict(Counter(row["category"] for row in rows)),
-        "direct_github_write_or_push_allow": [
-            row for row in rows
-            if row["decision"] == "allow"
-            and row["category"] in {"github-write", "github-api-generic", "git-push"}
-        ],
+        "direct_github_write_or_push_allow": {
+            "total": len(direct),
+            "categories": dict(Counter(row["category"] for row in direct)),
+        },
+        "raw_rules_included": args.json,
     }
     if args.json:
+        summary["warning"] = RAW_RULES_WARNING
+        summary["direct_github_write_or_push_allow_rules"] = direct
         summary["rules"] = rows
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
