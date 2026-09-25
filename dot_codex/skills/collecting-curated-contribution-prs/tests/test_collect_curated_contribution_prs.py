@@ -208,7 +208,10 @@ def fake_hydrator(client, repository, number, captured_at):
     return hydrated_record(repository, number)
 
 
-def write_fake_gh(directory):
+SYNTHETIC_TOKEN = "synthetic_offline_token"
+
+
+def fake_cli_routes():
     issue = fixture("tracker-thread.json")["issue"]
     pull = {
         "number": 11,
@@ -230,7 +233,7 @@ def write_fake_gh(directory):
         "base": {"sha": "synthetic-base", "repo": {"node_id": "R_SYNTHETIC_WIDGET"}},
         "head": {"sha": "synthetic-head"},
     }
-    routes = {
+    return {
         "/user": {"login": "synthetic-runner"},
         "/versions": ["2026-03-10"],
         "/repos/synthetic-lab/tracker/issues/7": issue,
@@ -248,23 +251,117 @@ def write_fake_gh(directory):
             "license": {"spdx_id": "MIT", "name": "Synthetic permissive license"},
         },
     }
+
+
+def write_gh_guard(directory, log_path):
+    """PATH 상의 gh 를 호출 기록 후 실패하는 guard 로 가린다.
+
+    #192 이후 운영 전송은 urllib 이므로 CLI 자식이 gh 를 부르면 회귀다.
+    """
     executable = Path(directory) / "gh"
-    program = """#!/opt/homebrew/bin/python3
-import json
-import sys
-ROUTES = json.loads({routes!r})
-if sys.argv[1:] == [\"--version\"]:
-    print(\"gh version synthetic\")
-    raise SystemExit(0)
-endpoint = next((value for value in sys.argv[1:] if value.startswith(\"/\")), None)
-if endpoint not in ROUTES:
-    print(\"HTTP/1.1 404 Not Found\\n\\n{{\\\"message\\\":\\\"synthetic missing route\\\"}}\")
-    raise SystemExit(1)
-print(\"HTTP/1.1 200 OK\\n\\n\" + json.dumps(ROUTES[endpoint]))
-""".format(routes=json.dumps(routes))
-    executable.write_text(program, encoding="utf-8")
+    executable.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{os.fspath(log_path)}'\n"
+        "exit 97\n",
+        encoding="utf-8",
+    )
     executable.chmod(0o755)
     return executable
+
+
+def write_fake_urllib_bootstrap(directory):
+    """CLI 자식에서 운영 urllib 경로를 그대로 타되 opener 만 합성 응답으로 바꾸는 bootstrap.
+
+    GhApiClient 는 runner 가 없으면 ``urllib.request.build_opener(_NoRedirect)`` 로
+    opener 를 만든다. bootstrap 은 그 함수만 교체하고 스크립트를 ``__main__`` 으로
+    실행하므로 argparse, main(), SystemExit 종료코드, http_request, 읽기 전용 검사,
+    토큰 부착, _open_api_request 는 모두 운영 코드 그대로 실행된다. 소켓 호출은
+    실패시키되 시도 자체를 별도 로그에 남겨, 부모 테스트가 실통신 시도를 잡아낸다.
+    """
+    bootstrap = Path(directory) / "fake_urllib_bootstrap.py"
+    program = """import json
+import os
+import runpy
+import socket
+import sys
+import urllib.parse
+import urllib.request
+
+ROUTES = json.loads({routes!r})
+HTTP_LOG = os.environ["SYNTHETIC_HTTP_LOG"]
+SOCKET_LOG = os.environ["SYNTHETIC_SOCKET_LOG"]
+
+
+def _append(path, entry):
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\\n")
+
+
+def _blocked(name):
+    def blocked(*args, **kwargs):
+        _append(SOCKET_LOG, {{"call": name, "args": [repr(value) for value in args]}})
+        raise OSError("synthetic test forbids socket use: " + name)
+    return blocked
+
+
+socket.socket.connect = _blocked("socket.connect")
+socket.socket.connect_ex = _blocked("socket.connect_ex")
+socket.create_connection = _blocked("socket.create_connection")
+socket.getaddrinfo = _blocked("socket.getaddrinfo")
+
+
+class SyntheticResponse:
+    def __init__(self, url, status, payload):
+        self._url = url
+        self.status = status
+        self.headers = {{"Content-Type": "application/json"}}
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def geturl(self):
+        return self._url
+
+    def read(self):
+        return self._body
+
+    def close(self):
+        pass
+
+
+class SyntheticOpener:
+    def __init__(self, handlers):
+        self.handlers = handlers
+
+    def open(self, request, timeout=None):
+        parts = urllib.parse.urlsplit(request.full_url)
+        _append(HTTP_LOG, {{
+            "method": request.get_method(),
+            "scheme": parts.scheme,
+            "host": parts.netloc,
+            "path": parts.path,
+            "query": urllib.parse.parse_qs(parts.query),
+            "headers": {{name.lower(): value for name, value in request.header_items()}},
+            "has_body": request.data is not None,
+            "timeout": timeout,
+            "handlers": self.handlers,
+        }})
+        if parts.path in ROUTES:
+            return SyntheticResponse(request.full_url, 200, ROUTES[parts.path])
+        return SyntheticResponse(request.full_url, 404, {{"message": "synthetic missing route"}})
+
+
+def build_opener(*handlers):
+    return SyntheticOpener(sorted(
+        getattr(handler, "__name__", type(handler).__name__) for handler in handlers
+    ))
+
+
+urllib.request.build_opener = build_opener
+script = sys.argv[1]
+sys.argv = [script, *sys.argv[2:]]
+runpy.run_path(script, run_name="__main__")
+""".format(routes=json.dumps(fake_cli_routes()))
+    bootstrap.write_text(program, encoding="utf-8")
+    return bootstrap
 
 
 class FakeGhRunner:
@@ -543,12 +640,16 @@ class ContractTests(unittest.TestCase):
             root = Path(temporary)
             binary = root / "bin"
             binary.mkdir()
-            write_fake_gh(binary)
+            gh_log = root / "gh-invocations.log"
+            http_log = root / "http-requests.jsonl"
+            socket_log = root / "socket-attempts.jsonl"
+            write_gh_guard(binary, gh_log)
+            bootstrap = write_fake_urllib_bootstrap(root)
             corpus_path = root / "synthetic-corpus.json"
             manifest_path = root / "synthetic-manifest.json"
             completed = subprocess.run(
                 [
-                    "/opt/homebrew/bin/python3", os.fspath(SCRIPT),
+                    "/opt/homebrew/bin/python3", os.fspath(bootstrap), os.fspath(SCRIPT),
                     "collect", "--tracker-repo", "synthetic-lab/tracker",
                     "--issue", "7", "--max-prs", "1", "--request-budget", "40",
                     "--output", os.fspath(corpus_path),
@@ -562,11 +663,45 @@ class ContractTests(unittest.TestCase):
                     **os.environ,
                     "PATH": os.fspath(binary) + os.pathsep + os.environ.get("PATH", ""),
                     "PYTHONDONTWRITEBYTECODE": "1",
+                    "GH_TOKEN": SYNTHETIC_TOKEN,
+                    "GITHUB_TOKEN": SYNTHETIC_TOKEN,
+                    "SYNTHETIC_HTTP_LOG": os.fspath(http_log),
+                    "SYNTHETIC_SOCKET_LOG": os.fspath(socket_log),
                 },
             )
+            socket_attempts = socket_log.read_text(encoding="utf-8") if socket_log.exists() else ""
+            self.assertEqual("", socket_attempts, "CLI child attempted a real socket")
+            self.assertFalse(gh_log.exists(), "CLI child invoked gh instead of urllib")
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertEqual("complete", json.loads(manifest_path.read_text(encoding="utf-8"))["records"][-1]["collection_status"])
+            manifest_record = json.loads(manifest_path.read_text(encoding="utf-8"))["records"][-1]
+            self.assertEqual("complete", manifest_record["collection_status"])
+            self.assertEqual("python-urllib", manifest_record["client_version"])
             self.assertEqual(1, len(json.loads(corpus_path.read_text(encoding="utf-8"))["records"]))
+
+            requests = [
+                json.loads(line)
+                for line in http_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(["/user", "/versions"], [entry["path"] for entry in requests[:2]])
+            self.assertTrue({
+                "/repos/synthetic-lab/tracker/issues/7",
+                "/repos/synthetic-lab/tracker/issues/7/comments",
+                "/repos/synthetic-lab/widget/pulls/11",
+            } <= {entry["path"] for entry in requests})
+            self.assertEqual(manifest_record["request_count"], len(requests))
+            routes = fake_cli_routes()
+            for entry in requests:
+                with self.subTest(path=entry["path"]):
+                    self.assertIn(entry["path"], routes)
+                    self.assertEqual("GET", entry["method"])
+                    self.assertFalse(entry["has_body"])
+                    self.assertEqual(("https", "api.github.com"), (entry["scheme"], entry["host"]))
+                    self.assertEqual(["100"], entry["query"]["per_page"])
+                    self.assertEqual("application/vnd.github+json", entry["headers"]["accept"])
+                    self.assertEqual("2026-03-10", entry["headers"]["x-github-api-version"])
+                    self.assertEqual("Bearer " + SYNTHETIC_TOKEN, entry["headers"]["authorization"])
+                    self.assertEqual(["_NoRedirect"], entry["handlers"])
+                    self.assertEqual(30, entry["timeout"])
 
         calls = []
         missing = Path("/synthetic/missing/collect_recent_closed_prs.py")

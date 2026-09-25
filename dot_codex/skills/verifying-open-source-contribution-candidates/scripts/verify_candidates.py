@@ -7,23 +7,37 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-from urllib.parse import quote_plus, urlencode
+import urllib.error
+from urllib.parse import quote_plus, unquote, urlencode, urlsplit
+import urllib.request
 
 
 DEFAULT_API_VERSION = "2026-03-10"  # api_version default
 MAX_RETRIES = 3
 MAX_RETRY_DELAY_SECONDS = 300.0
+GITHUB_API_ORIGIN = "https://api.github.com"
+GITHUB_API_HOST = "api.github.com"
+HTTP_TIMEOUT_SECONDS = 30.0
+MAX_HTTP_TIMEOUT_SECONDS = 120.0
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+HTTP_USER_AGENT = "verify-candidates"
+HTTP_ACCEPT = "application/vnd.github+json"
+REQUIRED_REQUEST_HEADERS = ("accept", "user-agent", "x-github-api-version")
+ALLOWED_REQUEST_HEADERS = REQUIRED_REQUEST_HEADERS + ("authorization",)
+TOKEN_VALUE_PATTERN = re.compile(r"\A[\x21-\x7e]+\Z")
 REPOSITORY_PATTERN = re.compile(r"\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 PATTERN_ID_PATTERN = re.compile(r"\APAT-\d+\Z")
 REVISION_PATTERN = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
@@ -296,6 +310,10 @@ class ChildCommandError(RuntimeError):
     """Raised when a child command violates the read-only allowlist."""
 
 
+class HttpRequestRefused(ChildCommandError):
+    """Raised when an HTTP request violates the read-only GET allowlist."""
+
+
 class BudgetExhausted(RuntimeError):
     """Raised before an attempt that would exceed the request budget."""
 
@@ -457,6 +475,19 @@ def _child_env() -> Dict[str, str]:
     child["GIT_LFS_SKIP_SMUDGE"] = "1"
     child["GIT_TERMINAL_PROMPT"] = "0"
     return child
+
+
+def _api_token() -> Optional[str]:
+    """Return the first non-empty GH_TOKEN or GITHUB_TOKEN value, if any.
+
+    This is the only place the verifier reads a credential. The value is
+    sent solely as the Authorization header of fixed-origin HTTPS requests.
+    """
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return None
 
 
 def run_child(
@@ -753,31 +784,153 @@ def _retryable(status: int, headers: Dict[str, str]) -> Tuple[bool, str]:
     return False, "not-retryable"
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Surface every redirect as an HTTP error instead of following it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _open_https(request: urllib.request.Request, timeout: float) -> Any:
+    """Open one request without proxies and without following redirects."""
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _RefuseRedirects(),
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def _api_url(request_path: str) -> str:
+    """Return the fixed-origin URL for a safe GitHub API request path."""
+    if (
+        not isinstance(request_path, str)
+        or not request_path.startswith("/")
+        or request_path.startswith("//")
+        or re.fullmatch(r"[\x21-\x7e]+", request_path) is None
+        or "\\" in request_path
+        or "#" in request_path
+    ):
+        raise HttpRequestRefused("http request path is not a safe GitHub API path")
+    path = request_path.split("?", 1)[0]
+    if any(unquote(segment) in {".", ".."} for segment in path.split("/")):
+        raise HttpRequestRefused("http request path must not contain dot segments")
+    url = GITHUB_API_ORIGIN + request_path
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or parts.netloc != GITHUB_API_HOST
+        or parts.fragment
+    ):
+        raise HttpRequestRefused("http request must target the GitHub API origin")
+    return url
+
+
+def _validate_api_request(request: urllib.request.Request, url: str) -> None:
+    """Refuse anything other than a payload-free GET to the fixed origin."""
+    if request.get_method() != "GET" or request.data is not None:
+        raise HttpRequestRefused("http request must be a GET without a payload")
+    parts = urlsplit(request.full_url)
+    if (
+        request.full_url != url
+        or parts.scheme != "https"
+        or parts.netloc != GITHUB_API_HOST
+        or parts.username is not None
+        or parts.password is not None
+        or parts.fragment
+    ):
+        raise HttpRequestRefused("http request must target the GitHub API origin")
+    if request.unredirected_hdrs:
+        raise HttpRequestRefused("http request carries unsupported headers")
+    names = set()
+    for name, value in request.header_items():
+        lowered = name.lower()
+        if lowered not in ALLOWED_REQUEST_HEADERS or lowered in names:
+            raise HttpRequestRefused("http request carries unsupported headers")
+        if not isinstance(value, str) or re.fullmatch(r"[\x20-\x7e]+", value) is None:
+            raise HttpRequestRefused("http request header value is not allowed")
+        names.add(lowered)
+    if not set(REQUIRED_REQUEST_HEADERS) <= names:
+        raise HttpRequestRefused("http request is missing required headers")
+
+
+def _read_https_response(response: Any, url: str) -> Tuple[int, Dict[str, str], str]:
+    """Return status, sanitized headers, and a bounded body from one response."""
+    geturl = getattr(response, "geturl", None)
+    if callable(geturl):
+        final_url = geturl()
+        if final_url is not None and final_url != url:
+            raise HttpRequestRefused("http response came from an unexpected URL")
+    status = getattr(response, "status", None)
+    if isinstance(status, bool) or not isinstance(status, int):
+        status = getattr(response, "code", None)
+    if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
+        raise ValueError("http response has an invalid status")
+    raw_headers = getattr(response, "headers", None)
+    headers = {}
+    if raw_headers is not None:
+        for name, value in raw_headers.items():
+            headers[str(name)] = str(value)
+    body = b""
+    if not isinstance(response, urllib.error.HTTPError) or response.fp is not None:
+        body = response.read(MAX_RESPONSE_BYTES + 1)
+    if not isinstance(body, bytes):
+        raise ValueError("http response body must be bytes")
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise ValueError("http response exceeds the size limit")
+    return status, _sanitize_headers(headers), body.decode("utf-8", errors="replace")
+
+
 class GhApiClient:
-    """A serial read-only GitHub CLI adapter with bounded retries."""
+    """A serial read-only GitHub REST client with bounded retries.
+
+    Without an injected runner every request is a direct HTTPS GET to the
+    fixed GitHub API origin. An injected runner keeps the ``gh api`` child
+    contract used by offline tests.
+    """
 
     def __init__(
         self,
-        runner: Callable[..., Any] = subprocess.run,
+        runner: Optional[Callable[..., Any]] = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.time,
         *,
         budget: Optional[RequestBudget] = None,
         api_version: str = DEFAULT_API_VERSION,
+        opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
+        token: Optional[str] = None,
+        timeout: float = HTTP_TIMEOUT_SECONDS,
     ) -> None:
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", api_version) is None:
             raise ValueError("api_version must use YYYY-MM-DD")
+        if runner is not None and (opener is not None or token):
+            raise ValueError("opener and token apply only to the HTTPS transport")
+        if token and TOKEN_VALUE_PATTERN.fullmatch(token) is None:
+            raise ValueError("GitHub token contains unsupported characters")
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= MAX_HTTP_TIMEOUT_SECONDS
+        ):
+            raise ValueError("timeout must be a positive bounded number of seconds")
         self.runner = runner
+        self.opener = opener if opener is not None else _open_https
+        self._token = token or None
+        self.timeout = float(timeout)
         self.sleeper = sleeper
         self.clock = clock
         self.budget = budget if budget is not None else RequestBudget(300)
         self.api_version = api_version
         self.request_events = []  # type: List[Dict[str, object]]
 
-    def get_json(
-        self, endpoint: str, params: Optional[Dict[str, object]] = None
-    ) -> ApiResponse:
-        request_path = _request_path(endpoint, params)
+    @property
+    def transport(self) -> str:
+        return "https" if self.runner is None else "gh"
+
+    def _gh_exchange(
+        self, request_path: str
+    ) -> Callable[[], Tuple[int, Dict[str, str], str]]:
         command = [
             "gh",
             "api",
@@ -788,6 +941,54 @@ class GhApiClient:
             "--include",
             request_path,
         ]
+
+        def exchange() -> Tuple[int, Dict[str, str], str]:
+            completed = run_child(command, runner=self.runner)
+            return _parse_included_response(str(getattr(completed, "stdout", "")))
+
+        return exchange
+
+    def _https_exchange(
+        self, request_path: str
+    ) -> Callable[[], Tuple[int, Dict[str, str], str]]:
+        url = _api_url(request_path)
+        headers = {
+            "Accept": HTTP_ACCEPT,
+            "User-Agent": HTTP_USER_AGENT,
+            "X-GitHub-Api-Version": self.api_version,
+        }
+        if self._token is not None:
+            headers["Authorization"] = "Bearer " + self._token
+        _validate_api_request(
+            urllib.request.Request(url, headers=headers, method="GET"), url
+        )
+
+        def exchange() -> Tuple[int, Dict[str, str], str]:
+            # urllib adds unredirected headers such as Host while sending, so
+            # every attempt starts from a fresh, freshly validated request.
+            request = urllib.request.Request(url, headers=headers, method="GET")
+            _validate_api_request(request, url)
+            try:
+                response = self.opener(request, self.timeout)
+            except urllib.error.HTTPError as error:
+                response = error
+            try:
+                return _read_https_response(response, url)
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+
+        return exchange
+
+    def get_json(
+        self, endpoint: str, params: Optional[Dict[str, object]] = None
+    ) -> ApiResponse:
+        request_path = _request_path(endpoint, params)
+        if self.runner is None:
+            exchange = self._https_exchange(request_path)
+        else:
+            exchange = self._gh_exchange(request_path)
         for attempt in range(MAX_RETRIES + 1):
             self.budget.consume()
             event = {
@@ -798,14 +999,16 @@ class GhApiClient:
             }
             self.request_events.append(event)
             try:
-                completed = run_child(command, runner=self.runner)
-                status, headers, body = _parse_included_response(
-                    str(getattr(completed, "stdout", ""))
-                )
+                status, headers, body = exchange()
                 event["status"] = status
                 event["headers"] = headers
                 response = ApiResponse(status, headers, _payload_from_body(body))
-            except (OSError, subprocess.SubprocessError, ValueError) as error:
+            except (
+                OSError,
+                subprocess.SubprocessError,
+                http.client.HTTPException,
+                ValueError,
+            ) as error:
                 event["error"] = "transport-error"
                 if attempt == MAX_RETRIES:
                     event["retry_decision"] = "return"
@@ -834,6 +1037,30 @@ class GhApiClient:
             event["retry_delay"] = delay
             self.sleeper(delay)
         raise AssertionError("bounded retry loop must return")
+
+
+def _api_client(
+    runner: Optional[Callable[..., Any]],
+    opener: Optional[Callable[[urllib.request.Request, float], Any]],
+    sleeper: Callable[[float], None],
+    clock: Callable[[], float],
+    budget: RequestBudget,
+    api_version: str = DEFAULT_API_VERSION,
+) -> GhApiClient:
+    """Build the live client; only the HTTPS transport reads a token."""
+    token = _api_token() if runner is None else None
+    try:
+        return GhApiClient(
+            runner=runner,
+            sleeper=sleeper,
+            clock=clock,
+            budget=budget,
+            api_version=api_version,
+            opener=opener,
+            token=token,
+        )
+    except ValueError as error:
+        raise CliInputError(str(error)) from error
 
 
 class FixtureTransport:
@@ -2077,9 +2304,10 @@ def run_discover(
     arguments: argparse.Namespace,
     analysis: Dict[str, object],
     *,
-    runner: Callable[..., Any],
+    runner: Optional[Callable[..., Any]],
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
+    opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
 ) -> int:
     started_at = _utc_observation(clock)
     budget = RequestBudget(arguments.request_budget)
@@ -2094,13 +2322,10 @@ def run_discover(
         except ValueError as error:
             raise CliInputError(str(error)) from error
     else:
-        client = GhApiClient(
-            runner=runner,
-            sleeper=sleeper,
-            clock=clock,
-            budget=budget,
-            api_version=arguments.api_version,
+        client = _api_client(
+            runner, opener, sleeper, clock, budget, arguments.api_version
         )
+    clone_runner = runner if runner is not None else subprocess.run
 
     patterns = _selected_patterns(analysis, arguments.pattern)
     universe = [
@@ -2255,7 +2480,7 @@ def run_discover(
                             arguments.clone_root,
                             fixture_sources,
                             arguments.fixture_dir is not None,
-                            runner,
+                            clone_runner,
                         )
                         clone_sessions[repository] = session
                     static_result = _static_record(session, used_clues, warnings)
@@ -4149,9 +4374,10 @@ def _recheck_repository(
 def run_recheck(
     arguments: argparse.Namespace,
     *,
-    runner: Callable[..., Any],
+    runner: Optional[Callable[..., Any]],
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
+    opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
 ) -> int:
     candidates = _candidate_document(arguments.candidates)
     selected_ids = list(arguments.candidate)
@@ -4169,7 +4395,7 @@ def run_recheck(
         except ValueError as error:
             raise CliInputError(str(error)) from error
     else:
-        client = GhApiClient(runner=runner, sleeper=sleeper, clock=clock, budget=budget)
+        client = _api_client(runner, opener, sleeper, clock, budget)
     started_at = _utc_observation(clock)
     output_records = []
     repositories = []
@@ -4290,9 +4516,10 @@ def run_recheck(
 def run_locus_search(
     arguments: argparse.Namespace,
     *,
-    runner: Callable[..., Any],
+    runner: Optional[Callable[..., Any]],
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
+    opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
 ) -> int:
     """Search again with clues derived from each assessed locus."""
     discovery = _read_json_file(arguments.discovery, "discovery")
@@ -4329,12 +4556,8 @@ def run_locus_search(
         except ValueError as error:
             raise CliInputError(str(error)) from error
     else:
-        client = GhApiClient(
-            runner=runner,
-            sleeper=sleeper,
-            clock=clock,
-            budget=budget,
-            api_version=arguments.api_version,
+        client = _api_client(
+            runner, opener, sleeper, clock, budget, arguments.api_version
         )
 
     searches = []
@@ -4496,11 +4719,16 @@ def _stub(command: str) -> int:
 def main(
     argv: Optional[Sequence[str]] = None,
     *,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Optional[Callable[..., Any]] = None,
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.time,
+    opener: Optional[Callable[[urllib.request.Request, float], Any]] = None,
 ) -> int:
-    """Parse the verifier interface and execute implemented operations."""
+    """Parse the verifier interface and execute implemented operations.
+
+    GitHub API reads use direct HTTPS unless a runner is injected, in which
+    case they keep the ``gh api`` child contract. Clones always use a runner.
+    """
     parser = build_parser()
     try:
         arguments = parser.parse_args(list(argv) if argv is not None else None)
@@ -4519,6 +4747,7 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 clock=clock,
+                opener=opener,
             )
         elif arguments.command == "locus-search":
             return run_locus_search(
@@ -4526,6 +4755,7 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 clock=clock,
+                opener=opener,
             )
         elif arguments.command == "record":
             if arguments.program_rules is not None and re.match(
@@ -4543,6 +4773,7 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 clock=clock,
+                opener=opener,
             )
         elif arguments.command == "render":
             return run_render(arguments)
