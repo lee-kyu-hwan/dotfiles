@@ -1,16 +1,27 @@
 ---
 name: organize-worktree-lineage
-description: Use when organizing existing git worktrees into Orca lineage — linking issues, setting parent worktrees and board status in bulk
+description: Use when organizing existing git worktrees into Orca lineage — linking issues, setting parent worktrees and board status in bulk, or applying one explicitly named worktree's lineage and epic display name (single-target mode)
 ---
 
 # Organize Worktree Lineage
 
-이미 있는 worktree 여러 개를 Orca 계보(parent/child)와 이슈 연결, 보드 상태로 한 번에
-편성한다. 새 worktree 하나에 계보를 붙이는 것은 `create-worktree`의 몫이다.
+이미 있는 worktree를 Orca 계보(parent/child)와 이슈 연결, 보드 상태로 편성한다. 모드는
+둘이고 한 실행에서 섞지 않는다.
 
-조회는 read-only다. 변경은 계획을 보여 주고 승인받은 뒤에만 실행한다.
+| 모드 | 범위 | 절 |
+| --- | --- | --- |
+| 일괄 | 저장소 하나의 worktree 전체를 판정해 한 번에 편성한다 | §1–§11 |
+| 단일 대상 | 호출자가 명시한 worktree 하나의 계보·이슈·표시 이름만 적용한다 | §12 |
 
-## 실행 순서 요약
+`create-worktree`는 새로 만들거나 재개한 worktree 하나에 단일 대상 모드를 명시 호출한다.
+에픽 표시 이름의 결정 규칙은 §13 한 곳에만 둔다.
+
+조회는 read-only다. 변경은 계획을 보여 주고 승인받은 뒤에만 실행한다. 단일 대상 모드의
+승인 기준은 §12에 있다.
+
+## 실행 순서 요약 — 일괄 모드
+
+단일 대상 모드는 §12의 순서만 따르고 아래 판정(§2–§6)을 거치지 않는다.
 
 1. 대상 worktree 수집
 2. 브랜치명에서 이슈 번호 추출
@@ -59,6 +70,19 @@ orca worktree list --json
 
 저장소가 여럿이면 어느 저장소를 편성할지 먼저 확정한다. 지정이 없으면 후보를 제시하고
 선택받는다. 전체 저장소를 기본값으로 삼지 않는다.
+
+확정한 뒤에는 그 저장소 범위 목록만 쓴다. `<repoId>`는 확정한 저장소 worktree의 `id`에서
+`::` 앞부분이다.
+
+```bash
+orca worktree list --repo "id:<repoId>" --json
+```
+
+이후 역할 worktree 재사용·부모 후보·사후 확인은 모두 이 목록 안에서 찾고, 부모는 전체
+`id`로 기록한다. 부모 지정에는 그 값을 `id:<전체 id>`로 쓰거나, 같은 목록에서 그 `id`와
+대조한 경로를 `path:<절대경로>`로 쓴다. `issue:` · `name:` · `branch:` 셀렉터와 cwd로
+해석되는 `active`는 부모 지정에 쓰지 않는다. 앞의 셋은 셀렉터에 저장소 범위가 없어 이
+저장소의 worktree로 해석됐는지 보장되지 않는다(#176).
 
 외부 worktree가 목록에 없으면 표시 설정을 확인한다. Orca는 저장소마다
 `externalWorktreeVisibility`를 가지며 전역 기본값이 `hide`다. CLI 옵션이 없으므로 앱
@@ -147,6 +171,8 @@ gh api graphql -f query='
 
 조회에 실패하면 그 항목을 건너뛰고 보고한다. 실패를 "에픽 없음"으로 해석하지 않는다.
 
+`parent.title`은 에픽 역할 worktree의 표시 이름 결정(§13)에 `epicTitle`로 넘긴다.
+
 ## 5. 그룹 판정
 
 위에서부터 먼저 맞는 것을 따른다.
@@ -185,7 +211,19 @@ worktree가 빠져나오지 못한다. 작성자가 나인 PR이 `review` 밑에
 **자식 수를 세지 않는다.** 에픽이 있으면 그 밑에 들어갈 worktree가 하나뿐이어도
 `epic-<번호>`를 만든다. 판정이 기계적이어야 다시 돌려도 같은 결과가 나온다.
 
-역할 worktree가 이미 있으면 재사용한다.
+역할 worktree가 이미 있으면 재사용한다. 저장소 범위 목록(§1)에서 다음으로 찾는다.
+
+| 역할 | 기존 역할 worktree 판정 |
+| --- | --- |
+| 리뷰 | `displayName`이 `review`이고 `parentWorktreeId`가 메인의 `id` |
+| 에픽 | `linkedIssue`가 에픽 번호이고 `parentWorktreeId`가 메인의 `id` |
+| 단독 | `displayName`이 `standalone`이고 `parentWorktreeId`가 메인의 `id` |
+
+에픽 역할은 표시 이름이 아니라 `linkedIssue`로 찾는다. 에픽 표시 이름은 §13에 따라 달라질
+수 있다.
+
+후보가 2개 이상이면 하나를 고르지 않는다. 후보의 전체 `id`를 보고하고 그 역할 밑으로
+가는 항목을 편성하지 않는다.
 
 ## 6. 상태 도출
 
@@ -256,11 +294,13 @@ inbox에 있는 것이다.
 아래 표는 역할 worktree 자신의 설정이다. 그 밑의 작업 worktree는 묶음과 관계없이 자기
 이슈 번호를 연결한다(§9).
 
-| 역할 | `--display-name` | `--issue` |
-| --- | --- | --- |
-| 리뷰 | `review` | 주지 않는다 |
-| 에픽 | `epic-<에픽번호>` | `<에픽번호>`. 자식이 `issue:<에픽번호>` 셀렉터로 부모를 찾는다 |
-| 단독 | `standalone` | 주지 않는다 |
+| 역할 | 디렉터리 이름 | `--display-name` | `--issue` |
+| --- | --- | --- | --- |
+| 리뷰 | `review` | `review` | 주지 않는다 |
+| 에픽 | `epic-<에픽번호>` | §13의 결정값. 제목을 확인하지 못했으면 `epic-<에픽번호>` | `<에픽번호>`. 보드에서 에픽을 가리킨다. 셀렉터로는 쓰지 않는다 |
+| 단독 | `standalone` | `standalone` | 주지 않는다 |
+
+디렉터리 이름·`linkedIssue`·전체 `id`는 표시 이름과 무관하게 고정한다.
 
 조정자는 코드를 고치지 않으므로 `--detach`로 만든다. 브랜치를 남기지 않아 나중에 정리할
 것이 줄어들고, `develop` 같은 공용 브랜치를 점유하지 않는다. git worktree는 같은 브랜치를
@@ -313,14 +353,15 @@ od -An -tx1 -N10 "$WORKTREE_PATH/<암호화된 파일>" | tr -d '[:space:]'
 ### Orca 등록
 
 ```bash
-orca worktree set --worktree "path:$WORKTREE_PATH" --display-name "<이름>" \
+orca worktree set --worktree "path:$WORKTREE_PATH" --display-name "<표시 이름>" \
   --parent-worktree "path:$MAIN" --workspace-status in-progress --json
-orca terminal create --worktree "path:$WORKTREE_PATH" --title "<이름>-ORCH" --json
+orca terminal create --worktree "path:$WORKTREE_PATH" --title "<디렉터리 이름>-ORCH" --json
 ```
 
 `epic-*`에는 `--issue <에픽번호>`를 함께 준다. 셀렉터는 `name:`이 아니라 `path:`를
 쓴다. `review`·`standalone`은 저장소마다 같은 이름이라 `name:`으로는 저장소를 가리지
-못한다.
+못한다. 등록 뒤 저장소 범위 목록(§1)을 다시 읽어 새 역할 worktree의 전체 `id`를 기록한다.
+§9의 부모 셀렉터와 §10의 대조에 이 값을 쓴다.
 
 ## 8. 변경 계획 표시
 
@@ -341,6 +382,7 @@ forum-board-noindex               #1411   없음          standalone    없음 �
 - `review` 밑인데 `linkedPR`도 `--head` 결과도 없어 옮기지 않은 worktree
 - 정리 후보가 된 worktree — `review` 밑 PR `MERGED`·`CLOSED`, 내 작업 `completed`
 - 새로 만들 역할 worktree와 그 경로
+- 에픽 역할 worktree(새로 만들거나 재사용)의 표시 이름 결정 — §13의 네 필드
 
 **이미 계보가 있는 worktree**는 현재 부모를 보여 주고 바꿀지 확인받는다. 조용히
 덮어쓰지 않는다.
@@ -355,20 +397,24 @@ orca worktree set --worktree "path:<경로>" \
   --json
 ```
 
-- 부모 셀렉터는 `epic-*` 밑이면 `issue:<에픽번호>`, `review`·`standalone` 밑이면
-  `path:<역할 worktree 경로>`를 쓴다
+- 부모 셀렉터는 묶음과 관계없이 `id:<역할 worktree 전체 id>` 또는 그 `id`와 대조한
+  `path:<역할 worktree 경로>`를 쓴다. 값은 §5·§7에서 저장소 범위 목록으로 확정한 역할
+  worktree의 것이다. `epic-*` 밑이라도 `issue:<에픽번호>`를 쓰지 않는다
+- 부모 경로가 대상 worktree 자신의 경로와 같으면 실행하지 않고 보고한다
 - `--issue`에는 그 worktree 브랜치의 이슈 번호를 준다. 번호를 얻지 못한 `review` 밑
   worktree만 `--issue`를 뺀다
 - 역할 worktree 자신은 §7의 Orca 등록으로 설정한다
-- 계보를 의도적으로 두지 않을 때만 `--no-parent`를 쓴다
+- 계보를 의도적으로 두지 않을 때만 `--parent-worktree` 대신 `--no-parent`를 쓴다. 두
+  옵션을 한 명령에 함께 주지 않는다
 
 한 번에 한 worktree씩 실행하고 각 응답의 `ok`를 확인한다. 실패한 항목을 성공으로 보고하지
 않는다.
 
 ## 10. 사후 확인
 
-`orca worktree list --json`을 다시 읽어 `parentWorktreeId`, `linkedIssue`,
-`workspaceStatus`가 계획과 일치하는지 대조한다. 명령의 응답만으로 끝내지 않는다.
+저장소 범위 목록(§1)을 다시 읽어 `parentWorktreeId`, `linkedIssue`, `workspaceStatus`가
+계획과 일치하는지 대조한다. `parentWorktreeId`는 기록해 둔 역할 worktree의 전체 `id`와
+같아야 한다. 다른 저장소의 worktree를 가리키면 실패다. 명령의 응답만으로 끝내지 않는다.
 
 계보 연결 수와 이슈 연결 수를 전체 대비로 보고한다. 미연결로 남은 항목은 이유와 함께
 열거한다. 메인 worktree는 부모가 없는 것이 정상이다.
@@ -389,6 +435,184 @@ checkout은 항상 origin 상태 그대로다. 조정자는 커밋하지 않으�
 **조정자에서 무언가를 판정하기 전에 먼저 갱신한다.** 실측에서 기준 worktree가 20커밋
 뒤처진 채로 비교해, 이미 머지된 파일 64개를 "없는 기록"으로 집계했다. 실제로 없는 것은
 11개였다. 뒤처진 기준은 판단을 뒤집는다.
+
+## 12. 단일 대상 모드
+
+호출자가 명시한 worktree 하나에만 계보·이슈 연결·보드 상태와, 에픽 역할이면 표시 이름을
+적용한다. `create-worktree`가 신규 생성과 기존 대상 재개에서 이 모드를 호출한다. 부모는
+판정하지 않고 입력으로 받는다. 일괄 모드의 §2–§6 판정, §7 역할 worktree 생성, §11 갱신은
+하지 않는다.
+
+### 입력
+
+| 입력 | 형식 | 필수 |
+| --- | --- | --- |
+| 저장소 | repo ID, 또는 메인 worktree 절대경로 | 예 |
+| 대상 | 전체 worktree `id`(`<repoId>::<절대경로>`), 또는 절대경로 | 예 |
+| 부모 | 부모의 전체 `id`, 또는 `no-parent`. 둘 중 하나만 | 예 |
+| 이슈·PR 참조 | 연결할 이슈 번호와 PR 번호. 없으면 `없음`이라고 명시한다 | 예 |
+| git base 확인 근거 | 대상 브랜치와 `HEAD`, 호출자가 계보와 별도로 확인한 base(예: 기대 `HEAD` 일치) | 예 |
+| 역할 | `epic` · `review` · `standalone`. 역할 worktree가 아니면 주지 않는다 | 아니오 |
+| 기존 `displayName`과 사용자 지정 여부 | 호출자가 아는 값. 모르면 `미상` | 에픽 역할이면 예 |
+| 이전 결과 | 이전 실행 결과의 `displayName`·`epicTitle`. 없으면 `없음` | 에픽 역할이면 예 |
+| 에픽 번호·제목 | 에픽 역할일 때. 제목을 모르면 `미상` | 에픽 역할이면 번호는 예 |
+| 보드 상태 | 호출자가 정한 `workspaceStatus`. 이 모드는 상태를 도출하지 않는다 | 아니오 |
+
+- 부모는 전체 `id`로만 받는다. `path:` · `issue:` · `name:` · `branch:` · `active`로 받지
+  않는다(§1).
+- PR 번호는 `linkedPR`을 CLI로 설정할 수 없으므로(§3) 적용하지 않고 결과에 기록만 한다.
+- 이슈 번호는 호출자가 준 값을 쓴다. 대상 브랜치명에서 §2로 다시 추출하거나 호출자의 해석을
+  뒤집지 않는다. `lee-kyu-hwan/208-...`처럼 §2의 선행 숫자 규칙으로는 번호가 없는 사용자
+  접두사 브랜치도 호출자가 준 번호로 연결한다. 해석 규칙은 `create-worktree`의 "이슈·PR 참조
+  해석"에 있다.
+- 에픽 역할이면 이슈 참조는 에픽 번호다.
+- 역할은 호출자가 명시한 값만 받는다. `create-worktree`의 `epic_orchestrator`는 `epic`으로
+  넘어오고, `repo_orchestrator`는 역할 없이 넘어온다. 이 모드가 브랜치·디렉터리 이름·
+  `linkedIssue`에서 역할을 추론하지 않는다.
+- 계보는 git base를 정하지 않는다. 이 모드는 base를 바꾸거나 계보에 맞춰 판정하지 않고,
+  받은 근거를 대조해 결과에 옮긴다.
+- 에픽 제목이 `미상`이면 §4 조회를 한 번 할 수 있다. 호출자가 GitHub 조회를 금지했거나
+  조회가 실패하면 조회하지 않은 것으로 두고 §13의 미확인 규칙을 따른다.
+
+### 멈추는 경우
+
+다음이면 `set`을 하나도 하지 않고, 받은 입력과 어긋난 값을 그대로 보고한다. 다른 셀렉터로
+바꾸거나 부모를 추측해 다시 시도하지 않는다. 역할 worktree가 없다고 새로 만들지 않는다.
+
+- 필수 입력이 없거나, 부모를 전체 `id`와 `no-parent`로 함께 주었거나, 입력이 둘 이상으로
+  해석된다
+- 저장소를 확정하지 못했다 — 경로와 일치하는 메인 항목이 0개·2개 이상이거나, 저장소 범위
+  목록 조회가 실패했다
+- 대상이 저장소 범위 목록에서 0개·2개 이상이거나 메인 worktree다
+- 부모 전체 `id`가 저장소 범위 목록에 없거나, 대상 자신이거나, 부모의 조상 사슬
+  (`parentWorktreeId`를 따라간 항목)에 대상이 있다
+- git base 근거의 `HEAD`가 `git -C "<대상 경로>" rev-parse HEAD`와 다르다
+- 에픽 역할인데 에픽 번호가 없거나, 대상의 `linkedIssue`가 다른 번호다
+
+### 순서
+
+1. **저장소.** repo ID면 그대로 쓴다. 절대경로면 전체 목록에서 `path`가 그 경로이고
+   `isMainWorktree`인 항목 하나의 `id`에서 `::` 앞부분을 쓴다. 이후
+   `orca worktree list --repo "id:<repoId>" --json`만 쓰고, 첫 결과를 적용 전 스냅숏으로
+   보관한다.
+2. **대상.** 스냅숏에서 `id`가 입력 전체 `id`와 같거나 `path`가 입력 절대경로와 같은 항목
+   하나. `TARGET_ID`·`TARGET_PATH`로 기록한다.
+3. **부모.** `no-parent`거나, 스냅숏에서 `id`가 입력 전체 `id`와 정확히 같은 항목.
+   `PARENT_ID`로 기록한다.
+4. **git base 근거 대조.** 위 멈추는 경우를 따른다.
+5. **표시 이름.** 에픽 역할이면 §13으로 정한다. 아니면 `displayName`을 건드리지 않는다.
+6. **계획과 승인.** 대상의 현재 값과 계획을 비교한다.
+   - 현재 `parentWorktreeId`가 비어 있지 않은데 계획과 다르면(`no-parent`로 떼는 경우
+     포함) 현재 부모 → 새 부모 계획을 보여 주고 승인받는다. 조용히 덮어쓰지 않는다(§8).
+   - 현재 `linkedIssue`가 다른 번호거나, §13이 `revised`로 기존 이름을 바꾸면 같다.
+   - 승인받지 못하면 아무것도 적용하지 않고 보고한다.
+   - 그 외(빈 값을 채우거나 이미 같은 값)는 호출자의 명시 입력을 지시로 보고, 계획을
+     결과에 남긴 뒤 적용한다.
+7. **적용.** 대상 하나에 `set`을 한 번 한다. 이미 같은 값의 옵션은 뺀다. 바꿀 값이 없으면
+   `set`을 하지 않는다.
+
+   ```bash
+   orca worktree set --worktree "id:<TARGET_ID>" \
+     --parent-worktree "id:<PARENT_ID>" \
+     --issue <번호> \
+     --display-name "<§13 결정값>" \
+     --workspace-status <호출자가 준 값> \
+     --json
+   ```
+
+   - `no-parent`면 `--parent-worktree` 대신 `--no-parent`를 준다. 두 옵션을 함께 주지
+     않는다.
+   - `--issue`는 이슈 참조가 `없음`이면 뺀다. `--display-name`은 §13이 이름을 바꿀 때만,
+     `--workspace-status`는 호출자가 줬을 때만 넣는다.
+8. **재조회.** 같은 저장소 범위 목록을 다시 읽는다. 응답의 `ok`만으로 끝내지 않는다.
+   - `TARGET_ID` 항목의 `parentWorktreeId`가 `PARENT_ID`와 같다(`no-parent`면 비어 있다).
+     `linkedIssue`·`displayName`·`workspaceStatus`가 계획과 같다. 다르면 성공으로 보고하지
+     않는다.
+   - 대상 외 항목의 `parentWorktreeId`·`linkedIssue`·`displayName`을 스냅숏과 비교한다.
+     달라졌으면 같은 저장소의 다른 작업일 수 있으므로 되돌리지 않고 차이를 보고한다.
+
+### 하지 않는 것
+
+- 다른 역할 worktree를 만들지 않는다.
+- 대상 외 worktree의 부모·이슈·상태·표시 이름을 바꾸지 않는다. 대상의 자식이나 같은 에픽
+  밑 형제도 그대로 둔다. 예를 들어 에픽 밑 검증 worktree(#192 verifier)가 대상이 아니면
+  그 부모는 바꾸지 않는다.
+- 저장소 전체를 재편성하지 않는다. 필요하면 일괄 모드를 따로 실행한다.
+- git base를 바꾸거나 디렉터리를 옮기지 않는다.
+
+### 결과
+
+다음 필드를 이 이름 그대로 보고한다. 호출자는 이 이름으로 읽는다.
+
+```
+repoId             <repoId>
+targetId           <대상 전체 id>
+targetPath         <대상 절대경로>
+parent             <PARENT_ID | no-parent>  (이전: <이전 parentWorktreeId | 없음>)
+linkedIssue        <번호 | 없음>
+pr                 <번호 | 없음>  (기록만)
+gitBase            <받은 근거와 대조 결과>
+workspaceStatus    <재조회 값>
+displayName        <재조회 값>
+displayNameSource  <§13 값>
+epicTitle          <사용한 제목 원문 | 미확인 | 해당 없음>
+namingDecision     <§13 값>
+verification       <재조회 대조 결과. 대상 외 항목 변화 포함>
+```
+
+`displayName` · `displayNameSource` · `epicTitle` · `namingDecision` 네 필드는 에픽 역할이
+아니어도 넣는다. 이때 `displayNameSource`와 `namingDecision`은 `not-applicable`, `epicTitle`은
+`해당 없음`이다.
+
+이 모드는 조정자를 시작하지 않고 `start-orca-orchestrator`(#209)를 부르지 않는다.
+`create-worktree`가 이 결과를 재조회로 검증한 뒤, 사용자가 역할을 명시했을 때만 네 표시 이름
+필드를 #209 계약의 `naming`에 이름·값 그대로 옮기고 `parent`·`linkedIssue`·`pr`·`gitBase`를
+`lineage`의 근거로 쓴다.
+
+## 13. 에픽 표시 이름
+
+에픽 역할 worktree의 `displayName`은 이 절에서만 정한다. 일괄 모드(§7과 재사용한 에픽 역할
+worktree)와 단일 대상 모드(§12)가 같은 규칙을 쓴다. `create-worktree`와
+`start-orca-orchestrator`(#209)는 이름을 따로 만들거나 제목을 다시 요약하지 않는다. 단일
+대상 모드 결과의 네 필드를 받아 그대로 쓴다.
+
+### 형식
+
+`<대표 제목> · #<에픽번호>`
+
+- `<대표 제목>`은 유효한 에픽 제목의 핵심 목표를 짧게 드러내는 구절이다. 보드에서 한 줄로
+  읽히는 길이로 줄인다.
+- 제목 앞의 `[epic]` 접두사(대소문자 무관)와 앞뒤 공백을 뗀다. 뗀 뒤 비어 있으면 유효한
+  제목이 아니다.
+- 디렉터리 이름 `epic-<번호>`, `linkedIssue`, 전체 `id`는 바꾸지 않는다. 표시 이름은 보드
+  표시만 바꾼다. 역할 판정(§5)은 `linkedIssue`로 하므로 표시 이름과 무관하다.
+
+예: 제목 `[epic] 게스트 예약 흐름의 토큰 URL 제거와 보안 정비`, 번호 1350 →
+`게스트 예약 토큰 URL 제거 · #1350`
+
+### 결정
+
+위에서부터 먼저 맞는 것을 따른다. 새 이름(`decided`·`revised`의 제목 요약)은 유효한 에픽
+제목을 이번에 확인했을 때만 적용한다. 확인하지 못했으면(조회 실패·`미상`·유효하지 않음)
+그 행을 건너뛰고 마지막 행으로 간다.
+
+| 조건 | `displayName` | `displayNameSource` | `namingDecision` |
+| --- | --- | --- | --- |
+| 사용자가 이번에 이름 변경을 명시 요청 | 지정한 이름. 재요약 요청이면 유효한 제목에서 새로 정한다 | `user` 또는 `epic-title` | `revised` |
+| 호출자가 현재 이름을 사용자 지정이라고 명시했다 | 보존 | `user` | `preserved` |
+| 현재 이름이 이전 결과의 `displayName`과 같고, 이전 `epicTitle`이 지금 제목과 다르다 | 지금 제목에서 새로 정한다 | `epic-title` | `revised` |
+| 현재 이름이 이전 결과의 `displayName`과 같다 | 보존 | `previous` | `preserved` |
+| 현재 이름이 비었거나 디렉터리 이름 `epic-<번호>`와 같다 | 제목에서 정한다 | `epic-title` | `decided` |
+| 그 외 — 결정 출처를 모르거나(사용자 지정 여부 `미상` 포함) 제목을 확인하지 못했다 | 보존. 이름이 없으면 `epic-<번호>` | `previous` · `unknown` · `fallback` 중 해당 | `unverified` |
+
+- 결정 출처는 호출자의 명시와 이전 결과로만 안다. 이름 모양이나 Orca의
+  `displayNameMode`(예: `fixed`)로 사용자 지정인지 자동 생성인지 단정하지 않는다.
+- 한 번 정한 요약은 다시 돌려도 다시 요약하지 않는다. 명시 요청이나 제목의 실제 변경일
+  때만 재검토한다. 이전 `epicTitle`이 없으면 제목이 바뀌었다고 판단하지 않는다.
+- `epicTitle`에는 확인한 제목 원문(접두사 포함)을 넣는다. 확인하지 못했으면 `미확인`이다.
+- `revised`로 기존 이름을 바꾸는 것은 승인 대상이다(일괄 모드 §8, 단일 대상 모드 §12의 6).
+- `·`(U+00B7)가 `--display-name`에 그대로 저장되는지는 이 문서에서 확인하지 않았다.
+  재조회한 `displayName`이 결정값과 다르면 성공으로 보고하지 않는다.
 
 ## 주의
 

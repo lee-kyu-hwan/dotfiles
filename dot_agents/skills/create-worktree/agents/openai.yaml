@@ -1,4 +1,4 @@
 interface:
   display_name: "Create Worktree"
-  short_description: "브랜치 또는 PR용 Git worktree 생성 및 Workmux 윈도우 구성"
-  default_prompt: "Use $create-worktree to open https://github.com/owner/repo/pull/1247 in the 2-review session."
+  short_description: "브랜치 또는 PR용 Git worktree를 Orca로 생성·재개하고 계보 연결 (tmux 세션은 명시할 때만)"
+  default_prompt: "Use $create-worktree to create or resume an Orca worktree for https://github.com/owner/repo/pull/1247 and verify its lineage."
