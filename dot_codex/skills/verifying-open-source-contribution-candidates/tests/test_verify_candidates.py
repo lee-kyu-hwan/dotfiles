@@ -4,6 +4,7 @@ import copy
 from contextlib import redirect_stderr, redirect_stdout
 import base64
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
@@ -13,6 +14,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import urllib.error
+import urllib.request
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -296,6 +299,79 @@ def delegating_runner(calls, after_call=None):
         return completed
 
     return runner
+
+
+class FakeHttpResponse:
+    """A minimal urlopen response that never touches a socket."""
+
+    def __init__(self, url, status, body, headers=None):
+        self.url = url
+        self.status = status
+        self.headers = dict(headers or {})
+        self._body = body
+        self.closed = False
+
+    def geturl(self):
+        return self.url
+
+    def read(self, size=-1):
+        return self._body if size is None or size < 0 else self._body[:size]
+
+    def close(self):
+        self.closed = True
+
+
+def http_reply(status, payload, headers=None, body=None):
+    reply = fixture_response(payload, status=status, headers=headers)
+    reply["body"] = body
+    return reply
+
+
+def fake_opener(calls, replies):
+    """Serve replies in order from a list, or by request path from a mapping."""
+    pending = list(replies) if isinstance(replies, list) else None
+
+    def opener(request, timeout):
+        calls.append(
+            {
+                "url": request.full_url,
+                "method": request.get_method(),
+                "data": request.data,
+                "headers": {
+                    name.lower(): value for name, value in request.header_items()
+                },
+                "timeout": timeout,
+            }
+        )
+        if pending is not None:
+            selected = pending.pop(0)
+        else:
+            path = request.full_url[len(verify_candidates.GITHUB_API_ORIGIN):]
+            selected = replies.get(
+                path, fixture_response({"message": "Not Found"}, status=404)
+            )
+            if isinstance(selected, list):
+                selected = selected[0]
+        if isinstance(selected, BaseException):
+            raise selected
+        if callable(selected):
+            return selected(request)
+        body = selected.get("body")
+        if body is None:
+            body = json.dumps(selected["payload"]).encode("utf-8")
+        if selected["status"] >= 300:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                selected["status"],
+                "fixture",
+                dict(selected["headers"]),
+                io.BytesIO(body),
+            )
+        return FakeHttpResponse(
+            request.full_url, selected["status"], body, selected["headers"]
+        )
+
+    return opener
 
 
 def sha256_file(path):
@@ -4400,15 +4476,26 @@ class VerifyCandidatesTests(unittest.TestCase):
             source = (SKILL_DIR / "scripts/verify_candidates.py").read_text(
                 encoding="utf-8"
             )
-            for forbidden in ("GH_TOKEN", "GITHUB_TOKEN", "hosts.yml"):
-                self.assertNotIn(forbidden, source)
+            self.assertNotIn("hosts.yml", source)
+            # Credentials are read in exactly one function; the behavioural
+            # proof that they never reach artifacts lives in
+            # test_cli_https_token_priority_and_secrecy.
+            token_start = source.index("def _api_token")
+            token_end = source.index("\ndef ", token_start + 1)
+            token_source = source[token_start:token_end]
+            outside_token_source = source[:token_start] + source[token_end:]
+            for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+                self.assertIn(name, token_source)
+                self.assertNotIn(name, outside_token_source)
+            self.assertEqual(1, outside_token_source.count("_api_token("))
             environment_lines = [
                 line for line in source.splitlines() if "os.environ" in line
             ]
-            self.assertEqual(1, len(environment_lines))
+            self.assertEqual(2, len(environment_lines))
             child_start = source.index("def _child_env")
             child_end = source.index("\ndef ", child_start + 1)
             self.assertIn("os.environ", source[child_start:child_end])
+            self.assertIn("os.environ", token_source)
 
     def test_injection_fixture_is_inert(self):
         fixture = SKILL_DIR / "tests/fixtures/injection"
@@ -5091,6 +5178,733 @@ class VerifyCandidatesTests(unittest.TestCase):
             self.assertIn(verify_candidates.SEARCH_COMPLETENESS_LIMITATION, rendered)
             self.assertIn("No duplicate found.", rendered)
             self.assertIn(record["head_sha"], rendered)
+
+    def https_client(self, replies, calls, **changes):
+        delays = []
+        options = {
+            "budget": verify_candidates.RequestBudget(20),
+            "sleeper": delays.append,
+            "clock": lambda: 100.0,
+        }
+        options.update(changes)
+        client = verify_candidates.GhApiClient(
+            opener=fake_opener(calls, replies), **options
+        )
+        return client, delays
+
+    def run_main_https(self, arguments, replies, calls, environment=None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.dict(verify_candidates.os.environ, {}), mock.patch.object(
+            verify_candidates,
+            "run_child",
+            side_effect=AssertionError("gh child must not run"),
+        ), redirect_stdout(stdout), redirect_stderr(stderr):
+            verify_candidates.os.environ.pop("GH_TOKEN", None)
+            verify_candidates.os.environ.pop("GITHUB_TOKEN", None)
+            verify_candidates.os.environ.update(environment or {})
+            code = verify_candidates.main(
+                arguments,
+                sleeper=lambda delay: None,
+                opener=fake_opener(calls, replies),
+            )
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def assert_fixed_origin_gets(self, calls):
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertTrue(
+                call["url"].startswith(verify_candidates.GITHUB_API_ORIGIN + "/"),
+                call["url"],
+            )
+            self.assertEqual("GET", call["method"])
+            self.assertIsNone(call["data"])
+            self.assertEqual(verify_candidates.HTTP_TIMEOUT_SECONDS, call["timeout"])
+            self.assertNotIn("authorization", call["headers"])
+
+    def test_default_client_sends_fixed_origin_https_get(self):
+        calls = []
+        client, delays = self.https_client(
+            [
+                http_reply(
+                    200,
+                    {"ok": True},
+                    {
+                        "ETag": '"abc"',
+                        "Set-Cookie": "session=fixture",
+                        "Content-Type": "application/json",
+                    },
+                )
+            ],
+            calls,
+        )
+        self.assertEqual("https", client.transport)
+        self.assertIsNone(client.runner)
+        query = 'repo:example-org/example-repo "Needle" is:issue is:open'
+        response = client.get_json("/search/issues", {"q": query})
+        request_path = verify_candidates._request_path("/search/issues", {"q": query})
+        self.assertEqual(1, len(calls))
+        self.assertEqual("https://api.github.com" + request_path, calls[0]["url"])
+        self.assert_fixed_origin_gets(calls)
+        self.assertEqual(
+            {
+                "accept": "application/vnd.github+json",
+                "user-agent": verify_candidates.HTTP_USER_AGENT,
+                "x-github-api-version": verify_candidates.DEFAULT_API_VERSION,
+            },
+            calls[0]["headers"],
+        )
+        self.assertEqual(200, response.status)
+        self.assertEqual({"ok": True}, response.payload)
+        self.assertEqual(
+            {"ETag": '"abc"', "Content-Type": "application/json"}, response.headers
+        )
+        self.assertEqual(
+            [
+                {
+                    "path": request_path,
+                    "attempt": 1,
+                    "status": 200,
+                    "headers": response.headers,
+                    "retry_decision": "return",
+                    "retry_reason": "not-retryable",
+                }
+            ],
+            client.request_events,
+        )
+        self.assertEqual(1, client.budget.consumed)
+        self.assertEqual([], delays)
+
+        versioned_calls = []
+        versioned, _ = self.https_client(
+            [http_reply(200, {})], versioned_calls, api_version="2022-11-28"
+        )
+        versioned.get_json("/repos/example-org/example-repo")
+        self.assertEqual(
+            "2022-11-28", versioned_calls[0]["headers"]["x-github-api-version"]
+        )
+
+        self.assertIs(
+            verify_candidates._open_https, verify_candidates.GhApiClient().opener
+        )
+        gh_client = verify_candidates.GhApiClient(runner=lambda *args, **kwargs: None)
+        self.assertEqual("gh", gh_client.transport)
+
+    def test_default_opener_disables_proxies_and_redirects(self):
+        real = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            verify_candidates._RefuseRedirects(),
+        )
+        self.assertFalse(
+            any(
+                type(handler) is urllib.request.HTTPRedirectHandler
+                for handler in real.handlers
+            )
+        )
+        self.assertFalse(
+            any(
+                isinstance(handler, urllib.request.ProxyHandler) and handler.proxies
+                for handler in real.handlers
+            )
+        )
+        url = verify_candidates.GITHUB_API_ORIGIN + "/repos/example-org/example-repo"
+        request = urllib.request.Request(url, method="GET")
+        self.assertIsNone(
+            verify_candidates._RefuseRedirects().redirect_request(
+                request, None, 302, "Found", {}, "https://evil.example/steal"
+            )
+        )
+
+        captured = {}
+
+        class RecordingOpener:
+            def open(self, opened_request, timeout):
+                captured["request"] = opened_request
+                captured["timeout"] = timeout
+                return "sentinel"
+
+        def build_opener(*handlers):
+            captured["handlers"] = handlers
+            return RecordingOpener()
+
+        with mock.patch.object(
+            verify_candidates.urllib.request, "build_opener", build_opener
+        ):
+            result = verify_candidates._open_https(request, 7.0)
+        self.assertEqual("sentinel", result)
+        self.assertIs(request, captured["request"])
+        self.assertEqual(7.0, captured["timeout"])
+        handlers = captured["handlers"]
+        proxies = [
+            handler
+            for handler in handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+        ]
+        self.assertEqual(1, len(proxies))
+        self.assertEqual({}, proxies[0].proxies)
+        self.assertTrue(
+            any(
+                isinstance(handler, verify_candidates._RefuseRedirects)
+                for handler in handlers
+            )
+        )
+        self.assertTrue(
+            any(
+                isinstance(handler, urllib.request.HTTPSHandler)
+                for handler in handlers
+            )
+        )
+
+    def test_https_token_is_a_bearer_header_and_never_persisted(self):
+        token = "ghp_" + "T" * 36
+        calls = []
+        client, _ = self.https_client(
+            [
+                http_reply(
+                    200,
+                    {"ok": True},
+                    {"Authorization": token, "Content-Type": "application/json"},
+                )
+            ],
+            calls,
+            token=token,
+        )
+        response = client.get_json("/repos/example-org/example-repo")
+        self.assertEqual("Bearer " + token, calls[0]["headers"]["authorization"])
+        self.assertNotIn(token, json.dumps(client.request_events))
+        self.assertNotIn(token, json.dumps(response.headers))
+        self.assertNotIn(token, repr(client.__dict__.get("request_events")))
+
+        for anonymous in (None, ""):
+            with self.subTest(token=anonymous):
+                anonymous_calls = []
+                anonymous_client, _ = self.https_client(
+                    [http_reply(200, {})], anonymous_calls, token=anonymous
+                )
+                anonymous_client.get_json("/repos/example-org/example-repo")
+                self.assertNotIn("authorization", anonymous_calls[0]["headers"])
+
+        for invalid in ("ghp_bad token", "ghp_x\r\nX-Injected: 1", "ghp_\x00"):
+            with self.subTest(token=repr(invalid)):
+                with self.assertRaises(ValueError) as caught:
+                    verify_candidates.GhApiClient(
+                        opener=fake_opener([], []), token=invalid
+                    )
+                self.assertNotIn(invalid, str(caught.exception))
+        with self.assertRaises(ValueError):
+            verify_candidates.GhApiClient(
+                runner=lambda *args, **kwargs: None, token=token
+            )
+        with self.assertRaises(ValueError):
+            verify_candidates.GhApiClient(
+                runner=lambda *args, **kwargs: None, opener=fake_opener([], [])
+            )
+
+    def test_https_refuses_unsafe_requests_before_sending(self):
+        calls = []
+        client, _ = self.https_client([], calls)
+        for endpoint in (
+            "//evil.example/repos",
+            "/repos/example-org/../x",
+            "/repos/%2e%2e/x",
+            "/repos/a b",
+            "/repos/a#fragment",
+            "/repos/a\\b",
+            "/repos/é",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with self.assertRaises(verify_candidates.HttpRequestRefused):
+                    client.get_json(endpoint)
+        self.assertEqual([], calls)
+        self.assertEqual(0, client.budget.consumed)
+        self.assertEqual([], client.request_events)
+        self.assertTrue(
+            issubclass(
+                verify_candidates.HttpRequestRefused,
+                verify_candidates.ChildCommandError,
+            )
+        )
+
+        url = verify_candidates.GITHUB_API_ORIGIN + "/repos/example-org/example-repo"
+
+        def request(target=url, data=None, method="GET", extra=None, drop=()):
+            headers = {
+                "Accept": verify_candidates.HTTP_ACCEPT,
+                "User-Agent": verify_candidates.HTTP_USER_AGENT,
+                "X-GitHub-Api-Version": verify_candidates.DEFAULT_API_VERSION,
+            }
+            headers.update(extra or {})
+            for name in drop:
+                headers.pop(name)
+            return urllib.request.Request(
+                target, data=data, headers=headers, method=method
+            )
+
+        verify_candidates._validate_api_request(request(), url)
+        verify_candidates._validate_api_request(
+            request(extra={"Authorization": "Bearer fixture"}), url
+        )
+        unredirected = request()
+        unredirected.add_unredirected_header("Authorization", "Bearer fixture")
+        refused = {
+            "post": request(method="POST"),
+            "head": request(method="HEAD"),
+            "payload": request(data=b"{}", method="GET"),
+            "foreign-host": request("https://evil.example/repos/x"),
+            "plain-http": request(url.replace("https://", "http://")),
+            "userinfo": request(url.replace("https://", "https://user:pw@")),
+            "port": request(url.replace("api.github.com", "api.github.com:8443")),
+            "cookie": request(extra={"Cookie": "session=fixture"}),
+            "header-injection": request(
+                extra={
+                    "X-GitHub-Api-Version": verify_candidates.DEFAULT_API_VERSION
+                    + "\r\nX-Evil: 1"
+                }
+            ),
+            "missing-user-agent": request(drop=("User-Agent",)),
+            "unredirected": unredirected,
+        }
+        for name, refused_request in refused.items():
+            with self.subTest(case=name):
+                with self.assertRaises(verify_candidates.HttpRequestRefused):
+                    verify_candidates._validate_api_request(refused_request, url)
+        for name in ("foreign-host", "plain-http", "userinfo", "port"):
+            with self.subTest(target=name):
+                with self.assertRaises(verify_candidates.HttpRequestRefused):
+                    verify_candidates._validate_api_request(
+                        refused[name], refused[name].full_url
+                    )
+
+    def test_https_never_follows_redirects(self):
+        path = "/repos/example-org/example-repo"
+        for status in (301, 302, 303, 307, 308):
+            with self.subTest(status=status):
+                calls = []
+                client, delays = self.https_client(
+                    [
+                        http_reply(
+                            status,
+                            {"message": "moved"},
+                            {
+                                "Location": "https://evil.example/steal",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                    ],
+                    calls,
+                )
+                response = client.get_json(path)
+                self.assertEqual(status, response.status)
+                self.assertNotIn("Location", response.headers)
+                self.assertEqual(1, len(calls))
+                self.assertEqual([], delays)
+                self.assertEqual(
+                    "not-retryable", client.request_events[0]["retry_reason"]
+                )
+
+        def followed(request):
+            del request
+            return FakeHttpResponse("https://evil.example/steal", 200, b"{}", {})
+
+        calls = []
+        client, _ = self.https_client([followed, followed], calls)
+        with self.assertRaises(verify_candidates.HttpRequestRefused):
+            client.get_json(path)
+        self.assertEqual(1, len(calls))
+
+    def test_https_status_classification_and_retries(self):
+        path = "/repos/example-org/example-repo"
+
+        def exercise(replies):
+            calls = []
+            client, delays = self.https_client(list(replies), calls)
+            response = client.get_json(path)
+            return response, client, delays, calls
+
+        response, client, delays, calls = exercise(
+            [http_reply(304, None, {"ETag": '"abc"'}, body=b"")]
+        )
+        self.assertEqual(304, response.status)
+        self.assertEqual({"ETag": '"abc"'}, response.headers)
+        self.assertIs(verify_candidates._UNPARSEABLE_PAYLOAD, response.payload)
+        self.assertEqual((1, []), (len(calls), delays))
+
+        response, client, delays, calls = exercise(
+            [http_reply(404, {"message": "Not Found"})]
+        )
+        self.assertEqual(404, response.status)
+        self.assertEqual({"message": "Not Found"}, response.payload)
+        self.assertEqual((1, []), (len(calls), delays))
+
+        response, client, delays, calls = exercise(
+            [http_reply(403, {"message": "forbidden"})]
+        )
+        self.assertEqual(403, response.status)
+        self.assertEqual("ambiguous-403", client.request_events[0]["retry_reason"])
+        self.assertEqual((1, []), (len(calls), delays))
+
+        for headers, reason, expected_delay in (
+            ({"Retry-After": "2"}, "retry-after", 2.0),
+            (
+                {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "105"},
+                "remaining-zero-and-reset",
+                5.0,
+            ),
+        ):
+            with self.subTest(reason=reason):
+                response, client, delays, calls = exercise(
+                    [
+                        http_reply(403, {"message": "rate limited"}, headers),
+                        http_reply(200, {"ok": True}),
+                    ]
+                )
+                self.assertEqual(200, response.status)
+                self.assertEqual([expected_delay], delays)
+                self.assertEqual(2, client.budget.consumed)
+                self.assertEqual(reason, client.request_events[0]["retry_reason"])
+                self.assertEqual("retry", client.request_events[0]["retry_decision"])
+
+        for status in (429, 503):
+            with self.subTest(status=status):
+                response, client, delays, calls = exercise(
+                    [http_reply(status, {"message": "retry"})] * 4
+                )
+                self.assertEqual(status, response.status)
+                self.assertEqual([60.0, 120.0, 240.0], delays)
+                self.assertEqual(4, client.budget.consumed)
+                self.assertEqual(
+                    "retry-limit-reached", client.request_events[-1]["retry_reason"]
+                )
+
+        sent = []
+
+        def mutating(status):
+            def reply(request):
+                sent.append(request)
+                # urllib adds unredirected headers such as Host while sending.
+                request.add_unredirected_header("Host", "api.github.com")
+                body = json.dumps({"message": "fixture"}).encode("utf-8")
+                if status >= 300:
+                    raise urllib.error.HTTPError(
+                        request.full_url, status, "fixture", {}, io.BytesIO(body)
+                    )
+                return FakeHttpResponse(request.full_url, status, body, {})
+
+            return reply
+
+        response, client, delays, calls = exercise([mutating(503), mutating(200)])
+        self.assertEqual(200, response.status)
+        self.assertEqual([60.0], delays)
+        self.assertIsNot(sent[0], sent[1])
+
+    def test_https_transport_failures_are_bounded(self):
+        path = "/repos/example-org/example-repo"
+        calls = []
+        client, delays = self.https_client(
+            [
+                urllib.error.URLError("fixture offline"),
+                TimeoutError("timed out"),
+                http.client.RemoteDisconnected("closed"),
+                ConnectionResetError("reset"),
+            ],
+            calls,
+        )
+        response = client.get_json(path)
+        self.assertEqual(599, response.status)
+        self.assertEqual("transport-error", response.payload["message"])
+        self.assertEqual(4, len(calls))
+        self.assertEqual([60.0, 120.0, 240.0], delays)
+        self.assertTrue(
+            all(event["error"] == "transport-error" for event in client.request_events)
+        )
+        self.assertEqual(
+            "retry-limit-reached", client.request_events[-1]["retry_reason"]
+        )
+
+        calls = []
+        client, delays = self.https_client(
+            [urllib.error.URLError("fixture offline"), http_reply(200, {"ok": True})],
+            calls,
+        )
+        response = client.get_json(path)
+        self.assertEqual(200, response.status)
+        self.assertEqual([60.0], delays)
+
+        with mock.patch.object(verify_candidates, "MAX_RESPONSE_BYTES", 8):
+            calls = []
+            client, delays = self.https_client(
+                [http_reply(200, {"payload": "larger than eight bytes"})] * 4, calls
+            )
+            response = client.get_json(path)
+        self.assertEqual(599, response.status)
+        self.assertEqual(4, len(calls))
+
+        def invalid_status(request):
+            return FakeHttpResponse(request.full_url, 999, b"{}", {})
+
+        calls = []
+        client, delays = self.https_client([invalid_status] * 4, calls)
+        self.assertEqual(599, client.get_json(path).status)
+
+    def test_https_budget_counts_every_attempt(self):
+        calls = []
+        client, delays = self.https_client(
+            [http_reply(503, {"message": "retry"})] * 4,
+            calls,
+            budget=verify_candidates.RequestBudget(2),
+        )
+        with self.assertRaises(verify_candidates.BudgetExhausted):
+            client.get_json("/repos/example-org/example-repo")
+        self.assertEqual(2, len(calls))
+        self.assertEqual(2, client.budget.consumed)
+        self.assertEqual(2, len(client.request_events))
+
+    def test_https_timeout_is_bounded(self):
+        for invalid in (0, -1, float("inf"), float("nan"), 121, True, "30"):
+            with self.subTest(timeout=invalid):
+                with self.assertRaises(ValueError):
+                    verify_candidates.GhApiClient(
+                        opener=fake_opener([], []), timeout=invalid
+                    )
+        calls = []
+        client, _ = self.https_client([http_reply(200, {})], calls, timeout=5)
+        client.get_json("/repos/example-org/example-repo")
+        self.assertEqual(5.0, calls[0]["timeout"])
+
+    def test_cli_discover_defaults_to_https_transport(self):
+        analysis = json.loads(
+            (SKILL_DIR / "tests/fixtures/common/analysis.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        analysis["patterns"] = analysis["patterns"][:1]
+        repository = "example-org/example-repo"
+        clues = analysis["patterns"][0]["search_clues"][:2]
+        token = "ghp_" + "S" * 36
+        replies = make_responses(repository, clues)
+        replies["/repos/" + repository]["headers"] = {
+            "Content-Type": "application/json",
+            "Set-Cookie": token,
+            "Authorization": token,
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            analysis_path = root / "analysis.json"
+            analysis_path.write_text(json.dumps(analysis), encoding="utf-8")
+            output = root / "discovery.json"
+            manifest = root / "manifest.json"
+            calls = []
+            code, stdout, stderr = self.run_main_https(
+                [
+                    "discover",
+                    "--analysis", str(analysis_path),
+                    "--repo", repository,
+                    "--max-clues-per-pattern", "2",
+                    "--output", str(output),
+                    "--manifest", str(manifest),
+                ],
+                replies,
+                calls,
+            )
+            self.assertIn(code, (0, 3), stderr)
+            self.assert_fixed_origin_gets(calls)
+            self.assertIn(
+                verify_candidates.GITHUB_API_ORIGIN + "/repos/" + repository,
+                [call["url"] for call in calls],
+            )
+            discovery = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "0123456789abcdef0123456789abcdef01234567",
+                discovery["records"][0]["head_sha"],
+            )
+            run = json.loads(manifest.read_text(encoding="utf-8"))["runs"][-1]
+            self.assertEqual(len(calls), run["budget"]["requests_consumed"])
+            self.assertEqual(len(calls), len(run["retry_events"]))
+            for event in run["retry_events"]:
+                self.assertLessEqual(
+                    set(event["headers"]), set(verify_candidates.ALLOWED_RESPONSE_HEADERS)
+                )
+            for artifact in (
+                output.read_text(encoding="utf-8"),
+                manifest.read_text(encoding="utf-8"),
+                stdout,
+                stderr,
+            ):
+                self.assertNotIn(token, artifact)
+
+    def test_cli_recheck_defaults_to_https_transport(self):
+        repository = "example-org/example-repo"
+        record = discovery_record(repository)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result, _, _, candidates, manifest = self.run_record(
+                root / "record", [record]
+            )
+            self.assertEqual(0, result[0], result[2])
+            output = root / "rechecked.json"
+            calls = []
+            code, _, stderr = self.run_main_https(
+                [
+                    "recheck", "--candidates", str(candidates),
+                    "--output", str(output), "--manifest", str(manifest),
+                ],
+                make_recheck_responses(record),
+                calls,
+            )
+            self.assertEqual(0, code, stderr)
+            self.assert_fixed_origin_gets(calls)
+            run = json.loads(manifest.read_text(encoding="utf-8"))["runs"][-1]
+            self.assertEqual("recheck", run["command"])
+            self.assertEqual(len(calls), run["budget"]["requests_consumed"])
+
+            def followed(request):
+                del request
+                return FakeHttpResponse("https://evil.example/steal", 200, b"{}", {})
+
+            refused_calls = []
+            code, _, stderr = self.run_main_https(
+                [
+                    "recheck", "--candidates", str(candidates),
+                    "--output", str(root / "refused.json"),
+                    "--manifest", str(root / "refused-manifest.json"),
+                ],
+                [followed],
+                refused_calls,
+            )
+            self.assertEqual(2, code)
+            self.assertIn("unexpected URL", stderr)
+            self.assertEqual(1, len(refused_calls))
+
+    def test_cli_locus_search_defaults_to_https_transport(self):
+        repository = "example-org/example-repo"
+        record = discovery_record(repository)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery, assessment = self.write_record_inputs(root / "inputs", [record])
+            output = root / "locus-search.json"
+            manifest = root / "locus-manifest.json"
+            calls = []
+            code, stdout, stderr = self.run_main_https(
+                [
+                    "locus-search",
+                    "--discovery", str(discovery),
+                    "--assessment", str(assessment),
+                    "--output", str(output),
+                    "--manifest", str(manifest),
+                ],
+                self.locus_search_responses(repository, POSITIVE_LOCUS),
+                calls,
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(stdout.startswith("complete"), stdout)
+            self.assert_fixed_origin_gets(calls)
+            self.assertTrue(
+                all(
+                    call["url"].startswith(
+                        verify_candidates.GITHUB_API_ORIGIN + "/search/issues?q="
+                    )
+                    for call in calls
+                )
+            )
+            run = json.loads(manifest.read_text(encoding="utf-8"))["runs"][-1]
+            self.assertEqual(len(calls), run["budget"]["requests_consumed"])
+
+    def test_cli_https_token_priority_and_secrecy(self):
+        repository = "example-org/example-repo"
+        record = discovery_record(repository)
+        primary = "ghp_" + "P" * 36
+        fallback = "github_pat_" + "F" * 36
+        replies = self.locus_search_responses(repository, POSITIVE_LOCUS)
+        for reply in replies.values():
+            reply["headers"] = {
+                "Content-Type": "application/json",
+                "Authorization": primary,
+                "Set-Cookie": fallback,
+            }
+        cases = (
+            ({"GH_TOKEN": primary, "GITHUB_TOKEN": fallback}, primary),
+            ({"GITHUB_TOKEN": fallback}, fallback),
+            ({"GH_TOKEN": "", "GITHUB_TOKEN": fallback}, fallback),
+            ({"GH_TOKEN": "   ", "GITHUB_TOKEN": fallback}, fallback),
+            ({"GH_TOKEN": primary + "\n"}, primary),
+            ({}, None),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery, assessment = self.write_record_inputs(root / "inputs", [record])
+
+            def arguments(name):
+                return [
+                    "locus-search",
+                    "--discovery", str(discovery),
+                    "--assessment", str(assessment),
+                    "--output", str(root / (name + ".json")),
+                    "--manifest", str(root / (name + "-manifest.json")),
+                ]
+
+            for index, (environment, expected) in enumerate(cases):
+                with self.subTest(case=index):
+                    calls = []
+                    code, stdout, stderr = self.run_main_https(
+                        arguments("case-%d" % index), replies, calls, environment
+                    )
+                    self.assertEqual(0, code, stderr)
+                    self.assertTrue(calls)
+                    for call in calls:
+                        self.assertTrue(
+                            call["url"].startswith(
+                                verify_candidates.GITHUB_API_ORIGIN + "/"
+                            )
+                        )
+                        if expected is None:
+                            self.assertNotIn("authorization", call["headers"])
+                        else:
+                            self.assertEqual(
+                                "Bearer " + expected, call["headers"]["authorization"]
+                            )
+                    artifacts = (
+                        (root / ("case-%d.json" % index)).read_text(encoding="utf-8"),
+                        (root / ("case-%d-manifest.json" % index)).read_text(
+                            encoding="utf-8"
+                        ),
+                        stdout,
+                        stderr,
+                    )
+                    for artifact in artifacts:
+                        self.assertNotIn(primary, artifact)
+                        self.assertNotIn(fallback, artifact)
+                        self.assertNotIn("Bearer", artifact)
+
+            invalid = "ghp_" + "I" * 20 + " spaced"
+            calls = []
+            code, stdout, stderr = self.run_main_https(
+                arguments("invalid"), replies, calls, {"GH_TOKEN": invalid}
+            )
+            self.assertEqual(2, code)
+            self.assertIn("unsupported characters", stderr)
+            self.assertNotIn(invalid, stderr)
+            self.assertNotIn("I" * 20, stderr + stdout)
+            self.assertEqual([], calls)
+            self.assertFalse((root / "invalid-manifest.json").exists())
+
+            gh_calls = []
+
+            def gh_runner(command, **kwargs):
+                gh_calls.append((list(command), dict(kwargs)))
+                empty = {"total_count": 0, "incomplete_results": False, "items": []}
+                return subprocess.CompletedProcess(
+                    command, 0, included_response(200, empty), ""
+                )
+
+            with mock.patch.dict(verify_candidates.os.environ, {}):
+                verify_candidates.os.environ["GH_TOKEN"] = primary
+                code, _, stderr, _ = self.run_main(arguments("gh"), runner=gh_runner)
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(gh_calls)
+            for command, kwargs in gh_calls:
+                self.assertEqual(["gh", "api", "--method", "GET"], command[:4])
+                self.assertNotIn(primary, json.dumps(command))
+                self.assertNotIn("env", kwargs)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time as clock_time
 from typing import Any, Callable, Optional
+import urllib.request
 
 
 SKILL_NAME = "collecting-open-source-issues"
@@ -204,6 +205,7 @@ ISSUE_EVIDENCE_QUERY = """query IssueEvidence($owner: String!, $name: String!, $
   }
 }"""
 GRAPHQL_EVIDENCE_ENDPOINT = "GraphQL query IssueEvidence"
+GRAPHQL_URL = "https://api.github.com/graphql"
 _QUERY_DOCUMENT = re.compile(r"\A\s*query\b")
 _NON_QUERY_OPERATION = re.compile(r"\b(?:mutation|subscription)\b")
 
@@ -212,8 +214,9 @@ class GraphqlQueryClient(_sibling.GhApiClient):
     """Read-only GraphQL transport that shares the sibling's budget and retries.
 
     Only ``query`` documents are sent. The sibling client owns attempts,
-    retries, response parsing, and redaction; this subclass only changes the
-    command line from ``gh api --method GET`` to ``gh api graphql``.
+    retries, response parsing, credentials, and redaction; this subclass only
+    replaces the GET request with a POST to ``/graphql`` (``http_request``) and,
+    for injected fixture runners, ``gh api --method GET`` with ``gh api graphql``.
     """
 
     def query(self, document: str, variables: dict[str, object]) -> Any:
@@ -223,6 +226,8 @@ class GraphqlQueryClient(_sibling.GhApiClient):
             or _NON_QUERY_OPERATION.search(document) is not None
         ):
             raise ValueError("GraphQL documents must be query operations")
+        if "query" in variables:
+            raise ValueError("GraphQL variables must not replace the checked query")
         params: dict[str, object] = {"query": document}
         params.update(variables)
         return self.get_json("/graphql", params)
@@ -241,12 +246,43 @@ class GraphqlQueryClient(_sibling.GhApiClient):
             command.extend([flag, "{0}={1}".format(name, value)])
         return command
 
+    def http_request(
+        self,
+        endpoint: str,
+        params: Optional[dict[str, object]],
+        cached_etag: Optional[str],
+    ) -> urllib.request.Request:
+        """GraphQL is the only POST: a checked query to the fixed GitHub endpoint.
+
+        The sibling checks the built request again and attaches the credential.
+        """
+        if endpoint != "/graphql" or cached_etag is not None or not isinstance(params, dict):
+            raise ValueError("the GraphQL client only sends unconditional /graphql queries")
+        document = params.get("query")
+        if (
+            not isinstance(document, str)
+            or _QUERY_DOCUMENT.match(document) is None
+            or _NON_QUERY_OPERATION.search(document) is not None
+        ):
+            raise ValueError("GraphQL documents must be query operations")
+        variables = {name: value for name, value in params.items() if name != "query"}
+        body = json.dumps(
+            {"query": document, "variables": variables}, separators=(",", ":")
+        ).encode("utf-8")
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "X-GitHub-Api-Version": self.api_version,
+            "User-Agent": "dotfiles-oss-research",
+        }
+        return urllib.request.Request(GRAPHQL_URL, data=body, headers=headers, method="POST")
+
 
 def build_clients(
     *,
     api_version: str,
     request_budget: int,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Optional[Callable[..., Any]] = None,
     sleeper: Callable[[float], None] = clock_time.sleep,
 ) -> tuple[Any, GraphqlQueryClient]:
     """Create REST and GraphQL clients that consume one shared request budget."""
@@ -1262,7 +1298,7 @@ def _prepare_request(args: argparse.Namespace) -> dict[str, object]:
 def main(
     argv: Optional[list[str]] = None,
     *,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Optional[Callable[..., Any]] = None,
     sleeper: Callable[[float], None] = clock_time.sleep,
 ) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)

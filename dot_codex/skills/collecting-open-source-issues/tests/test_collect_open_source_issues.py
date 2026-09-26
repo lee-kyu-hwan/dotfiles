@@ -6,6 +6,7 @@ import ast
 import contextlib
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+import email.message
 import hashlib
 import importlib.util
 import io
@@ -19,6 +20,9 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+import urllib.error
+import urllib.parse
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -709,12 +713,209 @@ class TransportTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             graphql.query("mutation { addComment(input: {}) { clientMutationId } }", {})
+        with self.assertRaises(ValueError):
+            graphql.query(
+                "query Safe { viewer { login } }",
+                {"query": "mutation Unsafe { addComment(input: {}) { clientMutationId } }"},
+            )
         self.assertEqual([], runner.calls)
 
     def test_rest_and_graphql_share_one_request_budget(self):
         run, runner = collect_run(self.collector, state="closed")
         api_calls = [call for call in runner.calls if call[:2] == ["gh", "api"]]
         self.assertEqual(len(api_calls), latest_run(run)["request_count"])
+
+
+FIXTURE_TOKEN = "ghp_" + "F" * 36
+
+
+def _message(headers):
+    message = email.message.Message()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return message
+
+
+class FakeHttpResponse:
+    def __init__(self, status, payload, headers=None, url=None):
+        self.status = status
+        self.headers = _message(headers)
+        self.body = json.dumps(payload).encode("utf-8")
+        self.url = url
+
+    def geturl(self):
+        return self.url
+
+    def read(self):
+        return self.body
+
+    def close(self):
+        pass
+
+
+class FakeOpener:
+    """Answers urllib requests from ``handler(request)``; it never opens a socket."""
+
+    def __init__(self, handler):
+        self.handler = handler
+        self.requests = []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        response = self.handler(request)
+        if isinstance(response, BaseException):
+            raise response
+        response.url = response.url or request.full_url
+        return response
+
+
+def _http_error(request, status, payload):
+    return urllib.error.HTTPError(
+        request.full_url, status, "synthetic", _message({}), io.BytesIO(json.dumps(payload).encode("utf-8")),
+    )
+
+
+def _empty_connection():
+    return {"totalCount": 0, "pageInfo": {"hasNextPage": False}, "nodes": []}
+
+
+def _urllib_world(request):
+    """A one-Issue public world addressed by the production URLs."""
+    parts = urllib.parse.urlsplit(request.full_url)
+    if request.get_method() == "POST":
+        return FakeHttpResponse(200, {"data": {"repository": {"issue": {
+            "id": "I_urllib_1", "lastEditedAt": None, "userContentEdits": _empty_connection(),
+            "duplicateOf": None, "closedByPullRequestsReferences": _empty_connection(),
+            "timelineItems": _empty_connection(), "comments": _empty_connection(),
+        }}}})
+    issue = {
+        "number": 1, "node_id": "I_urllib_1", "title": "Synthetic", "state": "open", "body": "text",
+        "created_at": "2030-01-10T00:00:00Z", "updated_at": "2030-01-11T00:00:00Z",
+        "url": "https://api.github.com/repos/{0}/issues/1".format(REPO),
+        "html_url": "https://github.com/{0}/issues/1".format(REPO),
+        "user": {"login": "fixture-user"}, "author_association": "CONTRIBUTOR", "labels": [],
+    }
+    routes = {
+        "/versions": ["2026-03-10"],
+        "/repos/" + REPO: {"full_name": REPO, "node_id": "R_urllib"},
+        "/search/issues": {"total_count": 1, "incomplete_results": False, "items": [issue]},
+        "/repos/{0}/issues/1".format(REPO): issue,
+        "/repos/{0}/issues/1/comments".format(REPO): [],
+        "/repos/{0}/issues/1/timeline".format(REPO): [],
+    }
+    return FakeHttpResponse(200, routes[parts.path])
+
+
+class UrllibTransportTests(unittest.TestCase):
+    """The production urllib path, driven by a fake opener and token provider instead of GitHub."""
+
+    def setUp(self):
+        self.collector = load_collector()
+        self.sibling = self.collector._sibling
+        no_subprocess = patch.object(
+            self.sibling.subprocess, "run",
+            side_effect=AssertionError("the production transport must not start a subprocess"),
+        )
+        no_subprocess.start()
+        self.addCleanup(no_subprocess.stop)
+
+    def clients(self, handler, *, token=FIXTURE_TOKEN, budget=50):
+        opener = FakeOpener(handler)
+        shared = self.sibling.RequestBudget(budget)
+        sleeps = []
+        options = {"budget": shared, "sleeper": sleeps.append, "opener": opener, "token_provider": lambda: token}
+        rest = self.sibling.GhApiClient(**options)
+        graphql = self.collector.GraphqlQueryClient(**options)
+        graphql.request_events = rest.request_events
+        return rest, graphql, opener, sleeps
+
+    def test_graphql_query_posts_json_to_the_fixed_endpoint(self):
+        rest, graphql, opener, _ = self.clients(_urllib_world)
+        variables = {"owner": "synthetic-lab", "name": "widget", "number": 1}
+
+        response = graphql.query(self.collector.ISSUE_EVIDENCE_QUERY, variables)
+        rest.get_json("/repos/" + REPO)
+
+        request = opener.requests[0]
+        self.assertEqual(("POST", "https://api.github.com/graphql"), (request.get_method(), request.full_url))
+        self.assertEqual({"query": self.collector.ISSUE_EVIDENCE_QUERY, "variables": variables},
+                         json.loads(request.data.decode("utf-8")))
+        headers = {name.lower(): value for name, value in request.header_items()}
+        self.assertEqual("application/json", headers["content-type"])
+        self.assertEqual("Bearer " + FIXTURE_TOKEN, headers["authorization"])
+        self.assertNotIn("if-none-match", headers)
+        self.assertEqual("I_urllib_1", response.payload["data"]["repository"]["issue"]["id"])
+        self.assertEqual("GET", opener.requests[1].get_method())
+        self.assertEqual(2, rest.budget.consumed)
+        self.assertEqual(["/graphql", "/repos/" + REPO], [event["endpoint"] for event in rest.request_events])
+
+    def test_graphql_refuses_non_queries_before_sending(self):
+        _, graphql, opener, _ = self.clients(_urllib_world)
+        for document, variables in (
+            ("mutation { addStar(input: {}) { clientMutationId } }", {}),
+            ("subscription { issueUpdated { id } }", {}),
+            ("query A { viewer { login } } mutation B { addStar(input: {}) { clientMutationId } }", {}),
+            ("query Safe { viewer { login } }", {"query": "mutation Unsafe { addStar(input: {}) { clientMutationId } }"}),
+        ):
+            with self.subTest(document=document, variables=variables), self.assertRaises(ValueError):
+                graphql.query(document, variables)
+        self.assertEqual(0, graphql.budget.consumed)
+
+        for endpoint, params, options in (
+            ("/graphql", {"query": "mutation { addStar(input: {}) { clientMutationId } }"}, {}),
+            ("/graphql", {"query": "query { viewer { login } }"}, {"cached_etag": '"v1"'}),
+            ("/repos/" + REPO, {"query": "query { viewer { login } }"}, {}),
+        ):
+            with self.subTest(endpoint=endpoint, params=params, options=options):
+                with self.assertRaises(self.sibling.ApiFailure):
+                    graphql.get_json(endpoint, params, **options)
+        self.assertEqual([], opener.requests)
+
+    def test_graphql_retries_server_errors_and_keeps_the_token_out_of_failures(self):
+        answers = [
+            lambda request: _http_error(request, 502, {"message": "Bad Gateway"}),
+            _urllib_world,
+            lambda request: _http_error(request, 401, {"message": "Bad credentials " + FIXTURE_TOKEN}),
+        ]
+        _, graphql, opener, sleeps = self.clients(lambda request: answers.pop(0)(request))
+        variables = {"owner": "synthetic-lab", "name": "widget", "number": 1}
+
+        graphql.query(self.collector.ISSUE_EVIDENCE_QUERY, variables)
+        self.assertEqual([1.0], sleeps)
+        self.assertEqual([502, 200], [event["status"] for event in graphql.request_events])
+
+        with self.assertRaises(self.sibling.ApiFailure) as raised:
+            graphql.query(self.collector.ISSUE_EVIDENCE_QUERY, variables)
+        self.assertEqual(401, raised.exception.status)
+        self.assertNotIn(FIXTURE_TOKEN, str(raised.exception) + raised.exception.diagnostics)
+        self.assertNotIn(FIXTURE_TOKEN, json.dumps(graphql.request_events))
+        self.assertEqual(3, len(opener.requests))
+
+    def test_anonymous_collection_reads_only_github_and_records_anonymous(self):
+        rest, graphql, opener, _ = self.clients(_urllib_world, token=None)
+        interval = self.collector.resolve_interval(
+            start_at="2030-01-01T00:00:00Z", end_at="2030-02-01T00:00:00Z", start_date=None, end_date=None,
+            recent_days=None, timezone_name="UTC", as_of=None,
+        )
+
+        run = self.collector.collect(
+            rest, graphql, repositories=[REPO], date_field="created", state="all", labels=[], interval=interval,
+            max_per_repository=25, captured_at=CAPTURED_AT, skill_revision=TEST_REVISION,
+        )
+
+        self.assertEqual(0, run.exit_code)
+        manifest = latest_run(run)
+        self.assertEqual("complete", manifest["collection_status"])
+        self.assertEqual({"login": "anonymous", "client_version": "python-urllib", "api_version": "2026-03-10"},
+                         manifest["preflight"])
+        self.assertEqual("complete", record_for(run, 1)["hydration_status"])
+        self.assertEqual(len(opener.requests), manifest["request_count"])
+        methods = [(request.get_method(), urllib.parse.urlsplit(request.full_url).path) for request in opener.requests]
+        self.assertEqual([("POST", "/graphql")], [call for call in methods if call[0] != "GET"])
+        self.assertNotIn(("GET", "/user"), methods)
+        for request in opener.requests:
+            self.assertEqual("api.github.com", urllib.parse.urlsplit(request.full_url).netloc)
+            self.assertNotIn("authorization", {name.lower() for name, _value in request.header_items()})
 
 
 class FailureTests(unittest.TestCase):

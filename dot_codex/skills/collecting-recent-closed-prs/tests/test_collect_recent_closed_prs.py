@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, dataclass
 from copy import deepcopy
+import email.message
 from importlib import util
 import inspect
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +16,9 @@ import tempfile
 import shutil
 import unittest
 from unittest.mock import patch
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 SCRIPT_PATH = (
@@ -2566,6 +2571,35 @@ class SharedSurfaceTests(unittest.TestCase):
         self.assertEqual(1, client.budget.consumed)
         self.assertEqual(1, len(client.request_events))
 
+    def test_http_request_hook_is_all_a_subclass_replaces(self):
+        """collecting-open-source-issues sends GraphQL over urllib by overriding http_request."""
+        for method in ("api_command", "http_request"):
+            self.assertEqual(
+                ["self", "endpoint", "params", "cached_etag"],
+                list(inspect.signature(getattr(self.collector.GhApiClient, method)).parameters),
+            )
+
+        class Replaced(self.collector.GhApiClient):
+            def http_request(self, endpoint, params, cached_etag):
+                body = json.dumps({"query": params["query"], "variables": {}}).encode("utf-8")
+                return urllib.request.Request(
+                    "https://api.github.com/graphql", data=body,
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+
+        opener = FakeOpener([FakeHttpResponse(200, {"ETag": '"v1"'}, '{"data": {}}')])
+        client = Replaced(budget=self.collector.RequestBudget(5), sleeper=FakeSleep(), opener=opener,
+                          token_provider=lambda: FIXTURE_TOKEN)
+
+        response = client.get_json("/graphql", {"query": "query { viewer { login } }"})
+
+        request = opener.requests[0]
+        self.assertEqual("POST", request.get_method())
+        self.assertEqual("Bearer " + FIXTURE_TOKEN, request_headers(request)["authorization"])
+        self.assertEqual({"data": {}}, response.payload)
+        self.assertEqual(1, client.budget.consumed)
+        self.assertEqual(1, len(client.request_events))
+
     def test_list_reader_validates_the_categories_consumers_name(self):
         """An unknown category accepts every item, so a rename would stop validation silently."""
         malformed = {"issue_comments": {"body": "no id"}, "timeline": {"actor": {"login": "someone"}}}
@@ -2612,6 +2646,347 @@ class SharedSurfaceTests(unittest.TestCase):
         )
         meta = collector.completeness("GET /x", True, 1, None, "2030-01-01T00:00:00Z", 1, None, [])
         self.assertIs(True, meta["pages_complete"])
+
+
+FIXTURE_TOKEN = "ghp_" + "F" * 36
+
+
+def _message(headers):
+    message = email.message.Message()
+    for name, value in (headers or {}).items():
+        message[name] = value
+    return message
+
+
+class FakeHttpResponse:
+    """A urllib response stand-in; ``url`` defaults to the request URL."""
+
+    def __init__(self, status, headers=None, body="{}", url=None):
+        self.status = status
+        self.headers = _message(headers)
+        self.body = body.encode("utf-8")
+        self.url = url
+        self.closed = False
+
+    def geturl(self):
+        return self.url
+
+    def read(self):
+        return self.body
+
+    def close(self):
+        self.closed = True
+
+
+def http_error(status, headers=None, body="{}"):
+    """Build the HTTPError urllib raises for a non-2xx status at the requested URL."""
+    return lambda request: urllib.error.HTTPError(
+        request.full_url, status, "synthetic", _message(headers), io.BytesIO(body.encode("utf-8")),
+    )
+
+
+class FakeOpener:
+    """A deterministic replacement for the urllib opener; it never opens a socket."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.requests = []
+        self.timeouts = []
+
+    def open(self, request, timeout=None):
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        if not self.responses:
+            raise AssertionError("opener received more requests than expected")
+        response = self.responses.pop(0)
+        if callable(response):
+            response = response(request)
+        if isinstance(response, BaseException):
+            raise response
+        if response.url is None:
+            response.url = request.full_url
+        return response
+
+
+def request_headers(request):
+    return {name.lower(): value for name, value in request.header_items()}
+
+
+class UrllibTransportTests(unittest.TestCase):
+    """The production urllib path, driven by a fake opener and token provider instead of GitHub."""
+
+    def setUp(self):
+        self.collector = load_collector()
+        no_subprocess = patch.object(
+            self.collector.subprocess, "run",
+            side_effect=AssertionError("the production transport must not start a subprocess"),
+        )
+        no_subprocess.start()
+        self.addCleanup(no_subprocess.stop)
+
+    def client(self, responses, *, token=FIXTURE_TOKEN, budget=10, client_class=None):
+        opener = FakeOpener(responses)
+        sleeper = FakeSleep()
+        loads = []
+
+        def token_provider():
+            loads.append(True)
+            return token
+
+        client = (client_class or self.collector.GhApiClient)(
+            budget=self.collector.RequestBudget(budget), sleeper=sleeper, clock=lambda: 1000.0,
+            opener=opener, token_provider=token_provider,
+        )
+        return client, opener, sleeper, loads
+
+    def test_rest_get_uses_the_fixed_origin_version_and_bearer_token(self):
+        client, opener, _, loads = self.client([
+            FakeHttpResponse(200, {"ETag": '"v1"'}, '{"total_count": 0}'),
+            FakeHttpResponse(200, {}, '{"full_name": "owner/repo"}'),
+        ])
+
+        response = client.get_json("/search/issues", {"q": "repo:owner/repo is:pr", "page": 2})
+        client.get_json("/repos/owner/repo")
+
+        request = opener.requests[0]
+        parts = urllib.parse.urlsplit(request.full_url)
+        self.assertEqual(("https", "api.github.com", "/search/issues"), (parts.scheme, parts.netloc, parts.path))
+        self.assertEqual({"per_page": ["100"], "q": ["repo:owner/repo is:pr"], "page": ["2"]},
+                         urllib.parse.parse_qs(parts.query))
+        self.assertEqual("GET", request.get_method())
+        self.assertIsNone(request.data)
+        headers = request_headers(request)
+        self.assertEqual("Bearer " + FIXTURE_TOKEN, headers["authorization"])
+        self.assertEqual(self.collector.API_VERSION, headers["x-github-api-version"])
+        self.assertEqual("application/vnd.github+json", headers["accept"])
+        self.assertNotIn("if-none-match", headers)
+        self.assertEqual("/repos/owner/repo", urllib.parse.urlsplit(opener.requests[1].full_url).path)
+        self.assertEqual([self.collector.HTTP_TIMEOUT_SECONDS] * 2, opener.timeouts)
+        self.assertEqual({"total_count": 0}, response.payload)
+        self.assertEqual('"v1"', response.headers["etag"])
+        self.assertEqual(1, len(loads))
+        self.assertEqual(2, client.budget.consumed)
+
+    def test_anonymous_preflight_skips_user_and_sends_no_authorization(self):
+        client, opener, _, _ = self.client([FakeHttpResponse(200, {}, '["2026-03-10"]')], token=None)
+
+        preflight = client.global_preflight()
+
+        self.assertEqual({"login": "anonymous", "client_version": "python-urllib",
+                          "api_version": self.collector.API_VERSION}, preflight)
+        self.assertEqual(["/versions"], [urllib.parse.urlsplit(r.full_url).path for r in opener.requests])
+        self.assertNotIn("authorization", request_headers(opener.requests[0]))
+
+    def test_authenticated_preflight_reads_the_user_login(self):
+        client, opener, _, _ = self.client([
+            FakeHttpResponse(200, {}, '{"login": "fixture-user"}'),
+            FakeHttpResponse(200, {}, '{"versions": ["2026-03-10"]}'),
+        ])
+
+        self.assertEqual("fixture-user", client.global_preflight()["login"])
+        self.assertEqual(["/user", "/versions"], [urllib.parse.urlsplit(r.full_url).path for r in opener.requests])
+
+    def test_matching_304_reuses_the_cached_payload(self):
+        client, opener, _, _ = self.client([http_error(304, {"ETag": '"v1"'}, "")])
+
+        response = client.get_json("/repos/owner/repo", cached_payload={"cached": True}, cached_etag='"v1"')
+
+        self.assertEqual((304, {"cached": True}), (response.status, response.payload))
+        self.assertEqual('"v1"', request_headers(opener.requests[0])["if-none-match"])
+        self.assertEqual([{"endpoint": "/repos/owner/repo", "attempt": 1, "status": 304, "conditional": True}],
+                         client.request_events)
+
+    def test_mismatched_304_fails_without_echoing_the_conditional_header(self):
+        client, opener, _, _ = self.client([http_error(304, {"ETag": '"v2"'}, "")])
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo", cached_payload={"cached": True}, cached_etag='"v1-secret"')
+
+        self.assertEqual(304, raised.exception.status)
+        self.assertNotIn("v1-secret", str(raised.exception) + raised.exception.diagnostics)
+        self.assertNotIn("v1-secret", json.dumps(client.request_events))
+        self.assertEqual(1, len(opener.requests))
+
+    def test_retryable_statuses_keep_the_bounded_retry_schedule(self):
+        client, _, sleeper, _ = self.client([
+            http_error(502),
+            http_error(429, {"Retry-After": "7"}),
+            http_error(403, {"X-RateLimit-Reset": "1030"}, '{"message": "API rate limit exceeded"}'),
+            FakeHttpResponse(200, {}, '{"ok": true}'),
+        ])
+
+        response = client.get_json("/repos/owner/repo")
+
+        self.assertEqual({"ok": True}, response.payload)
+        self.assertEqual([1.0, 7.0, 30.0], sleeper.delays)
+        self.assertEqual([502, 429, 403, 200], [event["status"] for event in client.request_events])
+        self.assertEqual(4, client.budget.consumed)
+
+    def test_non_retryable_and_exhausted_statuses_raise_api_failure(self):
+        client, opener, sleeper, _ = self.client([http_error(403, {}, '{"message": "Resource not accessible"}')])
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo")
+        self.assertEqual((403, [], 1), (raised.exception.status, sleeper.delays, len(opener.requests)))
+
+        client, opener, sleeper, _ = self.client([http_error(500)] * 4)
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo")
+        self.assertEqual((500, [1.0, 2.0, 4.0], 4), (raised.exception.status, sleeper.delays, len(opener.requests)))
+
+    def test_budget_is_consumed_before_each_urllib_attempt(self):
+        client, opener, _, _ = self.client([http_error(502)], budget=1)
+
+        with self.assertRaises(self.collector.BudgetExhausted):
+            client.get_json("/repos/owner/repo")
+
+        self.assertEqual((1, 1), (client.budget.consumed, len(opener.requests)))
+
+    def test_transport_errors_retry_and_never_include_the_token(self):
+        failure = urllib.error.URLError("refused with Bearer " + FIXTURE_TOKEN)
+        client, _, sleeper, _ = self.client([failure, FakeHttpResponse(200, {}, "{}")])
+        self.assertEqual({}, client.get_json("/repos/owner/repo").payload)
+        self.assertEqual(([1.0], None), (sleeper.delays, client.request_events[0]["status"]))
+
+        client, _, _, _ = self.client([failure] * 4)
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo")
+        self.assertEqual("GitHub HTTP transport failed", str(raised.exception))
+        self.assertNotIn(FIXTURE_TOKEN, str(raised.exception) + raised.exception.diagnostics)
+
+    def test_redirects_are_not_followed(self):
+        client, opener, sleeper, _ = self.client([http_error(302, {"Location": "https://example.invalid/steal"})])
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo")
+
+        self.assertEqual((302, 1, []), (raised.exception.status, len(opener.requests), sleeper.delays))
+        default = self.collector.GhApiClient(budget=self.collector.RequestBudget(1))
+        self.assertEqual(
+            [self.collector._NoRedirect],
+            [type(handler) for handler in default._opener.handlers
+             if isinstance(handler, urllib.request.HTTPRedirectHandler)],
+        )
+        self.assertIsNone(self.collector._NoRedirect().redirect_request(
+            None, None, 302, "Found", {}, "https://example.invalid/steal",
+        ))
+
+    def test_a_response_from_another_origin_is_rejected(self):
+        answer = FakeHttpResponse(200, {}, '{"ok": true}', url="https://example.invalid/repos/owner/repo")
+        client, opener, _, _ = self.client([answer])
+
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/repos/owner/repo")
+
+        self.assertEqual("GitHub HTTP request is invalid", str(raised.exception))
+        self.assertEqual(1, len(opener.requests))
+        self.assertTrue(answer.closed)
+
+    def test_requests_outside_the_read_only_surface_never_reach_the_opener(self):
+        def graphql(document):
+            return json.dumps({"query": document, "variables": {}}).encode("utf-8")
+
+        Request = urllib.request.Request
+        cases = [
+            Request("https://example.invalid/repos/owner/repo"),
+            Request("http://api.github.com/repos/owner/repo"),
+            Request("https://api.github.com.example.invalid/repos/owner/repo"),
+            Request("https://user@api.github.com/repos/owner/repo"),
+            Request("https://api.github.com:8443/repos/owner/repo"),
+            Request("https://api.github.com/repos/owner/repo", method="DELETE"),
+            Request("https://api.github.com/repos/owner/repo/issues", data=b"{}", method="POST"),
+            Request("https://api.github.com/graphql?x=1", data=graphql("query { viewer { login } }"), method="POST"),
+            Request("https://api.github.com/graphql", data=graphql("mutation { addStar(input: {}) { clientMutationId } }"),
+                    method="POST"),
+            Request("https://api.github.com/graphql", data=graphql("query A { a } mutation B { b }"), method="POST"),
+            Request("https://api.github.com/graphql", data=graphql("subscription { s }"), method="POST"),
+            Request("https://api.github.com/graphql", data=b"not json", method="POST"),
+            Request("https://api.github.com/graphql",
+                    data=json.dumps({"query": "query { a }", "operationName": "B"}).encode("utf-8"), method="POST"),
+            Request("https://api.github.com/repos/owner/repo", headers={"X-HTTP-Method-Override": "DELETE"}),
+            Request("https://api.github.com/repos/owner/repo", headers={"Authorization": "Bearer other"}),
+        ]
+        for built in cases:
+            with self.subTest(url=built.full_url, method=built.get_method(), data=built.data):
+                class Hooked(self.collector.GhApiClient):
+                    def http_request(self, endpoint, params, cached_etag, built=built):
+                        return built
+
+                client, opener, _, loads = self.client([], client_class=Hooked)
+                with self.assertRaises(self.collector.ApiFailure):
+                    client.get_json("/repos/owner/repo")
+                self.assertEqual([], opener.requests)
+                self.assertEqual([], loads)
+
+    def test_error_messages_and_headers_do_not_leak_credentials(self):
+        client, _, _, _ = self.client([
+            http_error(401, {"Set-Cookie": "session=secret"}, json.dumps({"message": "Bad credentials " + FIXTURE_TOKEN})),
+        ])
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            client.get_json("/user")
+        self.assertEqual(401, raised.exception.status)
+        self.assertNotIn(FIXTURE_TOKEN, str(raised.exception) + raised.exception.diagnostics)
+        self.assertNotIn(FIXTURE_TOKEN, json.dumps(client.request_events))
+
+        client, _, _, _ = self.client([
+            FakeHttpResponse(200, {"Set-Cookie": "session=secret", "X-GitHub-Token-Expiration": "soon"}, "{}"),
+        ])
+        headers = client.get_json("/user").headers
+        self.assertNotIn("set-cookie", headers)
+        self.assertNotIn("x-github-token-expiration", headers)
+
+
+class TokenProviderTests(unittest.TestCase):
+    """Authentication order is GH_TOKEN, GITHUB_TOKEN, then ``gh auth token``; nothing means anonymous."""
+
+    def setUp(self):
+        self.collector = load_collector()
+
+    def provide(self, environment, completed=None):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if isinstance(completed, BaseException):
+                raise completed
+            if completed is None:
+                raise AssertionError("gh auth token must not run when an environment token is set")
+            return completed
+
+        with patch.dict(self.collector.os.environ, environment, clear=True), \
+                patch.object(self.collector.subprocess, "run", fake_run):
+            return self.collector._github_token(), calls
+
+    def test_environment_tokens_win_in_order(self):
+        for environment, expected in (
+            ({"GH_TOKEN": "gh-first", "GITHUB_TOKEN": "github-second"}, "gh-first"),
+            ({"GH_TOKEN": "", "GITHUB_TOKEN": "github-second"}, "github-second"),
+            ({"GITHUB_TOKEN": "github-second"}, "github-second"),
+        ):
+            with self.subTest(environment=environment):
+                self.assertEqual((expected, []), self.provide(environment))
+
+    def test_cli_token_is_the_fallback(self):
+        for environment in ({}, {"GH_TOKEN": "", "GITHUB_TOKEN": ""}):
+            with self.subTest(environment=environment):
+                token, calls = self.provide(environment, FakeCompletedProcess(stdout="cli-token\n"))
+                self.assertEqual("cli-token", token)
+                self.assertEqual(["gh", "auth", "token"], calls[0][0])
+                self.assertIs(False, calls[0][1]["shell"])
+
+    def test_missing_credentials_mean_anonymous(self):
+        for completed in (
+            FakeCompletedProcess(returncode=1, stderr="not logged in"),
+            FakeCompletedProcess(stdout="\n"),
+            FileNotFoundError("gh"),
+            subprocess.TimeoutExpired(["gh", "auth", "token"], 10),
+        ):
+            with self.subTest(completed=completed):
+                self.assertIsNone(self.provide({}, completed)[0])
+
+    def test_invalid_token_characters_fail_without_echoing_the_value(self):
+        with self.assertRaises(self.collector.ApiFailure) as raised:
+            self.provide({"GH_TOKEN": "secret value\r\nX-Injected: 1"})
+        self.assertNotIn("secret value", str(raised.exception))
 
 
 if __name__ == "__main__":

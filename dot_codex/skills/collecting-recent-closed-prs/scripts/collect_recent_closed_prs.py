@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import hashlib
+import http.client
 import argparse
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -17,6 +18,9 @@ import threading
 import tempfile
 import time as clock_time
 from typing import Any, Callable, Optional
+import urllib.error
+import urllib.parse
+import urllib.request
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -28,11 +32,104 @@ API_VERSION = "2026-03-10"
 MAX_RETRIES = 3
 MAX_RATE_LIMIT_WAIT_SECONDS = 5 * 60
 _MISSING = object()
+GITHUB_API_BASE = "https://api.github.com"
+HTTP_TIMEOUT_SECONDS = 30
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Do not forward an Authorization header to a redirect target."""
+
+    def redirect_request(self, request: object, fp: object, code: int,
+                         message: str, headers: object, new_url: str) -> None:
+        return None
+
+
+def _github_token() -> Optional[str]:
+    """Read GH_TOKEN, then GITHUB_TOKEN, then ``gh auth token``; None means anonymous."""
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or None
+    if token is None:
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "token"], capture_output=True, text=True,
+                check=False, shell=False, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        token = result.stdout.strip()
+    if not token:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_-]+", token) is None:
+        raise ApiFailure("GitHub token contains invalid characters")
+    return token
+
+
+_REQUEST_HEADERS = frozenset({"accept", "content-type", "if-none-match", "user-agent", "x-github-api-version"})
+_QUERY_DOCUMENT = re.compile(r"\A\s*query\b")
+_NON_QUERY_OPERATION = re.compile(r"\b(?:mutation|subscription)\b")
+
+
+def _is_github_api_url(url: object) -> bool:
+    if not isinstance(url, str):
+        return False
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" and parts.netloc == "api.github.com" and not parts.fragment
+
+
+def _check_read_only_request(request: object) -> None:
+    """Allow only GET on api.github.com and a GraphQL query POST to /graphql."""
+    if not isinstance(request, urllib.request.Request) or not _is_github_api_url(request.full_url):
+        raise ValueError("GitHub requests must target https://api.github.com")
+    if any(name.lower() not in _REQUEST_HEADERS for name, _value in request.header_items()):
+        raise ValueError("GitHub request has an unexpected header")
+    method = request.get_method()
+    if method == "GET" and request.data is None:
+        return
+    parts = urllib.parse.urlsplit(request.full_url)
+    if method != "POST" or parts.path != "/graphql" or parts.query or not isinstance(request.data, bytes):
+        raise ValueError("only GET requests and GraphQL query POSTs may be sent")
+    try:
+        body = json.loads(request.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("GraphQL request body must be JSON") from error
+    document = body.get("query") if isinstance(body, dict) else None
+    if (
+        not isinstance(document, str)
+        or set(body) - {"query", "variables"}
+        or not isinstance(body.get("variables", {}), dict)
+        or _QUERY_DOCUMENT.match(document) is None
+        or _NON_QUERY_OPERATION.search(document) is not None
+    ):
+        raise ValueError("GraphQL request body must hold one query document")
+
+
+def _open_api_request(opener: object, request: urllib.request.Request) -> tuple[int, dict[str, str], str]:
+    """Return HTTP errors as responses so retries and 304 keep one path."""
+    try:
+        response = opener.open(request, timeout=HTTP_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as error:
+        response = error
+    try:
+        geturl = getattr(response, "geturl", None)
+        if not _is_github_api_url(geturl() if callable(geturl) else request.full_url):
+            raise ValueError("GitHub response came from another origin")
+        status = int(response.status)
+        headers = {
+            name.lower(): value.strip()
+            for name, value in response.headers.items()
+            if not _sensitive_header(name)
+        }
+        body = response.read().decode("utf-8", "replace")
+        return status, headers, body
+    finally:
+        response.close()
 
 # Sibling skills load this file by path and call these names directly, and
-# collecting-open-source-issues also overrides GhApiClient.api_command. Their
-# tests do not run when this file changes, so SharedSurfaceTests pins each
-# call shape. Keep a name and its signature, or change those skills with it.
+# collecting-open-source-issues also overrides GhApiClient.api_command and
+# GhApiClient.http_request. Their tests do not run when this file changes, so
+# SharedSurfaceTests pins each call shape. Keep a name and its signature, or
+# change those skills with it.
 SHARED_WITH_SIBLINGS: dict[str, tuple[str, ...]] = {
     "collecting-open-source-issues": (
         "API_VERSION", "ApiFailure", "BudgetExhausted", "GhApiClient", "RequestBudget", "SearchPartition",
@@ -115,9 +212,9 @@ class ApiFailure(RuntimeError):
 
 
 class GhApiClient:
-    """A serial, read-only ``gh api`` transport with bounded retries.
+    """A serial GitHub API reader with bounded retries.
 
-    Shared with sibling skills; see ``SHARED_WITH_SIBLINGS``.
+    Production uses urllib. Injected runners retain the fixture contract.
     """
 
     def __init__(
@@ -125,9 +222,11 @@ class GhApiClient:
         *,
         api_version: str = API_VERSION,
         budget: RequestBudget,
-        runner: Callable[..., Any] = subprocess.run,
+        runner: Optional[Callable[..., Any]] = None,
         sleeper: Callable[[float], None] = clock_time.sleep,
         clock: Callable[[], float] = clock_time.time,
+        opener: Optional[object] = None,
+        token_provider: Callable[[], Optional[str]] = _github_token,
     ) -> None:
         if not isinstance(api_version, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", api_version) is None:
             raise ValueError("api_version must be YYYY-MM-DD")
@@ -140,6 +239,10 @@ class GhApiClient:
         self._runner = runner
         self._sleeper = sleeper
         self._clock = clock
+        self._opener = opener if opener is not None else urllib.request.build_opener(_NoRedirect)
+        self._token_provider = token_provider
+        self._token_loaded = False
+        self._token: Optional[str] = None
         self._lock = threading.RLock()
         self.request_events: list[dict[str, object]] = []
 
@@ -154,10 +257,16 @@ class GhApiClient:
         """Fetch one JSON response, conditionally reusing exact cached evidence."""
         if not isinstance(endpoint, str) or not endpoint.startswith("/"):
             raise ValueError("endpoint must be an absolute GitHub API path")
+        if endpoint.startswith("//") or "?" in endpoint or "#" in endpoint or any(
+            character in endpoint for character in "\r\n\0"
+        ):
+            raise ValueError("endpoint must be a plain path on api.github.com")
         if params is not None and "per_page" in params:
             raise ValueError("per_page is fixed at 100")
         if cached_etag is not None and not isinstance(cached_etag, str):
             raise ValueError("cached_etag must be a string")
+        if cached_etag is not None and any(character in cached_etag for character in "\r\n\0"):
+            raise ValueError("cached_etag contains an invalid character")
 
         with self._lock:
             return self._get_json_serial(
@@ -168,12 +277,16 @@ class GhApiClient:
             )
 
     def global_preflight(self) -> dict[str, str]:
-        """Verify gh, authentication, and requested API version before collection."""
+        """Verify authentication and requested API version before collection."""
         with self._lock:
             client_version = self._gh_version()
-            user = self.get_json("/user")
-            if not isinstance(user.payload, dict) or not isinstance(user.payload.get("login"), str):
-                raise ApiFailure("authenticated user response has no login", status=user.status, endpoint="/user")
+            if self._runner is None and self._auth_token() is None:
+                login = "anonymous"
+            else:
+                user = self.get_json("/user")
+                if not isinstance(user.payload, dict) or not isinstance(user.payload.get("login"), str):
+                    raise ApiFailure("authenticated user response has no login", status=user.status, endpoint="/user")
+                login = user.payload["login"]
             versions = self.get_json("/versions")
             supported_versions = _versions_from_payload(versions.payload)
             if self.api_version not in supported_versions:
@@ -183,7 +296,7 @@ class GhApiClient:
                     endpoint="/versions",
                 )
             return {
-                "login": user.payload["login"],
+                "login": login,
                 "client_version": client_version,
                 "api_version": self.api_version,
             }
@@ -196,44 +309,49 @@ class GhApiClient:
         cached_payload: object,
         cached_etag: Optional[str],
     ) -> ApiResponse:
-        command = self.api_command(endpoint, params, cached_etag)
+        command = self.api_command(endpoint, params, cached_etag) if self._runner is not None else None
         for attempt in range(MAX_RETRIES + 1):
             self.budget.consume()
             event = {"endpoint": endpoint, "attempt": attempt + 1, "status": None,
                      "conditional": cached_etag is not None}
             self.request_events.append(event)
+            diagnostics = ""
+            completed = None
             try:
-                completed = self._runner(
-                    command,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    shell=False,
-                )
-            except (OSError, subprocess.SubprocessError) as error:
-                failure = ApiFailure(
-                    "GitHub CLI transport failed",
-                    endpoint=endpoint,
-                    diagnostics=str(error),
-                )
-                if attempt == MAX_RETRIES:
-                    raise failure
-                event["retry_delay"] = _transport_backoff(attempt)
-                self._sleeper(event["retry_delay"])
-                continue
-
-            diagnostics = _redact_diagnostics(getattr(completed, "stderr", ""))
-            try:
-                status, headers, body = _parse_included_response(getattr(completed, "stdout", ""))
+                if self._runner is None:
+                    status, headers, body = self._urllib_request(endpoint, params, cached_etag)
+                    diagnostics = ""
+                else:
+                    completed = self._runner(
+                        command, capture_output=True, text=True,
+                        check=False, shell=False,
+                    )
+                    diagnostics = _redact_diagnostics(getattr(completed, "stderr", ""))
+                    status, headers, body = _parse_included_response(getattr(completed, "stdout", ""))
                 event["status"] = status
             except ValueError as error:
                 failure = ApiFailure(
-                    "GitHub CLI returned no parseable HTTP response",
-                    endpoint=endpoint,
-                    diagnostics=diagnostics,
+                    "GitHub HTTP request is invalid" if self._runner is None
+                    else "GitHub CLI returned no parseable HTTP response",
+                    endpoint=endpoint, diagnostics=diagnostics,
                 )
-                if attempt == MAX_RETRIES or getattr(completed, "returncode", 1) == 0:
+                if (
+                    self._runner is None or attempt == MAX_RETRIES
+                    or getattr(completed, "returncode", 1) == 0
+                ):
                     raise failure from error
+                event["retry_delay"] = _transport_backoff(attempt)
+                self._sleeper(event["retry_delay"])
+                continue
+            except (OSError, http.client.HTTPException, subprocess.SubprocessError) as error:
+                failure = ApiFailure(
+                    "GitHub HTTP transport failed" if self._runner is None
+                    else "GitHub CLI transport failed",
+                    endpoint=endpoint,
+                    diagnostics=_redact_diagnostics(str(error)) if self._runner is not None else "",
+                )
+                if attempt == MAX_RETRIES:
+                    raise failure
                 event["retry_delay"] = _transport_backoff(attempt)
                 self._sleeper(event["retry_delay"])
                 continue
@@ -307,6 +425,8 @@ class GhApiClient:
         return command
 
     def _gh_version(self) -> str:
+        if self._runner is None:
+            return "python-urllib"
         try:
             completed = self._runner(
                 ["gh", "--version"],
@@ -325,6 +445,45 @@ class GhApiClient:
                 diagnostics=getattr(completed, "stderr", ""),
             )
         return match.group(1)
+
+    def _auth_token(self) -> Optional[str]:
+        if not self._token_loaded:
+            self._token = self._token_provider()
+            self._token_loaded = True
+        return self._token
+
+    def http_request(
+        self,
+        endpoint: str,
+        params: Optional[dict[str, object]],
+        cached_etag: Optional[str],
+    ) -> urllib.request.Request:
+        """Build one attempt's unauthenticated request; collecting-open-source-issues overrides it for GraphQL."""
+        effective_params: dict[str, object] = {"per_page": 100}
+        if params is not None:
+            effective_params.update(params)
+        url = GITHUB_API_BASE + endpoint + "?" + urllib.parse.urlencode(
+            {name: str(value) for name, value in effective_params.items()}
+        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": self.api_version,
+            "User-Agent": "dotfiles-oss-research",
+        }
+        if cached_etag is not None:
+            headers["If-None-Match"] = cached_etag
+        return urllib.request.Request(url, headers=headers, method="GET")
+
+    def _urllib_request(
+        self, endpoint: str, params: Optional[dict[str, object]], cached_etag: Optional[str]
+    ) -> tuple[int, dict[str, str], str]:
+        # The credential is attached only after the request passed the read-only check.
+        request = self.http_request(endpoint, params, cached_etag)
+        _check_read_only_request(request)
+        token = self._auth_token()
+        if token is not None:
+            request.add_header("Authorization", "Bearer " + token)
+        return _open_api_request(self._opener, request)
 
 
 def resolve_interval(
