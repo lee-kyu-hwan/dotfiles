@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Read and classify Codex prefix rules without changing user configuration."""
+
+from __future__ import annotations
+
+import argparse
+import ast
+from collections import Counter
+import json
+from pathlib import Path
+import sys
+
+
+READ_ONLY_GH = {
+    ("issue", "view"),
+    ("issue", "list"),
+    ("pr", "view"),
+    ("pr", "list"),
+    ("pr", "diff"),
+    ("pr", "checks"),
+    ("repo", "view"),
+    ("auth", "status"),
+    ("run", "view"),
+    ("run", "list"),
+    ("label", "list"),
+    ("cache", "list"),
+}
+WRITE_GH = {
+    "issue": {"create", "edit", "comment", "develop", "close", "reopen", "delete", "pin", "transfer"},
+    "pr": {"create", "edit", "review", "merge", "close", "reopen"},
+    "repo": {"create", "edit", "delete", "fork"},
+    "release": {"create", "edit", "delete"},
+    "workflow": {"run", "enable", "disable"},
+    "run": {"rerun", "cancel"},
+    "label": {"create", "edit", "delete"},
+    "cache": {"delete"},
+    "gist": {"create", "edit", "delete"},
+}
+SHELLS = {"sh", "bash", "zsh", "fish"}
+CODE_RUNNERS = {"python", "python3", "node", "ruby", "perl", "osascript"}
+NETWORK_CLIENTS = {"curl", "wget", "http"}
+CLOUD_CLIENTS = {"aws", "kubectl", "supabase", "gcloud"}
+DECISIONS = {"allow", "prompt", "forbidden"}
+DIRECT_WRITE_CATEGORIES = {"github-write", "github-api-generic", "git-push"}
+RAW_RULES_WARNING = (
+    "--json 을 명시해 규칙 pattern 원문을 포함했다. 원문에는 토큰이나 비공개 경로가 "
+    "들어 있을 수 있으므로 공유하거나 로그에 남기지 않는다."
+)
+
+
+def classify(pattern: list[str]) -> str:
+    command = Path(pattern[0]).name
+    if command == "gh":
+        if len(pattern) >= 2 and pattern[1] == "api":
+            return "github-api-generic"
+        if len(pattern) >= 3 and tuple(pattern[1:3]) in READ_ONLY_GH:
+            return "github-read"
+        if len(pattern) >= 3 and pattern[2] in WRITE_GH.get(pattern[1], set()):
+            return "github-write"
+        if len(pattern) >= 2 and pattern[1] in {"--version", "version"}:
+            return "local-read"
+        return "github-unreviewed"
+    if command == "git":
+        tail = pattern[1:]
+        if tail[:1] == ["-C"] and len(tail) >= 2:
+            tail = tail[2:]
+        if tail[:1] == ["push"]:
+            return "git-push"
+    if command in SHELLS or command == "env":
+        return "shell-or-env"
+    if command in CODE_RUNNERS or command in NETWORK_CLIENTS:
+        return "code-or-network-client"
+    if command in CLOUD_CLIENTS:
+        return "cloud-client"
+    if command in {"rm", "kill", "pkill", "git"}:
+        return "local-mutation-capable"
+    return "other"
+
+
+def parse_rules(path: Path) -> list[dict[str, object]]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    rows: list[dict[str, object]] = []
+    for node in tree.body:
+        if not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "prefix_rule"
+            and not node.value.args
+        ):
+            raise ValueError(f"unsupported rule at line {node.lineno}")
+        keys = [keyword.arg for keyword in node.value.keywords]
+        if len(keys) != 2 or set(keys) != {"pattern", "decision"}:
+            raise ValueError(f"unsupported rule fields at line {node.lineno}")
+        try:
+            values = {keyword.arg: ast.literal_eval(keyword.value)
+                      for keyword in node.value.keywords}
+        except (ValueError, TypeError) as error:
+            raise ValueError(f"invalid rule at line {node.lineno}") from error
+        pattern, decision = values["pattern"], values["decision"]
+        if (
+            not isinstance(pattern, list)
+            or not pattern
+            or not all(isinstance(item, str) and item for item in pattern)
+            or not isinstance(decision, str)
+            or decision not in DECISIONS
+        ):
+            raise ValueError(f"invalid rule at line {node.lineno}")
+        rows.append(
+            {"line": node.lineno, "pattern": pattern, "decision": decision,
+             "category": classify(pattern)}
+        )
+    return rows
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("path", nargs="?", type=Path,
+                        default=Path.home() / ".codex/rules/default.rules")
+    parser.add_argument(
+        "--json", action="store_true",
+        help="명시적 선택: 규칙 pattern 원문을 포함한다 (토큰이 노출될 수 있다)",
+    )
+    args = parser.parse_args(argv)
+    try:
+        rows = parse_rules(args.path)
+    except (OSError, UnicodeError, SyntaxError, ValueError) as error:
+        print(f"Codex rules audit failed: {error}", file=sys.stderr)
+        return 2
+    direct = [
+        row for row in rows
+        if row["decision"] == "allow" and row["category"] in DIRECT_WRITE_CATEGORIES
+    ]
+    # 기본 출력은 집계만 담는다. pattern 원문은 --json 을 명시했을 때만 나간다.
+    summary: dict[str, object] = {
+        "path": str(args.path),
+        "total": len(rows),
+        "decisions": dict(Counter(row["decision"] for row in rows)),
+        "categories": dict(Counter(row["category"] for row in rows)),
+        "direct_github_write_or_push_allow": {
+            "total": len(direct),
+            "categories": dict(Counter(row["category"] for row in direct)),
+        },
+        "raw_rules_included": args.json,
+    }
+    if args.json:
+        summary["warning"] = RAW_RULES_WARNING
+        summary["direct_github_write_or_push_allow_rules"] = direct
+        summary["rules"] = rows
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
