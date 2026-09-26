@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Start a read-only Claude worker for OSS research in an Orca worktree."""
+
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+READ_TOOLS = "Read,Glob,Grep"
+DENIED_TOOLS = "Bash,PowerShell,WebFetch,WebSearch,Edit,Write,NotebookEdit,Agent,Task"
+MAX_PROMPT_BYTES = 65_536
+GITHUB_CREDENTIAL_VARIABLES = (
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "GH_CONFIG_DIR", "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK",
+)
+
+
+def build_command(prompt: str) -> list[str]:
+    return [
+        "claude",
+        "--print",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--restricted",
+        "--strict-mcp-config",
+        "--no-chrome",
+        "--disable-slash-commands",
+        "--setting-sources", "",
+        "--permission-mode", "dontAsk",
+        "--permission-prompts", "none",
+        "--tools", READ_TOOLS,
+        "--allowedTools", READ_TOOLS,
+        "--disallowedTools", DENIED_TOOLS,
+        "--max-turns", "20",
+        "--", prompt,
+    ]
+
+
+def profile_environment(profile: str, home: Path) -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in GITHUB_CREDENTIAL_VARIABLES:
+        environment.pop(name, None)
+    environment.pop("CLAUDE_CONFIG_DIR", None)
+    if profile == "claude-profile1":
+        environment["CLAUDE_CONFIG_DIR"] = str(
+            home / ".local/share/ai-account-profiles/claude/profile1"
+        )
+    elif profile != "claude-profile2":
+        raise ValueError(f"unsupported profile: {profile}")
+    return environment
+
+
+def read_prompt(path: Path, worktree: Path) -> str:
+    if path.is_symlink():
+        raise ValueError("prompt must not be a symlink")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError("prompt must be a regular file")
+    if not resolved.is_relative_to(worktree):
+        raise ValueError("prompt must be inside the worktree")
+    if resolved.stat().st_size > MAX_PROMPT_BYTES:
+        raise ValueError("prompt is too large")
+    prompt = resolved.read_text(encoding="utf-8")
+    if not prompt.strip() or "\0" in prompt:
+        raise ValueError("prompt must be nonempty UTF-8 text without NUL")
+    return prompt
+
+
+def checked_worktree() -> Path:
+    cwd = Path.cwd().resolve(strict=True)
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=cwd, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, check=True,
+    )
+    if Path(result.stdout.strip()).resolve(strict=True) != cwd:
+        raise ValueError("start the worker at the worktree root")
+    return cwd
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--profile", required=True,
+                        choices=("claude-profile1", "claude-profile2"))
+    parser.add_argument("--prompt-file", required=True, type=Path)
+    arguments = parser.parse_args()
+    try:
+        worktree = checked_worktree()
+        prompt = read_prompt(arguments.prompt_file, worktree)
+        environment = profile_environment(arguments.profile, Path.home())
+        return subprocess.run(
+            build_command(prompt), cwd=worktree, env=environment,
+            stdin=subprocess.DEVNULL, check=False,
+        ).returncode
+    except (OSError, UnicodeError, subprocess.SubprocessError, ValueError) as error:
+        print(f"OSS research worker did not start: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
