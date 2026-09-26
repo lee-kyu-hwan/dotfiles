@@ -18,7 +18,7 @@ An attempted repository request maps failure classes as follows: status 404 to `
 
 ## R3.2 Policy files
 
-Use `GET /repos/{o}/{n}/contents/{path}?ref={default_branch}` for these ten paths, first in the target repository and then in `{owner}/.github`:
+Use `GET /repos/{o}/{n}/contents/{path}?ref={default_branch}` for these ten paths in the target repository, and then for the same ten paths in `{owner}/.github`:
 
 1. `CONTRIBUTING.md`
 2. `.github/CONTRIBUTING.md`
@@ -31,7 +31,11 @@ Use `GET /repos/{o}/{n}/contents/{path}?ref={default_branch}` for these ten path
 9. `CODE_OF_CONDUCT.md`
 10. `.github/CODE_OF_CONDUCT.md`
 
-Every result has `path`, `source_repository`, `status`, `found`, `sha256`, `size`, `entry_count`, `excerpt`, `truncated`, `url`, and `keyword_hits`. `status` distinguishes `found`, genuine `absent` responses, and `request-failed` responses; `found` is true exactly when `status` is `found`. `entry_count` is the number of entries for a directory result and null for file, absent, or failed results. Excerpts are at most 4,000 decoded characters and use the untrusted-text object. Keyword hits only locate CLA, DCO, signing, certificate, or contributor-license text; they do not decide policy.
+Each source repository supplies its own `ref`. The target repository uses its own default branch. `{owner}/.github` is a separate repository with its own default branch, so resolve it with `GET /repos/{owner}/.github` before requesting its paths and never reuse the target branch name. That lookup has three outcomes: a successful response supplies the organization `ref`; status 404 means the organization repository does not exist, so all ten organization paths are recorded `absent` with a `policy-source-absent:{owner}/.github` warning and no content request; any other failure records all ten as `request-failed` with no content request. The organization pass is skipped when the target repository already is `{owner}/.github`.
+
+Every result has `path`, `source_repository`, `status`, `found`, `ref`, `sha256`, `size`, `entry_count`, `excerpt`, `truncated`, `url`, and `keyword_hits`. `status` distinguishes `found`, genuine `absent` responses, and `request-failed` responses. `found` is true exactly when `status` is `found`, false when `status` is `absent`, and null when the request failed, so a failed observation is never read as an absent file. `ref` is the branch the path was requested at, and null when no content request was made. `entry_count` is the number of entries for a directory result and null for file, absent, or failed results. Excerpts are at most 4,000 decoded characters and use the untrusted-text object. Keyword hits only locate CLA, DCO, signing, certificate, contributor-license, AI, LLM, or generative text; they do not decide policy.
+
+Assistance-policy scope is these ten conventional paths and nothing else. A repository that keeps its assistance policy elsewhere — for example under its own documentation tree — is outside what this contract can enumerate, so that policy is recorded through the hand-reviewed evidence path in the verification contract rather than guessed at by extra requests.
 
 ## R3.3 Duplicate search
 
@@ -43,6 +47,14 @@ For each selected clue call `GET /search/code` with `q=repo:{owner}/{name} "{clu
 
 Static evidence, when allowed, records `path`, `line`, and `clue`; evidence status remains one of `remote-only`, `remote+static`, `static-only`, or `none`. The existing static-search fields remain in place, with additive `static_search.complete`, `static_search.exclusions`, and `static_search.read_failures`. Missing `complete` is unknown/incomplete. A zero-hit absence requires both `available` and `complete`; an incomplete search may still preserve positive hits.
 
+## R3.5 Locus search
+
+The pattern-level duplicate search in R3.3 runs before a locus exists, so it cannot name the file or symbol a candidate finally points at. After the assessment fixes each locus, a second search runs against that locus with the same endpoint and query shape as R3.3: `GET /search/issues`, separately for open issues, closed issues, open pull requests, and closed pull requests, one query per clue, never combined.
+
+Clues are derived from the locus itself so the step cannot be satisfied with unrelated terms: the locus is split on non-identifier characters, and tokens shorter than three characters, purely numeric tokens, and common path and extension words are dropped. Operator-supplied clues are appended after the derived ones, and the clue cap bounds the total. A locus that yields no usable clue is recorded with an empty clue list and `complete: false`.
+
+Each search records `pattern_id`, `repository`, `locus`, `clues`, `queries`, `complete`, `unused_clues`, and `method_limitations`. Any failed or incomplete query makes `complete` false. `complete` means every query returned a response; it never means no duplicate exists.
+
 ## Fixed request order and budget
 
 Requests are serial and emitted in this exact order for each repository, then each repository-pattern combination:
@@ -52,9 +64,11 @@ Requests are serial and emitted in this exact order for each repository, then ea
 3. ③ community profile
 4. ④ private vulnerability reporting
 5. ⑤ upstream repository, only for a fork
-6. ⑥ target repository policy paths 1–10, then `{owner}/.github` policy paths 1–10
+6. ⑥ target repository policy paths 1–10, then `GET /repos/{owner}/.github`, then `{owner}/.github` policy paths 1–10
 7. ⑦ issue search, clue×4
 8. ⑧ code search, clue×1
+
+A locus search runs as its own later command and is not part of this order.
 
 The request budget counts every attempt, including retries. No request begins once it is exhausted. A clue cap bounds both issue and code requests. Repository order is caller order; combination order is repository order followed by analysis pattern order.
 

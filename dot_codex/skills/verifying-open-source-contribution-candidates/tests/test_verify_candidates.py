@@ -45,6 +45,11 @@ POLICY_PATHS = (
     ".github/CODE_OF_CONDUCT.md",
 )
 FIXTURE_TIME = "2000" + "-01-01T00:00:00Z"
+POSITIVE_LOCUS = json.loads(
+    (SKILL_DIR / "tests/fixtures/positive/assessment-issue-ready.json").read_text(
+        encoding="utf-8"
+    )
+)["locus"]
 
 
 def recompute_revision(root):
@@ -99,10 +104,18 @@ def make_responses(
     code_status=200,
     code_total=0,
     policy_content=b"Contribution guide",
+    organization_branch="main",
 ):
     owner = repository.split("/", 1)[0]
+    organization_repository = owner + "/.github"
     responses = {
         "/repos/" + repository: fixture_response(repository_payload(repository)),
+        "/repos/" + organization_repository: fixture_response(
+            dict(
+                repository_payload(organization_repository),
+                default_branch=organization_branch,
+            )
+        ),
         "/repos/%s/commits/main" % repository: fixture_response({"sha": head}),
         "/repos/%s/community/profile" % repository: fixture_response(
             {
@@ -121,10 +134,11 @@ def make_responses(
         ),
     }
     encoded = base64.b64encode(policy_content).decode("ascii")
-    for source_repository in (repository, owner + "/.github"):
+    for source_repository in (repository, organization_repository):
+        branch = "main" if source_repository == repository else organization_branch
         for index, policy_path in enumerate(POLICY_PATHS):
             endpoint = "/repos/%s/contents/%s" % (source_repository, policy_path)
-            request_path = verify_candidates._request_path(endpoint, {"ref": "main"})
+            request_path = verify_candidates._request_path(endpoint, {"ref": branch})
             if policy_path == ".github/ISSUE_TEMPLATE":
                 payload = [
                     {
@@ -367,6 +381,50 @@ def assessment_for(record, **changes):
     return value
 
 
+def make_locus_search_document(discovery_sha256, assessments, complete=True):
+    searches = []
+    for assessment in assessments:
+        locus = assessment.get("locus") or ""
+        clues = verify_candidates._locus_clues(locus)[:5]
+        if not clues:
+            continue
+        queries = []
+        for clue in clues:
+            for kind in ("issue", "pr"):
+                for state in ("open", "closed"):
+                    queries.append(
+                        {
+                            "q": 'repo:%s "%s" is:%s is:%s'
+                            % (assessment["repository"], clue, kind, state),
+                            "total_count": 0,
+                            "incomplete_results": False,
+                            "items": [],
+                        }
+                    )
+        searches.append(
+            {
+                "pattern_id": assessment["pattern_id"],
+                "repository": assessment["repository"],
+                "locus": locus,
+                "clues": clues,
+                "queries": queries,
+                "complete": complete,
+                "unused_clues": [],
+                "method_limitations": [
+                    verify_candidates.SEARCH_INDEX_LIMITATION,
+                    verify_candidates.SEARCH_COMPLETENESS_LIMITATION,
+                ],
+            }
+        )
+    return {
+        "schema_version": "1.0.0",
+        "generated_by": {"name": "fixture", "revision": "sha256:" + ("1" * 64)},
+        "discovery_sha256": discovery_sha256,
+        "searches": searches,
+        "status": "complete" if complete else "partial",
+    }
+
+
 def make_discovery_document(records, skipped=None, failed=None, status="complete"):
     return {
         "schema_version": "1.0.0",
@@ -401,6 +459,7 @@ def discovery_record(repository="example-org/example-repo", pattern_id="PAT-001"
                 "source_repository": source_repository,
                 "status": "found",
                 "found": True,
+                "ref": "main",
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "size": len(content),
                 "entry_count": None,
@@ -465,8 +524,12 @@ def discovery_record(repository="example-org/example-repo", pattern_id="PAT-001"
 
 def make_recheck_responses(record, current_head=None, new_url=False, changed_policy=False):
     repository = record["repository"]
+    organization_repository = repository.split("/", 1)[0] + "/.github"
     responses = {
         "/repos/" + repository: fixture_response(repository_payload(repository)),
+        "/repos/" + organization_repository: fixture_response(
+            repository_payload(organization_repository)
+        ),
         "/repos/%s/commits/main" % repository: fixture_response(
             {"sha": current_head if current_head is not None else record["head_sha"]}
         ),
@@ -486,7 +549,14 @@ def make_recheck_responses(record, current_head=None, new_url=False, changed_pol
                 "html_url": "https://docs.github.com/policy",
             }
         )
-    for query in record["duplicate_search"]["queries"]:
+    locus_queries = []
+    for clue in verify_candidates._locus_clues(POSITIVE_LOCUS)[:5]:
+        for kind in ("issue", "pr"):
+            for state in ("open", "closed"):
+                locus_queries.append(
+                    {"q": 'repo:%s "%s" is:%s is:%s' % (repository, clue, kind, state)}
+                )
+    for query in list(record["duplicate_search"]["queries"]) + locus_queries:
         items = []
         if new_url and query["q"].endswith("is:issue is:open"):
             items.append(
@@ -542,6 +612,13 @@ class VerifyCandidatesTests(unittest.TestCase):
         }
         assessment_path = Path(root) / "assessment.json"
         assessment_path.write_text(json.dumps(assessment, indent=2) + "\n", encoding="utf-8")
+        locus_search = make_locus_search_document(
+            sha256_file(discovery_path), assessment["assessments"]
+        )
+        locus_search_path = Path(root) / "locus-search.json"
+        locus_search_path.write_text(
+            json.dumps(locus_search, indent=2) + "\n", encoding="utf-8"
+        )
         return discovery_path, assessment_path
 
     def run_record(self, root, records, assessments=None, extra=None, **changes):
@@ -554,6 +631,10 @@ class VerifyCandidatesTests(unittest.TestCase):
             "record", "--discovery", str(discovery), "--assessment", str(assessment),
             "--output", str(output), "--manifest", str(manifest),
         ]
+        if "--locus-search" not in (extra or []):
+            arguments.extend(
+                ["--locus-search", str(Path(root) / "locus-search.json")]
+            )
         arguments.extend(extra or [])
         result = self.run_main(arguments)
         return result, discovery, assessment, output, manifest
@@ -828,6 +909,7 @@ class VerifyCandidatesTests(unittest.TestCase):
                     "source_repository",
                     "status",
                     "found",
+                    "ref",
                     "sha256",
                     "size",
                     "entry_count",
@@ -875,13 +957,15 @@ class VerifyCandidatesTests(unittest.TestCase):
             malformed = by_path[(repository, "docs/SECURITY.md")]
             self.assertEqual(("absent", False), (absent["status"], absent["found"]))
             self.assertEqual(
-                ("request-failed", False), (failed["status"], failed["found"])
+                ("request-failed", None), (failed["status"], failed["found"])
             )
             self.assertEqual(
-                ("request-failed", False),
+                ("request-failed", None),
                 (malformed["status"], malformed["found"]),
             )
             self.assertNotEqual(absent["status"], failed["status"])
+            self.assertNotEqual(absent["found"], failed["found"])
+            self.assertEqual("main", first["ref"])
             warnings = record["warnings"]
             self.assertFalse(any(absent_path in warning for warning in warnings))
             self.assertTrue(any(failed_path in warning for warning in warnings))
@@ -2478,7 +2562,9 @@ class VerifyCandidatesTests(unittest.TestCase):
             self.assertEqual(0, result[0], result[2])
             records = json.loads(output.read_text(encoding="utf-8"))["records"]
             self.assertEqual(id_fixture["candidate_ids"] + [id_fixture["next_id"]], [item["candidate_id"] for item in records])
-            expected_key = hashlib.sha256(("PAT-002\n" + second["repository_node_id"] + "\n").encode("utf-8")).hexdigest()
+            expected_key = hashlib.sha256(
+                ("PAT-002\n" + second["repository_node_id"] + "\n" + POSITIVE_LOCUS).encode("utf-8")
+            ).hexdigest()
             self.assertEqual(expected_key, records[-1]["candidate_key"])
             duplicate = [assessment_for(first), assessment_for(first)]
             duplicate[1]["locus"] = duplicate[0]["locus"]
@@ -3533,7 +3619,7 @@ class VerifyCandidatesTests(unittest.TestCase):
             original = existing.read_bytes()
             discovery, assessment = self.write_record_inputs(root / "replace", [record])
             manifest = root / "replace-manifest.json"
-            args = ["record", "--discovery", str(discovery), "--assessment", str(assessment), "--candidates", str(existing), "--output", str(existing), "--manifest", str(manifest)]
+            args = ["record", "--discovery", str(discovery), "--assessment", str(assessment), "--candidates", str(existing), "--output", str(existing), "--manifest", str(manifest), "--locus-search", str(root / "replace" / "locus-search.json")]
             self.assertEqual(2, self.run_main(args)[0]); self.assertEqual(original, existing.read_bytes())
             self.assertEqual(0, self.run_main(args + ["--replace"])[0]); self.assertTrue(existing.read_bytes().endswith(b"\n"))
             preserved = existing.read_bytes()
@@ -3755,7 +3841,7 @@ class VerifyCandidatesTests(unittest.TestCase):
             responses["/repos/" + repositories[1]] = fixture_response({}, status=404)
             mixed = root / "mixed"; write_fixture(mixed, responses, analysis)
             mixed_manifest = root / "mixed-manifest.json"
-            arguments = ["discover", "--analysis", str(mixed / "analysis.json"), "--request-budget", "25", "--fixture-dir", str(mixed), "--output", str(root / "mixed-discovery.json"), "--manifest", str(mixed_manifest)]
+            arguments = ["discover", "--analysis", str(mixed / "analysis.json"), "--request-budget", "26", "--fixture-dir", str(mixed), "--output", str(root / "mixed-discovery.json"), "--manifest", str(mixed_manifest)]
             for item in repositories:
                 arguments.extend(("--repo", item))
             code, _, stderr, _ = self.run_main(arguments)
@@ -3838,7 +3924,7 @@ class VerifyCandidatesTests(unittest.TestCase):
                     responses = {}
                     for repository in repositories:
                         responses.update(make_responses(repository, ["budget clue"]))
-                    request_budget = 54
+                    request_budget = 56
                     name = "combination-exhausted"
                 elif relative == "budget/unstarted/case.json":
                     repositories = [
@@ -4429,6 +4515,582 @@ class VerifyCandidatesTests(unittest.TestCase):
                 self.assertFalse(str(arguments[0]).startswith(str(clone_path)))
                 self.assertNotIn("cwd", kwargs)
             shutil.rmtree(clone_path)
+
+    def test_unreviewed_policy_cannot_support_a_ready_status(self):
+        record = discovery_record()
+
+        def unreviewed(*keys):
+            checks = policy_checks_for(record)
+            for key in keys:
+                checks[key] = {
+                    "found": None,
+                    "source": None,
+                    "sha256": None,
+                    "assessment": "not reviewed",
+                    "evidence_links": [],
+                }
+            return checks
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            blank = unreviewed(*verify_candidates.REVIEWABLE_POLICY_KEYS)
+            for status in ("issue-ready", "pr-ready"):
+                with self.subTest(status=status):
+                    result = self.run_record(
+                        root / status,
+                        [record],
+                        [assessment_for(record, status=status, status_reason="ready", policy_checks=blank)],
+                    )[0]
+                    self.assertEqual(2, result[0])
+                    for key in verify_candidates.REVIEWABLE_POLICY_KEYS:
+                        self.assertIn(
+                            "policy_checks.%s.found: policy not reviewed" % key,
+                            result[2],
+                        )
+            single = self.run_record(
+                root / "single",
+                [record],
+                [assessment_for(record, policy_checks=unreviewed("ai_policy"))],
+            )[0]
+            self.assertEqual(2, single[0])
+            self.assertIn(
+                "policy_checks.ai_policy.found: policy not reviewed", single[2]
+            )
+            self.assertNotIn("policy_checks.contributing.found", single[2])
+            kept = self.run_record(
+                root / "policy-review",
+                [record],
+                [
+                    assessment_for(
+                        record,
+                        status="policy-review",
+                        status_reason="policy-unknown",
+                        policy_checks=blank,
+                    )
+                ],
+            )[0]
+            self.assertEqual(0, kept[0], kept[2])
+            sourceless = policy_checks_for(record)
+            sourceless["contributing"]["source"] = None
+            missing_source = self.run_record(
+                root / "source", [record], [assessment_for(record, policy_checks=sourceless)]
+            )[0]
+            self.assertEqual(2, missing_source[0])
+            self.assertIn("policy_checks.contributing.source", missing_source[2])
+
+    def test_private_report_ready_also_requires_reviewed_policy(self):
+        record = discovery_record()
+        security = json.loads(
+            (SKILL_DIR / "tests/fixtures/security/assessments.json").read_text(
+                encoding="utf-8"
+            )
+        )["valid"]
+        checks = policy_checks_for(record)
+        checks["ai_policy"] = {
+            "found": None,
+            "source": None,
+            "sha256": None,
+            "assessment": "not reviewed",
+            "evidence_links": [],
+        }
+        assessment = assessment_for(
+            record,
+            status=security["status"],
+            status_reason=security["status_reason"],
+            sensitivity=security["sensitivity"],
+            private_evidence_reference=security["private_evidence_reference"],
+            reproduction={
+                "method": "static",
+                "evidence_links": ["https://docs.github.com/evidence"],
+                "public_steps": None,
+            },
+            policy_checks=checks,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            blocked = self.run_record(root / "blocked", [record], [assessment])[0]
+            self.assertEqual(2, blocked[0])
+            self.assertIn(
+                "policy_checks.ai_policy.found: policy not reviewed", blocked[2]
+            )
+            assessment["policy_checks"] = policy_checks_for(record)
+            allowed = self.run_record(root / "allowed", [record], [assessment])[0]
+            self.assertEqual(0, allowed[0], allowed[2])
+
+    def test_hand_reviewed_policy_is_recorded_with_local_evidence(self):
+        record = discovery_record()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            root.mkdir(parents=True, exist_ok=True)
+            policy_file = root / "ai-policy.md"
+            policy_file.write_text(
+                "Generative assistance is allowed with disclosure.\n", encoding="utf-8"
+            )
+            digest = sha256_file(policy_file)
+            checks = policy_checks_for(record)
+            checks["ai_policy"] = {
+                "found": True,
+                "source": "docs/contribute/ai-policy.md",
+                "sha256": digest,
+                "assessment": "read by hand from the repository documentation",
+                "evidence_links": ["https://docs.github.com/policy"],
+            }
+            assessment = assessment_for(record, policy_checks=checks)
+            rejected = self.run_record(root / "rejected", [record], [assessment])[0]
+            self.assertEqual(2, rejected[0])
+            self.assertIn("policy_checks.ai_policy.sha256", rejected[2])
+
+            def evidence_document(repository, content_path):
+                return {
+                    "schema_version": "1.0.0",
+                    "observations": [
+                        {
+                            "repository": repository,
+                            "policy_key": "ai_policy",
+                            "path": "docs/contribute/ai-policy.md",
+                            "source_repository": repository,
+                            "source_url": "https://docs.github.com/policy",
+                            "content_path": content_path,
+                        }
+                    ],
+                }
+
+            evidence = root / "policy-evidence.json"
+            evidence.write_text(
+                json.dumps(evidence_document(record["repository"], str(policy_file))),
+                encoding="utf-8",
+            )
+            accepted, _, _, output, manifest = self.run_record(
+                root / "accepted",
+                [record],
+                [assessment],
+                extra=["--policy-evidence", str(evidence)],
+            )
+            self.assertEqual(0, accepted[0], accepted[2])
+            recorded = json.loads(manifest.read_text(encoding="utf-8"))["runs"][-1][
+                "inputs"
+            ]["policy_evidence"]
+            self.assertEqual([digest], [item["sha256"] for item in recorded])
+            self.assertTrue(recorded[0]["excerpt"]["untrusted"])
+            candidate = json.loads(output.read_text(encoding="utf-8"))["records"][0]
+            self.assertEqual(digest, candidate["policy_checks"]["ai_policy"]["sha256"])
+
+            other = root / "other-evidence.json"
+            other.write_text(
+                json.dumps(evidence_document("example-org/other-repo", str(policy_file))),
+                encoding="utf-8",
+            )
+            scoped = self.run_record(
+                root / "scoped",
+                [record],
+                [assessment],
+                extra=["--policy-evidence", str(other)],
+            )[0]
+            self.assertEqual(2, scoped[0])
+            self.assertIn("policy_checks.ai_policy.sha256", scoped[2])
+
+            remote = root / "remote-evidence.json"
+            remote.write_text(
+                json.dumps(
+                    evidence_document(
+                        record["repository"], "https://docs.github.com/policy"
+                    )
+                ),
+                encoding="utf-8",
+            )
+            url_result = self.run_record(
+                root / "remote",
+                [record],
+                [assessment],
+                extra=["--policy-evidence", str(remote)],
+            )[0]
+            self.assertEqual(2, url_result[0])
+            self.assertIn("content_path", url_result[2])
+
+    def test_organization_policy_uses_its_own_default_branch(self):
+        analysis = json.loads(
+            (SKILL_DIR / "tests/fixtures/common/analysis.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        analysis["patterns"] = analysis["patterns"][:1]
+        repository = "example-org/example-repo"
+        clues = analysis["patterns"][0]["search_clues"][:1]
+
+        def discover_with(responses, name):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                fixture = root / name
+                write_fixture(fixture, responses, analysis)
+                output = root / "discovery.json"
+                manifest = root / "manifest.json"
+                code, _, stderr, _ = self.run_main(
+                    [
+                        "discover",
+                        "--analysis", str(fixture / "analysis.json"),
+                        "--repo", repository,
+                        "--max-clues-per-pattern", "1",
+                        "--fixture-dir", str(fixture),
+                        "--output", str(output),
+                        "--manifest", str(manifest),
+                    ]
+                )
+                return (
+                    code,
+                    stderr,
+                    json.loads(output.read_text(encoding="utf-8"))["records"][0],
+                    json.loads(manifest.read_text(encoding="utf-8"))["runs"][0],
+                )
+
+        code, stderr, record, run = discover_with(
+            make_responses(repository, clues, organization_branch="master"), "master"
+        )
+        self.assertEqual(0, code, stderr)
+        organization = [
+            item
+            for item in record["policy_files"]
+            if item["source_repository"] == "example-org/.github"
+        ]
+        self.assertEqual(10, len(organization))
+        self.assertEqual({"master"}, {item["ref"] for item in organization})
+        self.assertEqual({"found"}, {item["status"] for item in organization})
+        target = [
+            item
+            for item in record["policy_files"]
+            if item["source_repository"] == repository
+        ]
+        self.assertEqual({"main"}, {item["ref"] for item in target})
+        self.assertIn(
+            "/repos/example-org/.github",
+            [event["path"] for event in run["retry_events"]],
+        )
+        full_requests = run["budget"]["requests_consumed"]
+
+        absent_responses = make_responses(repository, clues)
+        absent_responses["/repos/example-org/.github"] = fixture_response(
+            {"message": "Not Found"}, status=404
+        )
+        code, stderr, record, run = discover_with(absent_responses, "absent")
+        self.assertEqual(0, code, stderr)
+        organization = [
+            item
+            for item in record["policy_files"]
+            if item["source_repository"] == "example-org/.github"
+        ]
+        self.assertEqual(10, len(organization))
+        self.assertEqual({"absent"}, {item["status"] for item in organization})
+        self.assertEqual({False}, {item["found"] for item in organization})
+        self.assertEqual({None}, {item["ref"] for item in organization})
+        self.assertIn("policy-source-absent:example-org/.github", record["warnings"])
+        self.assertEqual(full_requests - 10, run["budget"]["requests_consumed"])
+
+        failed_responses = make_responses(repository, clues)
+        failed_responses["/repos/example-org/.github"] = fixture_response(
+            {"message": "boom"}, status=500
+        )
+        code, stderr, record, _ = discover_with(failed_responses, "failed")
+        self.assertEqual(3, code, stderr)
+        organization = [
+            item
+            for item in record["policy_files"]
+            if item["source_repository"] == "example-org/.github"
+        ]
+        self.assertEqual({"request-failed"}, {item["status"] for item in organization})
+        self.assertEqual({None}, {item["found"] for item in organization})
+
+    def test_failed_organization_policy_lookup_blocks_ready(self):
+        record = discovery_record()
+        for item in record["policy_files"]:
+            if item["source_repository"].endswith("/.github"):
+                item.update(
+                    {
+                        "status": "request-failed",
+                        "found": None,
+                        "ref": None,
+                        "sha256": None,
+                        "size": None,
+                        "excerpt": None,
+                        "url": None,
+                    }
+                )
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.run_record(
+                Path(temporary), [record], [assessment_for(record)]
+            )[0]
+            self.assertEqual(2, result[0])
+            self.assertIn(
+                "policy_files_reviewed: request-failed policy observation", result[2]
+            )
+
+    def test_policy_excerpts_flag_assistance_keywords(self):
+        for text, expected in (
+            ("AI generated patches need disclosure", "AI"),
+            ("LLM output must be reviewed", "LLM"),
+            ("generative tooling is restricted", "Generative"),
+        ):
+            content = text.encode("utf-8")
+            result = verify_candidates._policy_result(
+                "example-org/example-repo",
+                "CONTRIBUTING.md",
+                "/fixture-policy",
+                verify_candidates.ApiResponse(
+                    status=200,
+                    headers={},
+                    payload={
+                        "type": "file",
+                        "encoding": "base64",
+                        "content": base64.b64encode(content).decode("ascii"),
+                        "size": len(content),
+                        "html_url": "https://docs.github.com/policy",
+                    },
+                ),
+                [],
+            )
+            self.assertIn(expected, result["keyword_hits"], text)
+
+    def test_locus_clues_come_from_the_assessed_locus(self):
+        self.assertEqual(
+            ["rules", "example-boundary", "ExampleBoundary"],
+            verify_candidates._locus_clues(
+                "lib/rules/example-boundary.js#ExampleBoundary"
+            ),
+        )
+        self.assertEqual([], verify_candidates._locus_clues(""))
+        self.assertEqual([], verify_candidates._locus_clues(None))
+        self.assertEqual(
+            ["needle"], verify_candidates._locus_clues('src/needle.js#a"b')
+        )
+
+    def locus_search_responses(self, repository, locus, matched=()):
+        responses = {}
+        for clue in verify_candidates._locus_clues(locus)[:5]:
+            for kind in ("issue", "pr"):
+                for state in ("open", "closed"):
+                    query = 'repo:%s "%s" is:%s is:%s' % (
+                        repository, clue, kind, state,
+                    )
+                    items = list(matched) if (kind, state) == ("issue", "open") else []
+                    responses[
+                        verify_candidates._request_path(
+                            "/search/issues", {"q": query}
+                        )
+                    ] = fixture_response(
+                        {
+                            "total_count": len(items),
+                            "incomplete_results": False,
+                            "items": items,
+                        }
+                    )
+        return responses
+
+    def test_locus_search_repeats_the_search_at_the_assessed_locus(self):
+        repository = "example-org/example-repo"
+        record = discovery_record(repository)
+        matched = [
+            {
+                "number": 710,
+                "title": "Existing report at the same locus",
+                "state": "open",
+                "html_url": "https://docs.github.com/locus-duplicate",
+                "created_at": None,
+                "closed_at": None,
+                "state_reason": None,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery, assessment = self.write_record_inputs(root / "inputs", [record])
+            fixture = root / "fixture"
+            write_fixture(
+                fixture, self.locus_search_responses(repository, POSITIVE_LOCUS, matched)
+            )
+            output = root / "locus-search.json"
+            manifest = root / "locus-manifest.json"
+            code, stdout, stderr, _ = self.run_main(
+                [
+                    "locus-search",
+                    "--discovery", str(discovery),
+                    "--assessment", str(assessment),
+                    "--output", str(output),
+                    "--manifest", str(manifest),
+                    "--fixture-dir", str(fixture),
+                ]
+            )
+            self.assertEqual(0, code, stderr)
+            self.assertTrue(stdout.startswith("complete"), stdout)
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(sha256_file(discovery), document["discovery_sha256"])
+            search = document["searches"][0]
+            self.assertEqual(POSITIVE_LOCUS, search["locus"])
+            self.assertEqual(
+                verify_candidates._locus_clues(POSITIVE_LOCUS), search["clues"]
+            )
+            self.assertEqual(4 * len(search["clues"]), len(search["queries"]))
+            self.assertTrue(search["complete"])
+            run = json.loads(manifest.read_text(encoding="utf-8"))["runs"][-1]
+            self.assertEqual("locus-search", run["command"])
+            self.assertIn(
+                verify_candidates.SEARCH_COMPLETENESS_LIMITATION,
+                run["method_limitations"],
+            )
+
+            candidates = root / "candidates.json"
+            code, _, stderr, _ = self.run_main(
+                [
+                    "record",
+                    "--discovery", str(discovery),
+                    "--assessment", str(assessment),
+                    "--locus-search", str(output),
+                    "--output", str(candidates),
+                    "--manifest", str(root / "record-manifest.json"),
+                ]
+            )
+            self.assertEqual(0, code, stderr)
+            candidate = json.loads(candidates.read_text(encoding="utf-8"))["records"][0]
+            duplicate = candidate["duplicate_search"]
+            self.assertEqual(
+                verify_candidates._locus_clues(POSITIVE_LOCUS),
+                duplicate["locus_clues"],
+            )
+            self.assertIn(
+                "https://docs.github.com/locus-duplicate",
+                verify_candidates._duplicate_urls(duplicate),
+            )
+            self.assertIn(
+                verify_candidates.SEARCH_COMPLETENESS_LIMITATION,
+                duplicate["method_limitations"],
+            )
+            self.assertEqual(
+                len(record["duplicate_search"]["queries"]) + len(search["queries"]),
+                len(duplicate["queries"]),
+            )
+
+    def test_record_requires_a_complete_locus_search_for_a_ready_status(self):
+        repository = "example-org/example-repo"
+        record = discovery_record(repository)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            discovery, assessment = self.write_record_inputs(root / "inputs", [record])
+            base_arguments = [
+                "record",
+                "--discovery", str(discovery),
+                "--assessment", str(assessment),
+                "--output", str(root / "candidates.json"),
+                "--manifest", str(root / "manifest.json"),
+            ]
+            code, _, stderr, _ = self.run_main(base_arguments)
+            self.assertEqual(2, code)
+            self.assertIn("locus_search: missing locus search input", stderr)
+
+            document = make_locus_search_document(
+                sha256_file(discovery),
+                [
+                    {
+                        "pattern_id": record["pattern_id"],
+                        "repository": repository,
+                        "locus": "src/other-file.js#Other",
+                    }
+                ],
+            )
+            other = root / "other.json"
+            other.write_text(json.dumps(document), encoding="utf-8")
+            code, _, stderr, _ = self.run_main(
+                base_arguments + ["--locus-search", str(other)]
+            )
+            self.assertEqual(2, code)
+            self.assertIn("locus_search: no search for this locus", stderr)
+
+            partial = make_locus_search_document(
+                sha256_file(discovery),
+                [
+                    {
+                        "pattern_id": record["pattern_id"],
+                        "repository": repository,
+                        "locus": POSITIVE_LOCUS,
+                    }
+                ],
+                complete=False,
+            )
+            partial_path = root / "partial.json"
+            partial_path.write_text(json.dumps(partial), encoding="utf-8")
+            code, _, stderr, _ = self.run_main(
+                base_arguments + ["--locus-search", str(partial_path)]
+            )
+            self.assertEqual(2, code)
+            self.assertIn("locus_search: incomplete locus search", stderr)
+
+            stale = make_locus_search_document(
+                "0" * 64,
+                [
+                    {
+                        "pattern_id": record["pattern_id"],
+                        "repository": repository,
+                        "locus": POSITIVE_LOCUS,
+                    }
+                ],
+            )
+            stale_path = root / "stale.json"
+            stale_path.write_text(json.dumps(stale), encoding="utf-8")
+            code, _, stderr, _ = self.run_main(
+                base_arguments + ["--locus-search", str(stale_path)]
+            )
+            self.assertEqual(2, code)
+            self.assertIn("locus-search.discovery_sha256", stderr)
+
+            untrusted = make_locus_search_document(
+                sha256_file(discovery),
+                [
+                    {
+                        "pattern_id": record["pattern_id"],
+                        "repository": repository,
+                        "locus": POSITIVE_LOCUS,
+                    }
+                ],
+            )
+            untrusted["searches"][0]["queries"][0]["q"] = (
+                'repo:example-org/other "x" is:issue is:open'
+            )
+            untrusted_path = root / "untrusted.json"
+            untrusted_path.write_text(json.dumps(untrusted), encoding="utf-8")
+            code, _, stderr, _ = self.run_main(
+                base_arguments + ["--locus-search", str(untrusted_path)]
+            )
+            self.assertEqual(2, code)
+            self.assertIn("untrusted query", stderr)
+
+    def test_ready_status_requires_a_locus(self):
+        record = discovery_record()
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.run_record(
+                Path(temporary), [record], [assessment_for(record, locus="")]
+            )[0]
+            self.assertEqual(2, result[0])
+            self.assertIn("locus: a ready status requires a locus", result[2])
+
+    def test_report_carries_locus_summary_and_policy_verdict(self):
+        record = discovery_record()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            markdown = root / "candidates.md"
+            result, _, _, _, _ = self.run_record(
+                root, [record], extra=["--markdown-output", str(markdown)]
+            )
+            self.assertEqual(0, result[0], result[2])
+            rendered = markdown.read_text(encoding="utf-8")
+            self.assertIn("## Candidates", rendered)
+            self.assertIn(POSITIVE_LOCUS, rendered)
+            self.assertIn("Fixture candidate summary", rendered)
+            self.assertIn("Fixture impact", rendered)
+            self.assertIn("### Policy verdict", rendered)
+            for key in verify_candidates.POLICY_CHECK_KEYS:
+                self.assertIn("| %s |" % key, rendered)
+            self.assertIn("not-reviewed", rendered)
+            self.assertIn("| contributing | true |", rendered)
+            self.assertIn("| cla_or_dco | false |", rendered)
+            self.assertIn("### Duplicate search", rendered)
+            self.assertIn(verify_candidates.SEARCH_COMPLETENESS_LIMITATION, rendered)
+            self.assertIn("No duplicate found.", rendered)
+            self.assertIn(record["head_sha"], rendered)
 
 
 if __name__ == "__main__":
